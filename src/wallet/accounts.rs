@@ -19,21 +19,37 @@ use zcash_protocol::consensus::{Parameters, NetworkType, NetworkUpgrade};
 pub(super) fn initialize(conn: &mut rusqlite::Connection) -> std::result::Result<(),String> {
     (|| -> std::result::Result<(),rusqlite::Error> {
         let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let definitions=[
+            ("ext_viewing_version","CREATE TABLE ext_viewing_version(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)"),
+            ("ext_viewing_accounts","CREATE TABLE ext_viewing_accounts(account_uuid BLOB PRIMARY KEY CHECK(length(account_uuid)=16),metadata TEXT NOT NULL)"),
+            ("ext_viewing_addresses","CREATE TABLE ext_viewing_addresses(account_uuid BLOB NOT NULL,address TEXT NOT NULL,diversifier TEXT NOT NULL,PRIMARY KEY(account_uuid,address))"),
+        ];
         let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ext_viewing_version')",[],|r|r.get(0))?;
         if !exists {
-            tx.execute_batch("CREATE TABLE ext_viewing_version(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL); INSERT INTO ext_viewing_version VALUES(1,1); CREATE TABLE ext_viewing_accounts(account_uuid BLOB PRIMARY KEY CHECK(length(account_uuid)=16),metadata TEXT NOT NULL); CREATE TABLE ext_viewing_addresses(account_uuid BLOB NOT NULL,address TEXT NOT NULL,diversifier TEXT NOT NULL,PRIMARY KEY(account_uuid,address));")?;
+            for (_,sql) in definitions {tx.execute_batch(sql)?;}
+            tx.execute("INSERT INTO ext_viewing_version VALUES(1,1)",[])?;
         }
-        let version:u32=tx.query_row("SELECT version FROM ext_viewing_version WHERE id=1",[],|r|r.get(0))?;
-        if version!=1 {return Err(rusqlite::Error::InvalidQuery);}
-        tx.query_row("SELECT count(*) FROM ext_viewing_accounts WHERE length(metadata)>160000",[],|r|r.get::<_,u32>(0))?;
-        tx.query_row("SELECT count(*) FROM ext_viewing_addresses WHERE length(diversifier)>27",[],|r|r.get::<_,u32>(0))?;
+        for (name,expected) in definitions {
+            let actual:String=tx.query_row("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",[name],|r|r.get(0))?;
+            if actual!=expected {return Err(rusqlite::Error::InvalidQuery);}
+        }
+        let objects:u32=tx.query_row("SELECT count(*) FROM sqlite_schema WHERE tbl_name GLOB 'ext_viewing_*' AND sql IS NOT NULL",[],|r|r.get(0))?;
+        let versions:u32=tx.query_row("SELECT count(*) FROM ext_viewing_version WHERE id=1 AND version=1",[],|r|r.get(0))?;
+        let bad_accounts:u32=tx.query_row("SELECT count(*) FROM ext_viewing_accounts WHERE length(CAST(metadata AS BLOB))>160000 OR NOT json_valid(metadata) OR length(account_uuid)!=16",[],|r|r.get(0))?;
+        let bad_addresses:u32=tx.query_row("SELECT count(*) FROM ext_viewing_addresses WHERE length(diversifier)>27 OR length(address)>1024 OR length(account_uuid)!=16",[],|r|r.get(0))?;
+        if objects!=3 || versions!=1 || bad_accounts!=0 || bad_addresses!=0 {return Err(rusqlite::Error::InvalidQuery);}
         tx.commit()
     })().map_err(|_|"VIEWING_SCHEMA_REQUIRED".into())
 }
 #[derive(Debug)]
 struct Failure(String);
 impl From<rusqlite::Error> for Failure { fn from(_: rusqlite::Error) -> Self { Self("STORAGE_ERROR".into()) } }
-impl From<SqliteClientError> for Failure { fn from(_: SqliteClientError) -> Self { Self("BACKEND_ERROR".into()) } }
+impl From<SqliteClientError> for Failure { fn from(e: SqliteClientError) -> Self { Self(match e {
+    SqliteClientError::ReachedGapLimit(..)=>"ADDRESS_GAP_LIMIT",
+    SqliteClientError::ChainHeightUnknown=>"SYNC_REQUIRED",
+    SqliteClientError::DiversifierIndexReuse(..)=>"ADDRESS_INDEX_REUSE",
+    _=>"BACKEND_ERROR",
+}.into()) } }
 impl From<&str> for Failure { fn from(s: &str) -> Self { Self(s.into()) } }
 type Result<T> = std::result::Result<T, Failure>;
 fn string<'a>(v: &'a Value, name: &str) -> Result<&'a str> { v.get(name).and_then(Value::as_str).ok_or("INVALID_ARGUMENT".into()) }
@@ -54,7 +70,7 @@ fn record(account: &impl Account<AccountId=AccountUuid>) -> Value {
         "viewOnly":account.purpose()==AccountPurpose::ViewOnly,"signerAttached":false})
 }
 fn stored_metadata(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: AccountUuid) -> Result<Value> {
-    let text:String=ext.query_row("SELECT metadata FROM ext_viewing_accounts WHERE account_uuid=?1 AND length(metadata)<=160000",[account.expose_uuid()],|r|r.get(0))?;
+    let text:String=ext.query_row("SELECT metadata FROM ext_viewing_accounts WHERE account_uuid=?1 AND length(CAST(metadata AS BLOB))<=160000",[account.expose_uuid()],|r|r.get(0))?;
     serde_json::from_str(&text).map_err(|_|"INVALID_ACCOUNT_METADATA".into())
 }
 fn stored_record(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: &impl Account<AccountId=AccountUuid>) -> Result<Value> {
@@ -292,6 +308,8 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                     }
                     if db.get_account_for_ufvk(&key)?.is_some() { return Err("ACCOUNT_COLLISION".into()); }
                     if db.get_block_hash(birthday.prior_chain_state().block_height())?.is_some_and(|h| h != birthday.prior_chain_state().block_hash()) { return Err("INCOHERENT_BIRTHDAY".into()); }
+                    let (default_address,default_index)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).map_err(|_|Failure::from("ADDRESS_UNAVAILABLE"))?;
+                    if default_address.has_transparent() && NonHardenedChildIndex::try_from(default_index).map_or(true,|i|i.index()>=GapLimits::default().external()) {return Err("ADDRESS_GAP_LIMIT".into());}
                     let account = db.import_account_ufvk(name,&key,&birthday,if view_only { AccountPurpose::ViewOnly } else { AccountPurpose::Spending { derivation:None } },None)?;
                     ext.execute("INSERT INTO ext_viewing_accounts(account_uuid,metadata) VALUES(?1,?2)",rusqlite::params![account.id().expose_uuid(),v.to_string()])?;
                     stored_record(ext,&account)

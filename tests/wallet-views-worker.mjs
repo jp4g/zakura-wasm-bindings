@@ -19,8 +19,16 @@ async function receive(request) {
     } else if (request.op==='close') {
       owner.close(request.generation,request.instance); port.postMessage({ok:true});
     } else {
-      const result=owner.call(request.generation,request.instance,request.op,request.args??{});
-      port.postMessage({ok:true,result});
+      const args=request.args??{}, controller=new AbortController();
+      if(request.abort){args.signal=controller.signal;if(request.abort==='before')controller.abort();}
+      const sync=backend.sync,write=backend.write;
+      if(request.abort==='duringSync')backend.sync=(...a)=>{const result=sync(...a);controller.abort();return result;};
+      if(request.fault==='commit'){let calls=0;backend.sync=(...a)=>{if(++calls===2)throw Object.assign(Error('synthetic commit sync fault'),{code:'EIO'});return sync(...a);};}
+      const cryptoObject=globalThis.crypto,random=cryptoObject.getRandomValues;
+      if(request.fault==='entropy')cryptoObject.getRandomValues=()=>{throw Error('synthetic entropy unavailable');};
+      if(request.fault==='quota')backend.write=()=>{throw Object.assign(Error('synthetic quota fault'),{code:'ENOSPC'});};
+      try {const result=owner.call(request.generation,request.instance,request.op,args);port.postMessage({ok:true,result});}
+      finally {backend.sync=sync;backend.write=write;cryptoObject.getRandomValues=random;}
     }
   } catch (e) { port.postMessage({ok:false,error:typeof e==='string'?e:e.code==='EBUSY'||e.name==='NoModificationAllowedError'?'STORAGE_BUSY':e.message,commit:e.commit}); }
 }

@@ -29,7 +29,7 @@ fn call(g: u32, op: &str, input: Value) -> std::result::Result<Value,String> {
 #[test]
 fn ufvk_import_retains_native_uuid_and_tracking_after_reopen() {
     let (path,g) = open();
-    let account = call(g,"account_import",fixture(7)).unwrap();
+    let account = call(g,"account_import",fixture(10)).unwrap();
     assert_eq!(account["name"],Value::Null);
     assert_eq!(account["birthdayHeight"],100);
     assert_eq!(account["viewOnly"],false);
@@ -139,7 +139,7 @@ fn failed_native_commit_rolls_back_without_consuming_address() {
 fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
     let root=std::env::var("WALLET_TEST_ROOT").unwrap();
     let p=crate::Document::parse(PARAMS).unwrap();
-    let input=fixture(7);
+    let input=fixture(10);
     let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
     let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
     let output=json!({"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
@@ -189,5 +189,48 @@ fn transparent_receive_addresses_persist_without_a_unified_fallback() {
     crate::wallet::storage_close(g).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     assert_eq!(call(g,"address_current",args).unwrap(),first["address"]);
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn extension_admission_rejects_oversize_metadata_and_changed_schema() {
+    let (path,g)=open();crate::wallet::storage_close(g).unwrap();
+    let mut conn=rusqlite::Connection::open(path).unwrap();
+    conn.execute("INSERT INTO ext_viewing_accounts VALUES(?1,?2)",rusqlite::params![uuid::Uuid::new_v4(),"x".repeat(160001)]).unwrap();
+    assert_eq!(super::initialize(&mut conn).unwrap_err(),"VIEWING_SCHEMA_REQUIRED");
+    conn.execute("DELETE FROM ext_viewing_accounts",[]).unwrap();
+    conn.execute_batch("DROP TABLE ext_viewing_accounts; CREATE TABLE ext_viewing_accounts(account_uuid BLOB,metadata TEXT);").unwrap();
+    assert_eq!(super::initialize(&mut conn).unwrap_err(),"VIEWING_SCHEMA_REQUIRED");
+}
+#[test]
+fn projected_import_retains_original_key_and_nonempty_distinct_pool_trees() {
+    use zcash_primitives::merkle_tree::{HashSer,write_commitment_tree};
+    let (path,g)=open();let mut input=fixture(19);
+    let raw=hex::decode(input["birthday"]["priorTreeState"].as_str().unwrap()).unwrap();
+    let mut state=TreeState::decode(raw.as_slice()).unwrap();state.height=100;
+    let mut sapling=state.sapling_tree().unwrap();let node=HashSer::read(&[0u8;32][..]).unwrap();sapling.append(node).unwrap();
+    let mut orchard=state.orchard_tree().unwrap();let node=HashSer::read(&[0u8;32][..]).unwrap();orchard.append(node).unwrap();
+    let mut ironwood=state.ironwood_tree().unwrap();
+    for _ in 0..2 {let node=HashSer::read(&[0u8;32][..]).unwrap();ironwood.append(node).unwrap();}
+    let mut buf=Vec::new();write_commitment_tree(&sapling,&mut buf).unwrap();state.sapling_tree=hex::encode(&buf);
+    buf.clear();write_commitment_tree(&orchard,&mut buf).unwrap();state.orchard_tree=hex::encode(&buf);
+    buf.clear();write_commitment_tree(&ironwood,&mut buf).unwrap();state.ironwood_tree=hex::encode(&buf);
+    input["birthday"]["firstScanHeight"]=json!(101);input["birthday"]["priorTreeState"]=json!(hex::encode(state.encode_to_vec()));
+    input["enabledPools"]=json!(["sapling"]);input["viewOnly"]=json!(true);input["name"]=json!("");
+    let account=call(g,"account_import",input.clone()).unwrap();assert_eq!(account["name"],"");
+    assert_eq!(call(g,"address_list",json!({"accountId":account["id"]})).unwrap()[0]["receiverTypes"],json!(["sapling"]));
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    let stored:String=conn.query_row("SELECT metadata FROM ext_viewing_accounts",[],|r|r.get(0)).unwrap();assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(),input);
+    let spend:u32=conn.query_row("SELECT has_spend_key FROM accounts",[],|r|r.get(0)).unwrap();assert_eq!(spend,0);
+    conn.close().unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn native_default_address_cannot_exceed_recovery_gap_during_import() {
+    let (_path,g)=open();
+    assert_eq!(call(g,"account_import",fixture(7)).unwrap_err(),"ADDRESS_GAP_LIMIT");
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
     crate::wallet::storage_close(g).unwrap();
 }

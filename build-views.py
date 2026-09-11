@@ -81,7 +81,7 @@ def main():
         shutil.copytree(source/'tests',bundle/'tests')
         shutil.copyfile(work/'views-fixture.json',bundle/'tests/views-fixture.json')
         for name in ['wallet-inspect','wallet-admission','wallet-node','wallet-crash','node','transaction','wallet-views-node']:
-            run(name,['node',f'tests/{name}.mjs',bundle])
+            run('test-'+name,['node',f'tests/{name}.mjs',bundle])
         receipt['features']=run('features',['cargo','tree','--offline','--locked','--features','wallet-storage','--target','wasm32-unknown-unknown','-e','features'])
         require(inventory(source)==inputs,'source mutation')
         require(verify_packages(metadata)==receipt['packages'],'dependency mutation')
