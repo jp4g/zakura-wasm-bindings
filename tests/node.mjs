@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 const out = process.argv[2];
@@ -6,8 +7,22 @@ const { initialize, consensusContext } = await import(pathToFileURL(`${out}/netw
 for (const value of [undefined, './bindings_bg.wasm', {}, new Uint8Array(0), new Uint8Array(1048577)]) {
   assert.throws(() => initialize(value), /invalid wasm bytes/);
 }
-await initialize(new Uint8Array(await readFile(`${out}/bindings_bg.wasm`)));
+const wasm = new Uint8Array(await readFile(`${out}/bindings_bg.wasm`));
 const bytes = new TextEncoder().encode('{"encoding":"regtest","Overwinter":10,"Sapling":20,"Blossom":30,"Heartwood":40,"Canopy":50,"Nu5":60,"Nu6":70,"Nu6_1":80,"Nu6_2":90,"Nu6_3":100}');
+for (const [name, input, invoke, message] of [
+  ['initialize', wasm, value => initialize(value), 'invalid wasm bytes'],
+  ['consensusContext', bytes, value => consensusContext('zcash-js-network/1', value, 20), 'invalid parameters'],
+]) {
+  await test(`${name} rejects prototype-spoofed shared bytes before initialization`, () => {
+    const backing = new SharedArrayBuffer(input.length);
+    const shared = new Uint8Array(backing);
+    shared.set(input);
+    Object.setPrototypeOf(backing, ArrayBuffer.prototype);
+    assert.equal(Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength').get.call(backing), input.length);
+    assert.throws(() => invoke(shared), { name: 'TypeError', message });
+  });
+}
+await initialize(wasm);
 assert.deepEqual(consensusContext('zcash-js-network/1', bytes, 20), { height: 20, branchId: 0x76b809bb });
 for (const height of [-1, 4294967296, 1.1, NaN, Infinity, '20', 20n, null, {}, -Infinity]) {
   assert.throws(() => consensusContext('zcash-js-network/1', bytes, height), /invalid height/);
@@ -19,4 +34,4 @@ assert.throws(() => consensusContext('unknown', bytes, 20), /unsupported network
 const detached = bytes.slice(); structuredClone(detached.buffer, { transfer: [detached.buffer] });
 assert.throws(() => consensusContext('zcash-js-network/1', detached, 20), /invalid parameters/);
 assert.throws(() => consensusContext('zcash-js-network/1', new Uint8Array(new SharedArrayBuffer(10)), 20), /invalid parameters/);
-console.log('Node generated binding: 25 checks passed');
+console.log('Node generated binding: 25 existing checks passed; 2 shared admission tests reported separately');
