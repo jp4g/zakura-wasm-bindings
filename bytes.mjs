@@ -17,4 +17,3 @@ export function copyBytes(value, limit, message) {
   }
   return new Uint8Array(value);
 }
-
