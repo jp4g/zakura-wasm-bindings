@@ -3,11 +3,27 @@ name = "zakura-network-bindings"
 version = "0.1.0"
 edition = "2024"
 publish = false
+build = "wallet-host/build.rs"
 
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[features]
+wallet-storage = ["dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt"]
+
+[[test]]
+name = "wallet_native"
+required-features = ["wallet-storage"]
+
 [dependencies]
+# RC4 SQLite migration calls PCZT into_effects, gated by io-finalizer.
+pczt = { package = "zakura-pczt", version = "=0.1.0-rc2", default-features = false, features = ["io-finalizer"], optional = true }
+rusqlite = { version = "=0.37.0", features = ["bundled", "array"], optional = true }
+zcash_client_sqlite = { package = "zakura-client-sqlite", version = "=0.1.0-rc4", default-features = false, features = ["orchard", "transparent-inputs"], optional = true }
+rand_core = { version = "=0.10.1", optional = true }
+getrandom = { version = "=0.4.3", features = ["sys_rng"], optional = true }
+uuid = { version = "=1.26.1", optional = true }
+
 zcash_protocol = { version = "=0.10.6", default-features = false }
 wasm-bindgen = "=0.2.128"
 zcash_primitives = { package = "zakura-primitives", version = "=1.0.0", default-features = false, features = ["std"] }
@@ -15,3 +31,7 @@ zcash_primitives = { package = "zakura-primitives", version = "=1.0.0", default-
 [dev-dependencies]
 serde_json = "=1.0.151"
 hex = "=0.4.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "=0.4.3", features = ["wasm_js"], optional = true }
+uuid = { version = "=1.26.1", features = ["js"], optional = true }

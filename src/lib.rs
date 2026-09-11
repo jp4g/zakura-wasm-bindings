@@ -75,3 +75,7 @@ pub fn consensus_branch(format: &str, bytes: &[u8], height: u32) -> Result<u32, 
     let document = Document::parse(bytes)?;
     Ok(u32::from(BranchId::for_height(&document, height.into())))
 }
+
+#[cfg(feature = "wallet-storage")]
+#[doc(hidden)]
+pub mod wallet;
