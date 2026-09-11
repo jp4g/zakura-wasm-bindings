@@ -4,10 +4,15 @@ No generator, backend, schema, or existing builder is rewritten. Output is priva
 """
 import hashlib, io, json, os
 from pathlib import Path
-import runpy, shutil, subprocess, sys, tarfile, tempfile, tomllib
+import shutil, subprocess, sys, tarfile, tempfile, tomllib
 REPO=Path(__file__).resolve().parent
 SCRATCH=Path('/home/jack/zakura-viewing-accounts-scratch')
-wallet=runpy.run_path(str(REPO/'build-wallet.py'))
+helper_path=REPO/'build-wallet.py'
+helper_bytes=helper_path.read_bytes()
+if helper_bytes!=subprocess.check_output(['git','-C',str(REPO),'show','HEAD:build-wallet.py']):
+    raise RuntimeError('commit-matching wallet helper required before execution')
+wallet={'__file__':str(helper_path),'__name__':'verified_wallet_build_helpers'}
+exec(compile(helper_bytes,str(helper_path),'exec'),wallet)
 sha,inventory,require=wallet['sha'],wallet['inventory'],wallet['require']
 
 def main():
@@ -21,6 +26,7 @@ def main():
     out.mkdir(parents=True)
     work=Path(tempfile.mkdtemp(prefix='views-build-',dir=SCRATCH)); source=work/'source'; source.mkdir()
     with tarfile.open(fileobj=io.BytesIO(git('archive',revision))) as archive: archive.extractall(source,filter='data')
+    require((source/'build-wallet.py').read_bytes()==helper_bytes,'helper snapshot mismatch')
     git_inputs=inventory(source)
     proposed=len(sys.argv)==3
     if proposed:
@@ -30,7 +36,12 @@ def main():
     env={k:v for k,v in os.environ.items() if k not in ['CC','CXX','AR','LD','RANLIB'] and not k.startswith(('CARGO_','RUST','CC_','AR_','CFLAGS','LIBSQLITE','WALLET_'))}
     sdk=wallet['SDK']
     env.update(CARGO_HOME=str(SCRATCH/'cargo'),CARGO_TARGET_DIR=str(work/'target'),CARGO_NET_OFFLINE='true',CARGO_BUILD_JOBS='2',RUSTUP_TOOLCHAIN='stable',TMPDIR=str(SCRATCH/'tmp'),RUSTFLAGS=f'--remap-path-prefix={source}=/source',WALLET_TEST_ROOT=str(work),WALLET_SDK=str(sdk),CC_wasm32_unknown_unknown=str(sdk/'bin/clang'),AR_wasm32_unknown_unknown=str(sdk/'bin/llvm-ar'))
-    receipt=dict(format='private-viewing-accounts-build/1',complete=False,revision=revision,tree=git('rev-parse',f'{revision}^{{tree}}').decode().strip(),sources=inputs,work=str(work),commands=[],inheritedStorageBase='dbd67c0b59f35f9661897b82d601a0287f71f719',inheritedPacketMetadataSha256='036e2b524796306137f478662a9bfc7567b3b042c088d33a1df59a4fc4f7f4ad4',acceptance='PENDING independent HIGH and actual Firefox',generator=dict(path=str(wallet['BINDGEN']),sha256=wallet['BINDGEN_SHA']))
+    receipt=dict(format='private-viewing-accounts-build/1',complete=False,revision=revision,tree=git('rev-parse',f'{revision}^{{tree}}').decode().strip(),sources=inputs,work=str(work),commands=[],inheritedStorageBase='dbd67c0b59f35f9661897b82d601a0287f71f719',inheritedStorageMetadataSha256='b6779aa79677dd3759628a3752e6997023d2b74184362fc2152038c2483d2041',acceptance='PENDING independent HIGH and actual Firefox',generator=dict(path=str(wallet['BINDGEN']),sha256=wallet['BINDGEN_SHA']))
+    inherited=Path('/home/jack/zakura-wallet-storage-scratch/build-04/build.json')
+    require(sha(inherited)==receipt['inheritedStorageMetadataSha256'],'inherited storage metadata mismatch')
+    receipt['inheritedStorageMetadataPath']=str(inherited)
+    receipt['inheritedStorageHolds']=['HIGH schema admission','HIGH Node hardlink ownership; parent integration pending']
+    receipt['helperSha256']=hashlib.sha256(helper_bytes).hexdigest()
     receipt['gitSources']=git_inputs
     receipt['proposedParentHook']=dict(appliedInScratch=proposed,sha256=sha(source/'tests/wallet-views-storage-hook.patch'),approval='PENDING parent integration; never production acceptance')
     def run(label,args):
@@ -58,6 +69,7 @@ def main():
             packages[f'{n}@{v}']=dict(checksum=digest,files=wallet['verify_package'](root,archive,digest))
         return packages
     try:
+        run('producer-gates',['python3','-O','tests/wallet-views-builder.py'])
         metadata=json.loads(run('metadata',['cargo','metadata','--offline','--locked','--features','wallet-storage','--format-version','1']))
         receipt['packages']=verify_packages(metadata)
         sqlite=next(p for p in metadata['packages'] if p['name']=='libsqlite3-sys')
