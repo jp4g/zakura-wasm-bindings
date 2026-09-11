@@ -43,6 +43,10 @@ env = {key: value for key, value in os.environ.items()
 env.update(CARGO_HOME=str(scratch / 'cargo'), CARGO_TARGET_DIR=str(work / 'target'),
            CARGO_BUILD_JOBS='2', CARGO_NET_OFFLINE='true', RUSTUP_TOOLCHAIN='stable',
            RUSTFLAGS=f'--remap-path-prefix={source}=/source', TMPDIR=str(scratch / 'tmp'))
+# Same installed C toolchain as the accepted Common 1.0.0 transaction qualification.
+sdk = Path('/home/jack/zcash-qualification-scratch/wasi-sdk-27.0-x86_64-linux/bin')
+env.update(CC_wasm32_unknown_unknown=str(sdk / 'clang'),
+           AR_wasm32_unknown_unknown=str(sdk / 'llvm-ar'))
 
 def run(*args):
     print('+', ' '.join(map(str, args)), flush=True)
@@ -56,16 +60,19 @@ run('cargo', 'build', '--offline', '--locked', '--release', '--target', 'wasm32-
 raw = work / 'target/wasm32-unknown-unknown/release/zakura_network_bindings.wasm'
 output.mkdir(parents=True)
 run(BINDGEN, '--target', 'web', '--out-dir', output, '--out-name', 'bindings', raw)
-shutil.copyfile(source / 'network.mjs', output / 'network.mjs')
+for name in ['network.mjs', 'bytes.mjs', 'transaction.mjs']:
+    shutil.copyfile(source / name, output / name)
 run('node', 'tests/node.mjs', output)
+run('node', 'tests/transaction.mjs', output)
 files = {p.name: {'sha256': sha(p.read_bytes()), 'bytes': p.stat().st_size}
          for p in sorted(output.iterdir())}
 graph = capture('cargo', 'tree', '--offline', '--locked', '--target', 'wasm32-unknown-unknown', '--edges', 'features').replace(str(source), '/source')
-metadata = dict(schema='zakura-network-build/1', revision=revision,
+metadata = dict(schema='zakura-bindings-build/1', revision=revision,
                 sourceTree=git('rev-parse', f'{revision}^{{tree}}').decode().strip(),
                 lockSha256=sha((source / 'Cargo.lock').read_bytes()),
                 rustc=capture('rustc', '-vV'), cargo=capture('cargo', '-V'),
                 wasmBindgen='0.2.128', wasmBindgenSha256=BINDGEN_SHA256,
+                cTools={name: sha((sdk / name).read_bytes()) for name in ['clang', 'llvm-ar']},
                 target='wasm32-unknown-unknown', profile='release',
                 rustflags='--remap-path-prefix=<source>=/source',
                 dependencyGraph=graph, dependencyGraphSha256=sha(graph.encode()),

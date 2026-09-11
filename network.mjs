@@ -1,25 +1,7 @@
 // Internal generated glue is only called after admission. Initialization must
 // receive already-verified WASM bytes; it is not host/runtime negotiation.
 import { initSync, consensus_branch } from './bindings.js';
-const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
-const byteLength = Object.getOwnPropertyDescriptor(typedArray, 'byteLength').get;
-const buffer = Object.getOwnPropertyDescriptor(typedArray, 'buffer').get;
-const tag = Object.getOwnPropertyDescriptor(typedArray, Symbol.toStringTag).get;
-const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
-
-function copyBytes(value, limit, message) {
-  if (!(value instanceof Uint8Array) || !ArrayBuffer.isView(value) ||
-      tag.call(value) !== 'Uint8Array' || !(buffer.call(value) instanceof ArrayBuffer) ||
-      byteLength.call(value) === 0 || byteLength.call(value) > limit) {
-    throw new TypeError(message);
-  }
-  try {
-    arrayBufferByteLength.call(buffer.call(value));
-  } catch {
-    throw new TypeError(message);
-  }
-  return new Uint8Array(value);
-}
+import { copyBytes } from './bytes.mjs';
 
 export function initialize(wasmBytes) {
   // This bounded binding accepts verified bytes only, never a URL/default fetch.
