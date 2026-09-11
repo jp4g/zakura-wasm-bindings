@@ -98,3 +98,46 @@ fn durable_addresses_use_exact_88_bit_indices_and_survive_reopen() {
     assert_eq!(call(g,"address_list",args).unwrap(),list);
     crate::wallet::storage_close(g).unwrap();
 }
+#[test]
+fn explicit_full_scan_uses_bound_genesis_without_current_tip_substitution() {
+    let (path,g)=open();
+    let mut input=fixture(11); input["birthday"]=json!("fullScan");
+    let account=call(g,"account_import",input).unwrap();
+    assert_eq!(account["birthdayHeight"],1);
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(path).unwrap();
+    let recover:Option<u32>=conn.query_row("SELECT recover_until_height FROM accounts",[],|r|r.get(0)).unwrap();
+    assert_eq!(recover,None);
+}
+#[test]
+fn failed_native_commit_rolls_back_without_consuming_address() {
+    let (path,g)=open();
+    let account=call(g,"account_import",fixture(12)).unwrap();
+    let args=json!({"accountId":account["id"]});
+    let before=call(g,"address_list",args.clone()).unwrap();
+    let reader=rusqlite::Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN; SELECT * FROM accounts;").unwrap();
+    assert!(call(g,"address_next",args.clone()).is_err());
+    assert_eq!(call(g,"address_list",args.clone()).unwrap(),before);
+    reader.execute_batch("ROLLBACK").unwrap();
+    let allocated=call(g,"address_next",args.clone()).unwrap();
+    let params=crate::Document::parse(PARAMS).unwrap();
+    let key=UnifiedFullViewingKey::decode(&params,fixture(12)["viewingKey"].as_str().unwrap()).unwrap();
+    let first_index=before[0]["index"].as_str().unwrap().parse::<u64>().unwrap()+1;
+    let expected=key.find_address(DiversifierIndex::from(first_index),UnifiedAddressRequest::AllAvailableKeys).unwrap();
+    assert_eq!(allocated["address"],expected.0.encode(&params));
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(path).unwrap();
+    assert_eq!(conn.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0)).unwrap(),"ok");
+}
+#[test]
+fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
+    let root=std::env::var("WALLET_TEST_ROOT").unwrap();
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let input=fixture(7);
+    let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
+    let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
+    let output=json!({"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
+        "uivk":key.to_unified_incoming_viewing_key().encode(&p),"defaultAddress":address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()});
+    std::fs::write(format!("{root}/views-fixture.json"),output.to_string()).unwrap();
+}

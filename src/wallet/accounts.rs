@@ -34,6 +34,10 @@ fn record(account: &impl Account<AccountId=AccountUuid>) -> Value {
         "viewOnly":account.purpose()==AccountPurpose::ViewOnly,"signerAttached":false})
 }
 fn birthday(v: &Value, parameters: &[u8], genesis: &[u8], p: &crate::Document) -> Result<AccountBirthday> {
+    if v.as_str()==Some("fullScan") {
+        let hash=zcash_primitives::block::BlockHash::try_from_slice(genesis).ok_or(Failure::from("NETWORK_MISMATCH"))?;
+        return Ok(AccountBirthday::from_parts(zcash_client_backend::data_api::chain::ChainState::empty(0u32.into(),hash),None));
+    }
     fields(v,&["parameters","genesis","firstScanHeight","priorTreeState","recoverUntilExclusive","source"])?;
     if string(v,"parameters")? != hex::encode(parameters) || string(v,"genesis")? != hex::encode(genesis) { return Err("NETWORK_MISMATCH".into()); }
     if !matches!(string(v,"source")?,"checkpoint"|"light-client") { return Err("INVALID_BIRTHDAY".into()); }
