@@ -1,6 +1,16 @@
 // Test driver only: production APIs and real FS/OPFS backend, synthetic fixtures.
 const node = typeof process !== 'undefined' && process.versions?.node;
-const { initializeViews } = await import('../views.mjs');
+function diagnose(phase, error) {
+  if (!node) self.postMessage({diagnostic:{phase,atMs:performance.now(),source:import.meta.url,...(error?{error:{name:error.name,message:error.message??String(error),stack:error.stack}}:{})}});
+}
+if (!node) {
+  self.addEventListener('error',e=>diagnose('worker-error',e.error??e));
+  self.addEventListener('unhandledrejection',e=>diagnose('unhandled-rejection',e.reason));
+  self.addEventListener('message',()=>diagnose('message-arrived'));
+}
+diagnose('module-import-start');
+const { initializeViews } = await import('../views.mjs').catch(e=>{diagnose('module-error',e);throw e;});
+diagnose('module-import-complete');
 let port, backend, wasm, options;
 if (node) {
   const { parentPort, workerData } = await import('node:worker_threads'); port=parentPort; options=workerData;
@@ -8,13 +18,20 @@ if (node) {
 } else { port={postMessage:v=>self.postMessage(v)}; }
 let owner, attempted=false;
 async function receive(request) {
+  diagnose(`receive:${request.op}`);
   try {
     if (request.op==='initialize') {
       if (attempted) throw Error('DOMAIN_USED'); attempted=true;
       const {acquire}=await import(node?'../wallet-host/node-fs.mjs':'../wallet-host/opfs.mjs');
+      diagnose('backend-acquire-start');
       backend=await acquire(node?options.root:request.root,{create:node?options.create:request.create});
+      diagnose('backend-acquire-complete');
+      diagnose('wasm-read-start');
       if (!node) {const r=await fetch(new URL('../bindings_bg.wasm',import.meta.url)); if(!r.ok)throw Error('WASM_UNAVAILABLE'); wasm=new Uint8Array(await r.arrayBuffer());}
+      diagnose('wasm-read-complete');
+      diagnose('initialize-views-start');
       owner=await initializeViews(wasm,backend,request.format,request.parameters,request.genesis);
+      diagnose('initialize-views-complete');
       port.postMessage({ok:true,generation:owner.generation,instance:owner.instance,secure:!node&&isSecureContext});
     } else if (request.op==='close') {
       owner.close(request.generation,request.instance); port.postMessage({ok:true});
@@ -30,6 +47,7 @@ async function receive(request) {
       try {const result=owner.call(request.generation,request.instance,request.op,args);port.postMessage({ok:true,result});}
       finally {backend.sync=sync;backend.write=write;cryptoObject.getRandomValues=random;}
     }
-  } catch (e) { port.postMessage({ok:false,error:typeof e==='string'?e:e.code==='EBUSY'||e.name==='NoModificationAllowedError'?'STORAGE_BUSY':e.message,commit:e.commit}); }
+  } catch (e) { diagnose(`operation-error:${request.op}`,e); port.postMessage({ok:false,error:typeof e==='string'?e:e.code==='EBUSY'||e.name==='NoModificationAllowedError'?'STORAGE_BUSY':e.message,commit:e.commit}); }
 }
 if(node)port.on('message',receive); else self.onmessage=e=>receive(e.data);
+diagnose('handler-installed');

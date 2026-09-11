@@ -1,5 +1,6 @@
 // Ordinary page-owned module; WebDriver only observes this test.
 const active = new Set(), results = [];
+const diagnostics = [], ownedScripts = [];
 const root = `private-views-test-${crypto.randomUUID()}`;
 const parameters = new TextEncoder().encode('{"encoding":"regtest","Overwinter":10,"Sapling":20,"Blossom":30,"Heartwood":40,"Canopy":50,"Nu5":60,"Nu6":70,"Nu6_1":80,"Nu6_2":90,"Nu6_3":100}');
 const initialize = create => ({ op: 'initialize', root, create, format: 'zcash-js-network/1', parameters, genesis: new Uint8Array(32).fill(3) });
@@ -13,9 +14,12 @@ async function observe(body) {
 function start() {
   const token = crypto.randomUUID();
   const script = `/tests/wallet-views-worker.mjs?owner=${token}`;
+  ownedScripts.push(script);
+  diagnostics.push({script,phase:'constructed',pageMs:performance.now()});
   const worker = new Worker(script, { type: 'module' }); active.add(worker);
   let error, instance;
-  worker.addEventListener('error', e => { error = Error(e.message); });
+  worker.addEventListener('error', e => { error = Error(`${e.message} (${e.filename}:${e.lineno}:${e.colno})`); diagnostics.push({script,phase:'page-worker-error',message:error.message,pageMs:performance.now()}); });
+  worker.addEventListener('message', e => { if(e.data.diagnostic)diagnostics.push({script,pageMs:performance.now(),...e.data.diagnostic}); });
   return {
     async call(request) {
       if (error) throw error;
@@ -24,9 +28,13 @@ function start() {
           clearTimeout(timer); worker.removeEventListener('message', message); worker.removeEventListener('error', failed);
           error ? reject(error) : resolve(value);
         };
-        const timer = setTimeout(() => { worker.terminate(); done(Error('worker deadline')); }, 30000);
-        const message = e => { if (e.data.ok && e.data.instance) instance = e.data.instance; done(null, e.data); };
+        const timer = setTimeout(() => { worker.terminate(); done(Error(`worker deadline: ${request.op}; last phase=${diagnostics.filter(d=>d.script===script).at(-1)?.phase}`)); }, 30000);
+        const message = e => {
+          if(e.data.diagnostic) { if(['module-error','worker-error','unhandled-rejection'].includes(e.data.diagnostic.phase))done(Error(JSON.stringify(e.data.diagnostic))); return; }
+          if (e.data.ok && e.data.instance) instance = e.data.instance; done(null, e.data);
+        };
         const failed = e => done(Error(e.message));
+        diagnostics.push({script,phase:`post:${request.op}`,pageMs:performance.now()});
         worker.addEventListener('message', message); worker.addEventListener('error', failed); worker.postMessage('instance' in request ? request : { ...request, instance });
       });
     },
@@ -78,5 +86,6 @@ try {
   outcome = { pass: true, root, results, userAgent: navigator.userAgent, actualQuotaExhaustion: false, uaEviction: false };
 } catch (e) { outcome = { pass: false, root, results, error: { name: e.name, message: e.message, stack: e.stack } }; }
 finally { for (const worker of active) worker.terminate(); }
+Object.assign(outcome,{diagnostics,ownedScripts});
 document.querySelector('#result').textContent = JSON.stringify(outcome, null, 2);
 await fetch('/result', { method: 'POST', body: JSON.stringify(outcome) });

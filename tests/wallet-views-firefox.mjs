@@ -3,9 +3,10 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { ownedLifecycle } from './wallet-views-lifecycle.mjs';
 const base = process.argv[2];
 if (!base) throw Error('bundle path required');
-const logs = '/home/jack/zakura-viewing-accounts-logs';
+const logs = '/home/jack/zakura-viewing-accounts-logs/browser-fix';
 const stamp = Date.now();
 const output = fs.openSync(`${logs}/firefox-driver-${stamp}.log`, 'wx');
 const port = Number(process.env.WALLET_DRIVER_PORT ?? 19486);
@@ -27,13 +28,11 @@ const server = http.createServer((req, res) => {
         const result = JSON.parse(body); res.end('recorded');
         // Allow queued realm destruction notifications to reach the host runner.
         await new Promise(r => setTimeout(r, 500));
-        const created = events.filter(e => e.method === 'script.realmCreated' && e.params.type === 'dedicated-worker').map(e => e.params.realm);
-        const destroyed = new Set(events.filter(e => e.method === 'script.realmDestroyed').map(e => e.params.realm));
-        const lifecycle = { created, destroyed: [...destroyed], allWorkersDestroyed: created.length > 0 && created.every(r => destroyed.has(r)) };
+        const lifecycle = ownedLifecycle(events, `http://127.0.0.1:${server.address().port}`, result.ownedScripts ?? []);
         result.lifecycle = lifecycle;
         result.pass = result.pass && lifecycle.allWorkersDestroyed;
         fs.writeFileSync(`${logs}/firefox-result-${stamp}.json`, JSON.stringify({ ...result, base, events }, null, 2));
-        console.log(JSON.stringify({ pass: result.pass, tests: result.results?.length, error: result.error, lifecycle, base }));
+        console.log(JSON.stringify({ pass: result.pass, tests: result.results?.length, error: result.error, diagnostics:result.diagnostics, lifecycle, base }));
         await finish(result.pass ? 0 : 1);
       } catch (e) { console.error(e); await finish(1); }
     }); return;
@@ -163,7 +162,7 @@ server.listen(0, '127.0.0.1', () => {
       if (message.id) { const done = pending.get(message.id); pending.delete(message.id); done?.(message); }
       else events.push(message);
     });
-    await bidi('session.subscribe', { events: ['script.realmCreated', 'script.realmDestroyed'] });
+    await bidi('session.subscribe', { events: ['script.realmCreated', 'script.realmDestroyed', 'log.entryAdded'] });
     checkStartup();
     await request(`/session/${session}/url`, 'POST', { url: `http://127.0.0.1:${server.address().port}/` });
   })().catch(e => { console.error(e); void finish(1); });
