@@ -28,7 +28,12 @@ export function start(bundle, root, create = false, extra = {}) {
         worker.postMessage('instance' in request ? request : { ...request, instance });
       });
     },
-    async destroy() { await worker.terminate(); if (!stopped) throw Error('destruction not observed'); },
+    async destroy() {
+      let timer;
+      try { await Promise.race([worker.terminate(), new Promise((_, reject) => { timer = setTimeout(() => reject(Error('worker destruction deadline')), 5000); })]); }
+      finally { clearTimeout(timer); }
+      if (!stopped) throw Error('destruction not observed');
+    },
   };
 }
 export const parameters = new TextEncoder().encode('{"encoding":"regtest","Overwinter":10,"Sapling":20,"Blossom":30,"Heartwood":40,"Canopy":50,"Nu5":60,"Nu6":70,"Nu6_1":80,"Nu6_2":90,"Nu6_3":100}');

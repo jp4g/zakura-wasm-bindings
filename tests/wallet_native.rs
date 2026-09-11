@@ -7,7 +7,8 @@ fn document() -> Vec<u8> {
 #[test]
 fn real_owned_wallet_migrates_closes_and_reopens() {
     let root = std::env::var("WALLET_TEST_ROOT").expect("fresh owned scratch required");
-    let path = format!("{root}/native-{}.db", std::process::id());
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let path = format!("{root}/native-{}-{stamp}.db", std::process::id());
     assert!(!std::path::Path::new(&path).exists());
     let params = document();
     let generation = wallet::initialize_path(&path, "zcash-js-network/1", &params, &[3; 32]).unwrap();
@@ -31,4 +32,11 @@ fn real_owned_wallet_migrates_closes_and_reopens() {
     db.execute("INSERT INTO schemer_migrations(id) VALUES(zeroblob(16))", []).unwrap();
     db.close().unwrap();
     assert_eq!(wallet::initialize_path(&path, "zcash-js-network/1", &params, &[3; 32]).unwrap_err(), "SCHEMA_MISMATCH");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("DELETE FROM schemer_migrations WHERE id=zeroblob(16)", []).unwrap();
+    db.execute_batch("PRAGMA user_version=999;").unwrap();
+    db.close().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(wallet::initialize_path(&path, "zcash-js-network/1", &params, &[3; 32]).unwrap_err(), "SCHEMA_MISMATCH");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "unknown schema unchanged");
 }

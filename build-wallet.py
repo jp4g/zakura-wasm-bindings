@@ -70,7 +70,10 @@ def main():
     def run(label, *args):
         log = output / f'{label}.log'
         with log.open('xb') as stream:
-            result = subprocess.run(args, cwd=source, env=env, stdout=stream, stderr=subprocess.STDOUT)
+            try:
+                result = subprocess.run(args, cwd=source, env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=120 if label.startswith(('wallet-', 'old-')) and str(args[0]) == 'node' else 900)
+            except subprocess.TimeoutExpired:
+                result = subprocess.CompletedProcess(args, 124)
         commands.append(dict(argv=list(map(str, args)), cwd=str(source), exit=result.returncode, log=log.name, sha256=sha(log)))
         print(json.dumps(commands[-1]), flush=True)
         if result.returncode:
@@ -133,6 +136,7 @@ def main():
         shutil.copytree(source / 'wallet-host', bundle / 'wallet-host', ignore=shutil.ignore_patterns('*.rs', '*.c', '*.md', '*.txt'))
         shutil.copytree(source / 'tests', bundle / 'tests')
         run('wallet-inspect', 'node', 'tests/wallet-inspect.mjs', bundle)
+        run('wallet-admission', 'node', 'tests/wallet-admission.mjs', bundle)
         run('wallet-crash', 'node', 'tests/wallet-crash.mjs', bundle)
         run('wallet-node', 'node', 'tests/wallet-node.mjs', bundle)
         receipt['featureGraph'] = run('features', 'cargo', 'tree', '--offline', '--locked', '--features', 'wallet-storage', '--target', 'wasm32-unknown-unknown', '-e', 'features')

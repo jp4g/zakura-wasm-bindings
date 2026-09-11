@@ -50,18 +50,19 @@ struct Domain { active: Option<Active>, generation: u32, failed: Option<Rc<RefCe
 // ponytail: one active database per worker; no registry until multiple DBs are required.
 thread_local! { static DOMAIN: RefCell<Domain> = RefCell::new(Domain::default()); }
 
-fn bind_network(conn: &mut Connection, bytes: &[u8], genesis: &[u8]) -> Result<(), String> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|_| "STORAGE_BUSY")?;
-    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ext_wallet_storage')", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
+fn validate_schema(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Result<bool, String> {
+    let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
+    if version != 0 && version != 8 { return Err("SCHEMA_MISMATCH".into()); }
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ext_wallet_storage' AND type='table')", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
     if exists {
-        let stored: (u32, Vec<u8>, Vec<u8>) = tx.query_row("SELECT version, parameters, genesis FROM ext_wallet_storage WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|_| "SCHEMA_MISMATCH")?;
+        let stored: (u32, Vec<u8>, Vec<u8>) = conn.query_row("SELECT version, parameters, genesis FROM ext_wallet_storage WHERE id=1 AND length(parameters)<=256 AND length(genesis)=32", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|_| "SCHEMA_MISMATCH")?;
         if stored.0 != 1 { return Err("SCHEMA_MISMATCH".into()); }
         if stored.1 != bytes || stored.2 != genesis { return Err("NETWORK_MISMATCH".into()); }
-        let migration_table: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schemer_migrations')", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
+        let migration_table: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schemer_migrations' AND type='table')", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
         if migration_table {
             // Schemerz does not reject unknown applied IDs itself. Pin the exact
             // published RC4 inventory, including resumable migration prefixes.
-            let mut statement = tx.prepare("SELECT id FROM schemer_migrations LIMIT 67").map_err(|_| "SCHEMA_MISMATCH")?;
+            let mut statement = conn.prepare("SELECT CASE WHEN length(id)=16 THEN id ELSE NULL END FROM schemer_migrations LIMIT 67").map_err(|_| "SCHEMA_MISMATCH")?;
             let rows = statement.query_map([], |r| r.get::<_, Vec<u8>>(0)).map_err(|_| "SCHEMA_MISMATCH")?;
             for (count, row) in rows.enumerate() {
                 let id = row.map_err(|_| "SCHEMA_MISMATCH")?;
@@ -72,8 +73,15 @@ fn bind_network(conn: &mut Connection, bytes: &[u8], genesis: &[u8]) -> Result<(
             }
         }
     } else {
-        let objects: u32 = tx.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
+        let objects: u32 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
         if objects != 0 { return Err("SCHEMA_MISMATCH".into()); }
+    }
+    Ok(exists)
+}
+
+fn bind_network(conn: &mut Connection, bytes: &[u8], genesis: &[u8]) -> Result<(), String> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|_| "STORAGE_BUSY")?;
+    if !validate_schema(&tx, bytes, genesis)? {
         // Independent host bootstrap migration, committed before backend migrations:
         // an interrupted empty-wallet migration remains bound to the same network.
         tx.execute_batch("CREATE TABLE ext_wallet_storage(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, parameters BLOB NOT NULL, genesis BLOB NOT NULL CHECK(length(genesis)=32));").map_err(|_| "STORAGE_INIT_FAILED")?;
@@ -101,6 +109,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
         let mut owned = OwnedConnection { connection: Some(conn), receipt: receipt.clone() };
         let prepared = (|| -> Result<(), String> {
             let conn = std::borrow::BorrowMut::<Connection>::borrow_mut(&mut owned);
+            validate_schema(conn, bytes, genesis)?;
             conn.execute_batch("PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;").map_err(|_| "STORAGE_POLICY_FAILED")?;
             let journal: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;
             let synchronous: u32 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;

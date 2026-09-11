@@ -15,7 +15,12 @@ try {
   });
   assert.equal(checkpoint.checkpoint, 'migration-real-write');
 } finally {
-  const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
+  if (child.exitCode === null && child.signalCode === null) {
+    let timer;
+    const exited = once(child, 'exit'); child.kill('SIGKILL');
+    try { await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(Error('process destruction deadline')), 5000); })]); }
+    finally { clearTimeout(timer); }
+  }
 }
 const header = new Uint8Array(8), fd = fs.openSync(`${root}/wallet.db-journal`, 'r');
 fs.readSync(fd, header, 0, 8, 0); fs.closeSync(fd);

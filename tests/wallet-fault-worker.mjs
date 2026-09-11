@@ -23,7 +23,8 @@ parentPort.on('message', async request => {
         backend.write = (fd, bytes, at) => {
           const written = write(fd, bytes, at);
           if (paths.get(fd) === 'wallet.db' && ++count >= 10) {
-            const journal = fs.readFileSync(`${workerData.root}/wallet.db-journal`).subarray(0, 8);
+            const journal = Buffer.alloc(8), journalFd = fs.openSync(`${workerData.root}/wallet.db-journal`, 'r');
+            try { fs.readSync(journalFd, journal, 0, 8, 0); } finally { fs.closeSync(journalFd); }
             if (journal.equals(Buffer.from([0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]))) {
               parentPort.postMessage({ checkpoint: 'migration-real-write', count });
               for (;;) { /* killed by the external process/worker deadline */ }
