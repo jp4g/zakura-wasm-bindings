@@ -7,10 +7,15 @@ const messages=[], listeners=new Map();
 const context=vm.createContext({performance, self:{postMessage:v=>messages.push(v),addEventListener:(kind,fn)=>listeners.set(kind,fn)}});
 const module=new vm.SourceTextModule(source,{context,initializeImportMeta:meta=>{meta.url='file:///synthetic-test/wallet-views-worker.mjs';},importModuleDynamically:()=>{throw Error('synthetic module load failure');}});
 await module.link(()=>{throw Error('unexpected static import');});
-await assert.rejects(module.evaluate(),/synthetic module load failure/);
+await module.evaluate();
+{
+  context.self.onmessage({data:{op:'initialize',id:7}});
+  await new Promise(r=>setImmediate(r));
+}
+assert.equal(messages.find(v=>v.id===7)?.error,'synthetic module load failure');
 assert.ok(messages.some(v=>v.diagnostic?.phase==='module-error'&&v.diagnostic.error.message==='synthetic module load failure'),'module loading errors must reach the owning page before its deadline');
-assert.ok(messages.every(v=>v.diagnostic.source==='file:///synthetic-test/wallet-views-worker.mjs'));
-console.log('PASS: worker module-load failure is attributed and reported before handler installation');
+assert.ok(messages.filter(v=>v.diagnostic).every(v=>v.diagnostic.source==='file:///synthetic-test/wallet-views-worker.mjs'));
+console.log('PASS: worker module-load failure is attributed and reported to its caller');
 const {ownedLifecycle}=await import('./wallet-views-lifecycle.mjs');
 const recorded=JSON.parse(fs.readFileSync(new URL('./wallet-views-firefox-failure.json',import.meta.url)));
 const worker=recorded.events.find(e=>e.params.type==='dedicated-worker').params;

@@ -17,28 +17,34 @@ function start() {
   ownedScripts.push(script);
   diagnostics.push({script,phase:'constructed',pageMs:performance.now()});
   const worker = new Worker(script, { type: 'module' }); active.add(worker);
-  let error, instance;
+  let error, instance, sequence=0, cancelPending;
   worker.addEventListener('error', e => { error = Error(`${e.message} (${e.filename}:${e.lineno}:${e.colno})`); diagnostics.push({script,phase:'page-worker-error',message:error.message,pageMs:performance.now()}); });
   worker.addEventListener('message', e => { if(e.data.diagnostic)diagnostics.push({script,pageMs:performance.now(),...e.data.diagnostic}); });
   return {
     async call(request) {
       if (error) throw error;
+      if(cancelPending)throw Error('worker request already pending');
+      const id=++sequence;
       return new Promise((resolve, reject) => {
         const done = (error, value) => {
+          cancelPending=undefined;
           clearTimeout(timer); worker.removeEventListener('message', message); worker.removeEventListener('error', failed);
           error ? reject(error) : resolve(value);
         };
-        const timer = setTimeout(() => { worker.terminate(); done(Error(`worker deadline: ${request.op}; last phase=${diagnostics.filter(d=>d.script===script).at(-1)?.phase}`)); }, 30000);
+        const timer = setTimeout(() => { error=Error(`worker deadline: ${request.op}; last phase=${diagnostics.filter(d=>d.script===script).at(-1)?.phase}`); worker.terminate(); done(error); }, 30000);
         const message = e => {
           if(e.data.diagnostic) { if(['module-error','worker-error','unhandled-rejection'].includes(e.data.diagnostic.phase))done(Error(JSON.stringify(e.data.diagnostic))); return; }
+          if(e.data.id!==id)return;
           if (e.data.ok && e.data.instance) instance = e.data.instance; done(null, e.data);
         };
         const failed = e => done(Error(e.message));
-        diagnostics.push({script,phase:`post:${request.op}`,pageMs:performance.now()});
-        worker.addEventListener('message', message); worker.addEventListener('error', failed); worker.postMessage('instance' in request ? request : { ...request, instance });
+        cancelPending=()=>done(Error('worker terminated during request'));
+        diagnostics.push({script,id,phase:`post:${request.op}`,pageMs:performance.now()});
+        worker.addEventListener('message', message); worker.addEventListener('error', failed); worker.postMessage({ ...('instance' in request ? request : { ...request, instance }), id });
       });
     },
     async destroy() {
+      error=Error('worker terminated');cancelPending?.();
       const creation = await observe({ script, state: 'created' });
       worker.terminate();
       const destruction = await observe({ script, state: 'destroyed', realm: creation.realm });
