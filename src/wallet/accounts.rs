@@ -2,10 +2,12 @@
 use wasm_bindgen::prelude::*;
 use prost::Message;
 use serde_json::{json, Value};
-use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, WalletRead, WalletWrite}, proto::service::TreeState};
+use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, AddressSource, WalletRead, WalletWrite}, proto::service::TreeState};
 use zcash_client_sqlite::{AccountUuid, error::SqliteClientError};
-use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
+use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey, UnifiedAddressRequest, ReceiverRequirement};
 use zcash_address::unified::{Ufvk, Fvk, Encoding, Container};
+use zcash_keys::address::{Address, UnifiedAddress};
+use zip32::DiversifierIndex;
 use zcash_protocol::consensus::{Parameters, NetworkType, NetworkUpgrade};
 
 #[derive(Debug)]
@@ -65,6 +67,49 @@ fn birthday(v: &Value, parameters: &[u8], genesis: &[u8], p: &crate::Document) -
     if first==1 && decoded.prior_chain_state().block_hash().0.as_slice() != genesis { return Err("NETWORK_MISMATCH".into()); }
     Ok(decoded)
 }
+fn request(v: &Value) -> Result<UnifiedAddressRequest> {
+    let Some(r) = v.get("request") else { return Ok(UnifiedAddressRequest::AllAvailableKeys); };
+    fields(r,&["format","transparent","sapling","ironwood"])?;
+    if string(r,"format")? == "transparent" { return Err("UNSUPPORTED_ADDRESS_FORMAT".into()); }
+    if string(r,"format")? != "unified" { return Err("INVALID_ARGUMENT".into()); }
+    if r.as_object().unwrap().len()==1 { return Ok(UnifiedAddressRequest::AllAvailableKeys); }
+    let requirement = |name| -> Result<ReceiverRequirement> { match string(r,name)? {
+        "require"=>Ok(ReceiverRequirement::Require),"omit"=>Ok(ReceiverRequirement::Omit),
+        "allow" if name=="transparent"=>Ok(ReceiverRequirement::Allow),_=>Err("INVALID_ARGUMENT".into())
+    }};
+    UnifiedAddressRequest::custom(requirement("ironwood")?,requirement("sapling")?,requirement("transparent")?).map_err(|_| "INVALID_ARGUMENT".into())
+}
+fn index(v: &Value) -> Result<DiversifierIndex> {
+    let s=string(v,"index")?;
+    let n=s.parse::<u128>().map_err(|_| Failure::from("INVALID_ARGUMENT"))?;
+    if n >= (1u128<<88) || n.to_string()!=s { return Err("INVALID_ARGUMENT".into()); }
+    Ok(DiversifierIndex::from(<[u8;11]>::try_from(&n.to_le_bytes()[..11]).unwrap()))
+}
+fn address_record(p: &crate::Document, key: &UnifiedIncomingViewingKey, ua: &UnifiedAddress, j: DiversifierIndex) -> Result<Value> {
+    let req = UnifiedAddressRequest::custom(
+        if ua.has_orchard() {ReceiverRequirement::Require} else {ReceiverRequirement::Omit},
+        if ua.has_sapling() {ReceiverRequirement::Require} else {ReceiverRequirement::Omit},
+        if ua.has_transparent() {ReceiverRequirement::Require} else {ReceiverRequirement::Omit},
+    ).map_err(|_| Failure::from("INVALID_STORED_ADDRESS"))?;
+    let expected = key.address(j,req).map_err(|_| Failure::from("INVALID_STORED_ADDRESS"))?;
+    if &expected != ua || !ua.unknown().is_empty() { return Err("INVALID_STORED_ADDRESS".into()); }
+    let mut receivers=Vec::new(); let mut pools=Vec::new();
+    if ua.has_transparent() { receivers.push("p2pkh"); pools.push("transparent"); }
+    if ua.has_sapling() { receivers.push("sapling"); pools.push("sapling"); }
+    if ua.has_orchard() { receivers.push("orchard"); pools.push("ironwood"); }
+    let mut bytes=[0u8;16]; bytes[..11].copy_from_slice(j.as_bytes());
+    Ok(json!({"address":ua.encode(p),"receiverTypes":receivers,"intendedPools":pools,"index":u128::from_le_bytes(bytes).to_string()}))
+}
+fn address_list<W: WalletRead<AccountId=AccountUuid,Error=SqliteClientError>>(db: &W, p: &crate::Document, account: AccountUuid) -> Result<Vec<Value>> {
+    let key=db.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?.uivk();
+    db.list_addresses(account)?.into_iter().map(|info| {
+        let AddressSource::Derived { diversifier_index, transparent_key_scope }=info.source();
+        match info.address() {
+            Address::Unified(ua) if transparent_key_scope.is_none()=>address_record(p,&key,ua,diversifier_index),
+            _=>Err("UNSUPPORTED_STORED_ADDRESS".into()),
+        }
+    }).collect()
+}
 fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
     super::DOMAIN.with(|domain| {
         let mut domain = domain.try_borrow_mut().map_err(|_| Failure::from("STORAGE_BUSY"))?;
@@ -79,6 +124,34 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
             "account_get" => {
                 fields(v,&["accountId"])?;
                 Ok(active.wallet.get_account(id(v)?)?.map(|a| record(&a)).unwrap_or(Value::Null))
+            }
+            "address_current" | "address_list" | "address_at" | "address_next" => {
+                fields(v,match operation { "address_list"=>&["accountId"][..],"address_at"=>&["accountId","request","index"][..],_=>&["accountId","request"][..] })?;
+                let account=id(v)?;
+                let p=active.wallet.params().clone();
+                let key=active.wallet.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?.uivk();
+                if operation=="address_list" { return address_list(&active.wallet,&p,account).map(Value::Array); }
+                let req=request(v)?;
+                key.receiver_requirements(req).map_err(|_| Failure::from("RECEIVER_UNAVAILABLE"))?;
+                if operation=="address_current" {
+                    let current=active.wallet.get_last_generated_address_matching(account,req)?;
+                    let verified=address_list(&active.wallet,&p,account)?;
+                    return match current {
+                        None=>Ok(Value::Null),
+                        Some(ua)=>{ let encoded=ua.encode(&p); if verified.iter().any(|a|a["address"]==encoded) {Ok(json!(encoded))} else {Err("INVALID_STORED_ADDRESS".into())} }
+                    };
+                }
+                let j=if operation=="address_at" { Some(index(v)?) } else { None };
+                active.wallet.transactionally(|db| -> Result<Value> {
+                    let (ua,j)=if let Some(j)=j {
+                        (db.get_address_for_index(account,j,req)?.ok_or(Failure::from("ADDRESS_UNAVAILABLE"))?,j)
+                    } else {
+                        db.get_next_available_address(account,req)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?
+                    };
+                    let record=address_record(&p,&key,&ua,j)?;
+                    if !address_list(db,&p,account)?.contains(&record) { return Err("INVALID_STORED_ADDRESS".into()); }
+                    Ok(record)
+                })
             }
             "account_import" => {
                 fields(v,&["viewingKey","birthday","name","viewOnly","enabledPools"])?;

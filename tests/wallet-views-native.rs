@@ -71,3 +71,30 @@ fn import_enforces_authority_scope_and_rejects_overlapping_upgrades() {
     assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
     crate::wallet::storage_close(g).unwrap();
 }
+#[test]
+fn durable_addresses_use_exact_88_bit_indices_and_survive_reopen() {
+    let (path,g)=open();
+    let account=call(g,"account_import",fixture(10)).unwrap();
+    let args=json!({"accountId":account["id"]});
+    let before=call(g,"address_list",args.clone()).unwrap();
+    let current=call(g,"address_current",args.clone()).unwrap();
+    assert_eq!(call(g,"address_list",args.clone()).unwrap(),before,"current never allocates");
+    assert!(current.is_string(),"native import exposes default address");
+    let next=call(g,"address_next",args.clone()).unwrap();
+    assert_eq!(next["receiverTypes"],json!(["p2pkh","sapling","orchard"]));
+    assert_eq!(next["intendedPools"],json!(["transparent","sapling","ironwood"]));
+    let mut exact=args.clone();
+    exact["request"]=json!({"format":"unified","transparent":"omit","sapling":"omit","ironwood":"require"});
+    exact["index"]=json!("309485009821345068724781055");
+    let high=call(g,"address_at",exact.clone()).unwrap();
+    assert_eq!(high["index"],exact["index"]);
+    assert_eq!(high["receiverTypes"],json!(["orchard"]));
+    let list=call(g,"address_list",args.clone()).unwrap();
+    exact["index"]=json!("309485009821345068724781056");
+    assert_eq!(call(g,"address_at",exact).unwrap_err(),"INVALID_ARGUMENT");
+    assert_eq!(call(g,"address_list",args.clone()).unwrap(),list);
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(g,"address_list",args).unwrap(),list);
+    crate::wallet::storage_close(g).unwrap();
+}
