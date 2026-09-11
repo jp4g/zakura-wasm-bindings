@@ -8,7 +8,7 @@ const { createLightwire } = await import(pathToFileURL(`${dir}/codec.mjs`));
 const bytes = new Uint8Array(await readFile(`${dir}/wasm/zakura_lightwire_bg.wasm`));
 const codec = createLightwire(bytes);
 test('real WASM balance codec', () => {
- assert.deepEqual(codec.encodeRequest('GetTaddressBalance', {addresses:['a','bc']}), Uint8Array.of(10,1,97,10,2,98,99));
+ assert.deepEqual(codec.encodeRequest('GetTaddressBalance', JSON.stringify({addresses:['a','bc']})), Uint8Array.of(10,1,97,10,2,98,99));
  assert.deepEqual(codec.decodeResponse('GetTaddressBalance', Uint8Array.of(8,127)), {value_zat:'127'});
 });
 test('facade rejects records with accessors without executing them', () => {
@@ -29,7 +29,7 @@ test('independent protobuf vectors run through real WASM', async () => {
  const vectors=JSON.parse(await readFile(new URL('./golden.json',import.meta.url)));
  for(const f of vectors){
    const wire=Uint8Array.from(Buffer.from(f.hex,'hex'));
-   if(f.direction==='request') assert.deepEqual(codec.encodeRequest(f.method,f.dto),wire,f.method);
+   if(f.direction==='request') assert.deepEqual(codec.encodeRequest(f.method,JSON.stringify(f.dto)),wire,f.method);
    else assert.deepEqual((f.direction==='item'?codec.decodeItem:codec.decodeResponse)(f.method,wire),f.dto,f.method);
  }
 });
@@ -38,13 +38,13 @@ test('all malformed and nested amplification cases fail without poisoning WASM',
  for(const wire of bad) assert.throws(()=>codec.decodeResponse('GetLatestBlock',Uint8Array.from(wire)));
  assert.throws(()=>codec.decodeResponse('GetLightdInfo',Uint8Array.of(10,1,255)));
  assert.throws(()=>codec.decodeItem('GetBlockRange',Uint8Array.from(Array(8193).fill([58,0]).flat())));
- assert.throws(()=>codec.encodeRequest('GetTaddressBalance',{addresses:Array(8193).fill('a')}));
+ assert.throws(()=>codec.encodeRequest('GetTaddressBalance',JSON.stringify({addresses:Array(8193).fill('a')})));
  assert.throws(()=>codec.decodeResponse('GetLatestBlock',new Uint8Array(4*1024*1024+1)));
- assert.throws(()=>codec.encodeRequest('SendTransaction',{data:'aa'.repeat(1024*1024+1)}));
+ assert.throws(()=>codec.encodeRequest('SendTransaction',JSON.stringify({data:'aa'.repeat(1024*1024+1)})));
  const cyclic={};cyclic.block=cyclic;assert.throws(()=>codec.encodeRequest('GetTransaction',cyclic));
  const sparse=Array(1);assert.throws(()=>codec.encodeRequest('GetTaddressBalance',{addresses:sparse}));
  const named=[];named.extra=1;assert.throws(()=>codec.encodeRequest('GetTaddressBalance',{addresses:named}));
- assert.throws(()=>codec.encodeRequest('GetTaddressBalance',{addresses:['\ud800']}));
+ assert.throws(()=>codec.encodeRequest('GetTaddressBalance',JSON.stringify({addresses:['\ud800']})));
  assert.throws(()=>codec.encodeRequest('GetTreeState',{[Symbol('x')]:1}));
  assert.throws(()=>codec.encodeRequest('GetTreeState',Object.defineProperty({},'height',{value:'1'})));
  assert.deepEqual(codec.decodeResponse('GetTaddressBalance',Uint8Array.of(8,1)),{value_zat:'1'});

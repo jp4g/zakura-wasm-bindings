@@ -122,6 +122,7 @@ try {
 } catch (error) { window.lightwireResult = {ok:false,name:error?.name,message:error?.message,error:String(error),stack:error?.stack}; }
 </script>`],
       ['/runtime.mjs',readFileSync(new URL('./runtime.mjs',import.meta.url))],
+      ['/boundary.mjs',readFileSync(new URL('./boundary.mjs',import.meta.url))],
       ['/golden.json',readFileSync(new URL('./golden.json',import.meta.url))],
       ['/malformed.json',readFileSync(new URL('./malformed.json',import.meta.url))],
     ]);
