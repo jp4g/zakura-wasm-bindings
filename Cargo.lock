@@ -2232,7 +2232,6 @@ dependencies = [
  "serde_json",
  "uuid",
  "wasm-bindgen",
- "zakura-client-backend",
  "zakura-client-sqlite",
  "zakura-pczt",
  "zakura-primitives",

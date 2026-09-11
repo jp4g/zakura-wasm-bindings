@@ -110,6 +110,13 @@ def main():
         env['WALLET_SQLITE'] = str(Path(sqlite['manifest_path']).parent / 'sqlite3')
         receipt['toolchain'] = {name: run(name, *args).strip() for name, args in {
             'rustc': ['rustc', '-vV'], 'cargo': ['cargo', '-V'], 'node': ['node', '--version']}.items()}
+        sysroot = Path(run('rust-sysroot', 'rustc', '--print', 'sysroot').strip())
+        compiler_files = [sysroot / 'bin/rustc', sysroot / 'bin/cargo']
+        compiler_files += list((sysroot / 'lib').glob('librustc_driver-*'))
+        compiler_files += list((sysroot / 'lib/rustlib').glob('*/bin/rust-lld'))
+        receipt['rustCompilerFiles'] = {str(p): sha(p) for p in compiler_files}
+        receipt['rustTargetLibraries'] = inventory(sysroot / 'lib/rustlib/wasm32-unknown-unknown/lib')
+        receipt['runtimeFlockSha256'] = sha(Path('/usr/bin/flock'))
         receipt['sdk'] = dict(path=str(SDK), files=inventory(SDK))
         receipt['tools'] = {name: dict(path=shutil.which(name), sha256=sha(Path(shutil.which(name)).resolve())) for name in ['rustc', 'cargo', 'node', 'cc']}
         run('builder-gates', 'python3', '-O', 'tests/wallet-builder.py')

@@ -9,14 +9,13 @@ build = "wallet-host/build.rs"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-wallet-storage = ["dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt", "dep:zcash_client_backend"]
+wallet-storage = ["dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt"]
 
 [[test]]
 name = "wallet_native"
 required-features = ["wallet-storage"]
 
 [dependencies]
-zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc4", default-features = false, features = ["orchard", "transparent-inputs"], optional = true }
 # RC4 SQLite migration calls PCZT into_effects, gated by io-finalizer.
 pczt = { package = "zakura-pczt", version = "=0.1.0-rc2", default-features = false, features = ["io-finalizer"], optional = true }
 rusqlite = { version = "=0.37.0", features = ["bundled", "array"], optional = true }

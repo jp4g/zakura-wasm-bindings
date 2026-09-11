@@ -3,7 +3,6 @@ use std::{cell::RefCell, rc::Rc};
 use rusqlite::{Connection, OpenFlags};
 use wasm_bindgen::prelude::*;
 use zcash_client_sqlite::{WalletDb, util::Clock, wallet::init::WalletMigrator};
-use zcash_client_backend::data_api::WalletRead;
 
 #[derive(Clone)]
 struct HostClock;
@@ -125,6 +124,12 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
             // The backend's metadata initializer uses expect. Establish it via a
             // fallible operation first, so ordinary setup I/O errors are returned.
             conn.execute_batch("CREATE TABLE IF NOT EXISTS schemer_migrations(id blob PRIMARY KEY)").map_err(|_| "STORAGE_INIT_FAILED")?;
+            {
+                let mut migrating = WalletDb::from_connection(&mut *conn, document.clone(), HostClock, rand_core::UnwrapErr(getrandom::SysRng));
+                WalletMigrator::new().init_or_migrate(&mut migrating).map_err(|_| "MIGRATION_REQUIRED")?;
+            }
+            // Bounded real schema read; never enumerate the wallet's accounts.
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM accounts LIMIT 1)", [], |r| r.get::<_, bool>(0)).map_err(|_| "SCHEMA_MISMATCH")?;
             Ok(())
         })();
         if let Err(error) = prepared {
@@ -132,12 +137,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
             if receipt.borrow().error.is_some() { domain.failed = Some(receipt); return Err("STORAGE_CLOSE_FAILED".into()); }
             return Err(error);
         }
-        let mut wallet = WalletDb::from_connection(owned, document, HostClock, rand_core::UnwrapErr(getrandom::SysRng));
-        if WalletMigrator::new().init_or_migrate(&mut wallet).is_err() || wallet.get_account_ids().is_err() {
-            drop(wallet);
-            if receipt.borrow().error.is_some() { domain.failed = Some(receipt); }
-            return Err("MIGRATION_REQUIRED".into());
-        }
+        let wallet = WalletDb::from_connection(owned, document, HostClock, rand_core::UnwrapErr(getrandom::SysRng));
         domain.generation = generation;
         domain.active = Some(Active { wallet, bytes: bytes.to_vec(), generation, receipt });
         Ok(generation)
