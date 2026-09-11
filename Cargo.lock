@@ -2240,6 +2240,7 @@ dependencies = [
  "zakura-primitives",
  "zcash_address",
  "zcash_protocol",
+ "zcash_transparent",
  "zip32",
 ]
 

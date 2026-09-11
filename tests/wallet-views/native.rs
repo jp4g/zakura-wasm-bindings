@@ -16,6 +16,11 @@ fn open() -> (String,u32) {
     let root = std::env::var("WALLET_TEST_ROOT").unwrap();
     let path = format!("{root}/views-{}.db", uuid::Uuid::new_v4());
     let generation = crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    // Native control installs the proposed same-DB hook explicitly. Production
+    // WASM uses the parent lifecycle patch; unpatched production fails closed.
+    crate::wallet::storage_close(generation).unwrap();
+    let mut conn=rusqlite::Connection::open(&path).unwrap(); super::initialize(&mut conn).unwrap(); conn.close().unwrap();
+    let generation=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     (path,generation)
 }
 fn call(g: u32, op: &str, input: Value) -> std::result::Result<Value,String> {
@@ -140,4 +145,49 @@ fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
     let output=json!({"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
         "uivk":key.to_unified_incoming_viewing_key().encode(&p),"defaultAddress":address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()});
     std::fs::write(format!("{root}/views-fixture.json"),output.to_string()).unwrap();
+}
+#[test]
+fn birthday_checkpoint_is_durable_and_conflicting_hash_rejects() {
+    let (path,g)=open();
+    let original=fixture(14);
+    let account=call(g,"account_import",original.clone()).unwrap();
+    let mut conflicting=fixture(15);
+    let raw=hex::decode(conflicting["birthday"]["priorTreeState"].as_str().unwrap()).unwrap();
+    let mut state=TreeState::decode(raw.as_slice()).unwrap();state.hash="08".repeat(32);
+    conflicting["birthday"]["priorTreeState"]=json!(hex::encode(state.encode_to_vec()));
+    assert_eq!(call(g,"account_import",conflicting).unwrap_err(),"INCOHERENT_BIRTHDAY");
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(path).unwrap();
+    let stored:String=conn.query_row("SELECT metadata FROM ext_viewing_accounts WHERE account_uuid=?1",[uuid::Uuid::parse_str(account["id"].as_str().unwrap()).unwrap()],|r|r.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(),original);
+}
+#[test]
+fn transparent_exact_index_respects_native_recovery_gap() {
+    let (_path,g)=open();let account=call(g,"account_import",fixture(16)).unwrap();
+    let args=json!({"accountId":account["id"],"index":"1000","request":{"format":"unified","transparent":"require","sapling":"omit","ironwood":"require"}});
+    assert_eq!(call(g,"address_at",args).unwrap_err(),"ADDRESS_GAP_LIMIT");
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn current_rechecks_requested_receivers_against_decoded_address() {
+    let (path,g)=open();let account=call(g,"account_import",fixture(17)).unwrap();
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();conn.execute("UPDATE addresses SET receiver_flags=4 WHERE exposed_at_height IS NOT NULL",[]).unwrap();conn.close().unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(g,"address_current",json!({"accountId":account["id"],"request":{"format":"unified","transparent":"omit","sapling":"require","ironwood":"omit"}})).unwrap_err(),"INVALID_STORED_ADDRESS");
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn transparent_receive_addresses_persist_without_a_unified_fallback() {
+    let (path,g)=open();let account=call(g,"account_import",fixture(18)).unwrap();
+    let args=json!({"accountId":account["id"],"request":{"format":"transparent"}});
+    let first=call(g,"address_next",args.clone()).unwrap();
+    assert_eq!(first["receiverTypes"],json!(["p2pkh"]));assert_eq!(first["intendedPools"],json!(["transparent"]));
+    assert_eq!(call(g,"address_current",args.clone()).unwrap(),first["address"]);
+    let mut at=args.clone();at["index"]=first["index"].clone();assert_eq!(call(g,"address_at",at).unwrap(),first);
+    assert!(call(g,"address_list",json!({"accountId":account["id"]})).unwrap().as_array().unwrap().contains(&first));
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(g,"address_current",args).unwrap(),first["address"]);
+    crate::wallet::storage_close(g).unwrap();
 }

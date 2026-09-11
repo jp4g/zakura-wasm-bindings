@@ -3,13 +3,33 @@ use wasm_bindgen::prelude::*;
 use prost::Message;
 use serde_json::{json, Value};
 use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, AddressSource, WalletRead, WalletWrite}, proto::service::TreeState};
+use zcash_client_backend::data_api::ll::LowLevelWalletRead;
+use zcash_keys::keys::transparent::gap_limits::{AddressStore, GapLimits};
 use zcash_client_sqlite::{AccountUuid, error::SqliteClientError};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey, UnifiedAddressRequest, ReceiverRequirement};
 use zcash_address::unified::{Ufvk, Fvk, Encoding, Container};
+use zcash_transparent::{address::TransparentAddress, keys::{IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope}};
+use zcash_client_backend::wallet::Exposure;
 use zcash_keys::address::{Address, UnifiedAddress};
 use zip32::DiversifierIndex;
 use zcash_protocol::consensus::{Parameters, NetworkType, NetworkUpgrade};
 
+// Parent integration hook: called on the same owned connection after native
+// migrations, before opening admission. See the explicit pending storage patch.
+pub(super) fn initialize(conn: &mut rusqlite::Connection) -> std::result::Result<(),String> {
+    (|| -> std::result::Result<(),rusqlite::Error> {
+        let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ext_viewing_version')",[],|r|r.get(0))?;
+        if !exists {
+            tx.execute_batch("CREATE TABLE ext_viewing_version(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL); INSERT INTO ext_viewing_version VALUES(1,1); CREATE TABLE ext_viewing_accounts(account_uuid BLOB PRIMARY KEY CHECK(length(account_uuid)=16),metadata TEXT NOT NULL); CREATE TABLE ext_viewing_addresses(account_uuid BLOB NOT NULL,address TEXT NOT NULL,diversifier TEXT NOT NULL,PRIMARY KEY(account_uuid,address));")?;
+        }
+        let version:u32=tx.query_row("SELECT version FROM ext_viewing_version WHERE id=1",[],|r|r.get(0))?;
+        if version!=1 {return Err(rusqlite::Error::InvalidQuery);}
+        tx.query_row("SELECT count(*) FROM ext_viewing_accounts WHERE length(metadata)>160000",[],|r|r.get::<_,u32>(0))?;
+        tx.query_row("SELECT count(*) FROM ext_viewing_addresses WHERE length(diversifier)>27",[],|r|r.get::<_,u32>(0))?;
+        tx.commit()
+    })().map_err(|_|"VIEWING_SCHEMA_REQUIRED".into())
+}
 #[derive(Debug)]
 struct Failure(String);
 impl From<rusqlite::Error> for Failure { fn from(_: rusqlite::Error) -> Self { Self("STORAGE_ERROR".into()) } }
@@ -32,6 +52,15 @@ fn record(account: &impl Account<AccountId=AccountUuid>) -> Value {
     json!({"id":account.id().expose_uuid().to_string(),"name":account.name().filter(|n| !n.is_empty()),
         "birthdayHeight":u32::from(account.birthday_height()),"accountIndex":null,
         "viewOnly":account.purpose()==AccountPurpose::ViewOnly,"signerAttached":false})
+}
+fn stored_metadata(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: AccountUuid) -> Result<Value> {
+    let text:String=ext.query_row("SELECT metadata FROM ext_viewing_accounts WHERE account_uuid=?1 AND length(metadata)<=160000",[account.expose_uuid()],|r|r.get(0))?;
+    serde_json::from_str(&text).map_err(|_|"INVALID_ACCOUNT_METADATA".into())
+}
+fn stored_record(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: &impl Account<AccountId=AccountUuid>) -> Result<Value> {
+    let metadata=stored_metadata(ext,account.id())?;
+    let mut result=record(account); result["name"]=metadata.get("name").cloned().unwrap_or(Value::Null);
+    Ok(result)
 }
 fn birthday(v: &Value, parameters: &[u8], genesis: &[u8], p: &crate::Document) -> Result<AccountBirthday> {
     if v.as_str()==Some("fullScan") {
@@ -71,6 +100,9 @@ fn birthday(v: &Value, parameters: &[u8], genesis: &[u8], p: &crate::Document) -
     if first==1 && decoded.prior_chain_state().block_hash().0.as_slice() != genesis { return Err("NETWORK_MISMATCH".into()); }
     Ok(decoded)
 }
+fn birthday_from_metadata(v:&Value, parameters:&[u8], genesis:&[u8], p:&crate::Document)->Result<AccountBirthday> {
+    birthday(v.get("birthday").ok_or(Failure::from("INVALID_ACCOUNT_METADATA"))?,parameters,genesis,p)
+}
 fn request(v: &Value) -> Result<UnifiedAddressRequest> {
     let Some(r) = v.get("request") else { return Ok(UnifiedAddressRequest::AllAvailableKeys); };
     fields(r,&["format","transparent","sapling","ironwood"])?;
@@ -104,12 +136,33 @@ fn address_record(p: &crate::Document, key: &UnifiedIncomingViewingKey, ua: &Uni
     let mut bytes=[0u8;16]; bytes[..11].copy_from_slice(j.as_bytes());
     Ok(json!({"address":ua.encode(p),"receiverTypes":receivers,"intendedPools":pools,"index":u128::from_le_bytes(bytes).to_string()}))
 }
+fn transparent_record(p:&crate::Document,key:&UnifiedIncomingViewingKey,address:&TransparentAddress,j:NonHardenedChildIndex)->Result<Value> {
+    let expected=key.transparent().as_ref().ok_or(Failure::from("MISSING_AUTHORITY"))?.derive_address(j).map_err(|_|Failure::from("ADDRESS_UNAVAILABLE"))?;
+    if &expected!=address {return Err("INVALID_STORED_ADDRESS".into());}
+    Ok(json!({"address":Address::Transparent(*address).encode(p),"index":j.index().to_string(),"receiverTypes":["p2pkh"],"intendedPools":["transparent"]}))
+}
+fn exposed_transparent<W: WalletRead<AccountId=AccountUuid,Error=SqliteClientError>>(db:&W,ext:&zcash_client_sqlite::ExtensionTransaction<'_>,p:&crate::Document,account:AccountUuid)->Result<Vec<Value>> {
+    let key=db.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?.uivk();
+    let raw:String=ext.query_row("SELECT json_group_array(json_object('address',address,'index',diversifier)) FROM (SELECT address,diversifier FROM ext_viewing_addresses WHERE account_uuid=?1 ORDER BY rowid)",[account.expose_uuid()],|r|r.get(0))?;
+    let rows:Vec<Value>=serde_json::from_str(&raw).map_err(|_|Failure::from("INVALID_STORED_ADDRESS"))?;
+    rows.into_iter().map(|row| {
+        let Some(Address::Transparent(t))=Address::decode(p,string(&row,"address")?) else {return Err("INVALID_STORED_ADDRESS".into());};
+        let meta=db.get_transparent_address_metadata(account,&t)?.ok_or(Failure::from("INVALID_STORED_ADDRESS"))?;
+        let j=meta.source().address_index().ok_or(Failure::from("INVALID_STORED_ADDRESS"))?;
+        if meta.source().scope()!=Some(TransparentKeyScope::EXTERNAL)||!matches!(meta.exposure(),Exposure::Exposed{..})||row["index"]!=j.index().to_string(){return Err("INVALID_STORED_ADDRESS".into());}
+        transparent_record(p,&key,&t,j)
+    }).collect()
+}
 fn address_list<W: WalletRead<AccountId=AccountUuid,Error=SqliteClientError>>(db: &W, p: &crate::Document, account: AccountUuid) -> Result<Vec<Value>> {
     let key=db.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?.uivk();
     db.list_addresses(account)?.into_iter().map(|info| {
         let AddressSource::Derived { diversifier_index, transparent_key_scope }=info.source();
         match info.address() {
             Address::Unified(ua) if transparent_key_scope.is_none()=>address_record(p,&key,ua,diversifier_index),
+            Address::Transparent(t) if transparent_key_scope==Some(TransparentKeyScope::EXTERNAL)=>{
+                let j=NonHardenedChildIndex::try_from(diversifier_index).map_err(|_|Failure::from("INVALID_STORED_ADDRESS"))?;
+                transparent_record(p,&key,t,j)
+            },
             _=>Err("UNSUPPORTED_STORED_ADDRESS".into()),
         }
     }).collect()
@@ -121,33 +174,78 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
         match operation {
             "account_list" => {
                 fields(v,&[])?;
-                active.wallet.get_account_ids()?.into_iter().map(|id| {
-                    active.wallet.get_account(id)?.map(|a| record(&a)).ok_or("STORAGE_ERROR".into())
-                }).collect::<Result<Vec<_>>>().map(Value::Array)
+                active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
+                    db.get_account_ids()?.into_iter().map(|id| {
+                        stored_record(ext,&db.get_account(id)?.ok_or(Failure::from("STORAGE_ERROR"))?)
+                    }).collect::<Result<Vec<_>>>().map(Value::Array)
+                })
             }
             "account_get" => {
                 fields(v,&["accountId"])?;
-                Ok(active.wallet.get_account(id(v)?)?.map(|a| record(&a)).unwrap_or(Value::Null))
+                active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
+                    db.get_account(id(v)?)?.map(|a| stored_record(ext,&a)).transpose().map(|v|v.unwrap_or(Value::Null))
+                })
             }
             "address_current" | "address_list" | "address_at" | "address_next" => {
                 fields(v,match operation { "address_list"=>&["accountId"][..],"address_at"=>&["accountId","request","index"][..],_=>&["accountId","request"][..] })?;
                 let account=id(v)?;
                 let p=active.wallet.params().clone();
                 let key=active.wallet.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?.uivk();
-                if operation=="address_list" { return address_list(&active.wallet,&p,account).map(Value::Array); }
+                if operation=="address_list" {
+                    return active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
+                        let mut rows=address_list(db,&p,account)?;
+                        for row in exposed_transparent(db,ext,&p,account)? {if !rows.contains(&row){rows.push(row);}}
+                        Ok(Value::Array(rows))
+                    });
+                }
+                if v.get("request").and_then(|r|r.get("format")).and_then(Value::as_str)==Some("transparent") {
+                    fields(&v["request"],&["format"])?;
+                    if !key.has_transparent(){return Err("RECEIVER_UNAVAILABLE".into());}
+                    return active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
+                        if operation=="address_current" {return Ok(exposed_transparent(db,ext,&p,account)?.last().map(|r|r["address"].clone()).unwrap_or(Value::Null));}
+                        let gap=GapLimits::default().external();
+                        let start=db.find_gap_start(db.get_account_ref(account)?,TransparentKeyScope::EXTERNAL,gap)?.ok_or(Failure::from("ADDRESS_GAP_LIMIT"))?;
+                        let end=start.index().saturating_add(gap).min(1<<31);
+                        let receivers=db.get_transparent_receivers(account,false,false)?;
+                        let requested=if operation=="address_at" {Some(NonHardenedChildIndex::try_from(index(v)?).map_err(|_|Failure::from("ADDRESS_UNAVAILABLE"))?)} else {None};
+                        let selected=receivers.iter().filter_map(|(t,m)|{
+                            let j=m.source().address_index()?;
+                            (m.source().scope()==Some(TransparentKeyScope::EXTERNAL)&&j.index()<end&&requested.map_or(matches!(m.exposure(),Exposure::Unknown),|r|r==j)).then_some((*t,j))
+                        }).min_by_key(|(_,j)|j.index()).ok_or(Failure::from("ADDRESS_GAP_LIMIT"))?;
+                        let row=transparent_record(&p,&key,&selected.0,selected.1)?;
+                        let height=db.chain_height()?.unwrap_or(db.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?.birthday_height());
+                        db.mark_transparent_addresses_exposed(&[(selected.0,height)])?;
+                        ext.execute("INSERT OR IGNORE INTO ext_viewing_addresses(account_uuid,address,diversifier) VALUES(?1,?2,?3)",rusqlite::params![account.expose_uuid(),string(&row,"address")?,string(&row,"index")?])?;
+                        if !exposed_transparent(db,ext,&p,account)?.contains(&row){return Err("INVALID_STORED_ADDRESS".into());}
+                        Ok(row)
+                    });
+                }
                 let req=request(v)?;
-                key.receiver_requirements(req).map_err(|_| Failure::from("RECEIVER_UNAVAILABLE"))?;
+                let requirements=key.receiver_requirements(req).map_err(|_| Failure::from("RECEIVER_UNAVAILABLE"))?;
                 if operation=="address_current" {
                     let current=active.wallet.get_last_generated_address_matching(account,req)?;
                     let verified=address_list(&active.wallet,&p,account)?;
                     return match current {
                         None=>Ok(Value::Null),
-                        Some(ua)=>{ let encoded=ua.encode(&p); if verified.iter().any(|a|a["address"]==encoded) {Ok(json!(encoded))} else {Err("INVALID_STORED_ADDRESS".into())} }
+                        Some(ua)=>{
+                            for (r,present) in [(requirements.orchard(),ua.has_orchard()),(requirements.sapling(),ua.has_sapling()),(requirements.p2pkh(),ua.has_transparent())] {
+                                if (r==ReceiverRequirement::Require && !present)||(r==ReceiverRequirement::Omit && present) {return Err("INVALID_STORED_ADDRESS".into());}
+                            }
+                            let encoded=ua.encode(&p); if verified.iter().any(|a|a["address"]==encoded) {Ok(json!(encoded))} else {Err("INVALID_STORED_ADDRESS".into())} }
                     };
                 }
                 let j=if operation=="address_at" { Some(index(v)?) } else { None };
                 active.wallet.transactionally(|db| -> Result<Value> {
                     let (ua,j)=if let Some(j)=j {
+                        let expected=key.address(j,req).map_err(|_|Failure::from("ADDRESS_UNAVAILABLE"))?;
+                        if expected.has_transparent() {
+                            let receivers=db.get_transparent_receivers(account,false,false)?;
+                            let scope=receivers.values().find_map(|m|m.source().scope()).ok_or(Failure::from("ADDRESS_GAP_LIMIT"))?;
+                            let gap=GapLimits::default().external();
+                            let start=db.find_gap_start(db.get_account_ref(account)?,scope,gap)?.ok_or(Failure::from("ADDRESS_GAP_LIMIT"))?;
+                            let mut bytes=[0u8;16];bytes[..11].copy_from_slice(j.as_bytes());
+                            if u128::from_le_bytes(bytes)>=u128::from(start.index().saturating_add(gap).min(1<<31)) {return Err("ADDRESS_GAP_LIMIT".into());}
+                        }
                         (db.get_address_for_index(account,j,req)?.ok_or(Failure::from("ADDRESS_UNAVAILABLE"))?,j)
                     } else {
                         db.get_next_available_address(account,req)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?
@@ -166,7 +264,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                 let (network,container) = Ufvk::decode(encoded).map_err(|_| Failure::from("INVALID_VIEWING_KEY"))?;
                 if network != p.network_type() { return Err("NETWORK_MISMATCH".into()); }
                 if container.items_as_parsed().iter().any(|k| !matches!(k,Fvk::Orchard(_)|Fvk::Sapling(_)|Fvk::P2pkh(_))) { return Err("UNSUPPORTED_VIEWING_COMPONENT".into()); }
-                let key = UnifiedFullViewingKey::decode(&p,encoded).map_err(|_| Failure::from("INVALID_VIEWING_KEY"))?;
+                let mut key = UnifiedFullViewingKey::decode(&p,encoded).map_err(|_| Failure::from("INVALID_VIEWING_KEY"))?;
                 let mut pools = std::collections::BTreeSet::new();
                 let defaults = json!(["transparent","sapling","ironwood"]);
                 let enabled = v.get("enabledPools").unwrap_or(&defaults).as_array().ok_or(Failure::from("INVALID_ARGUMENT"))?;
@@ -177,20 +275,26 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                 }
                 for (pool,present,upgrade) in [("transparent",key.transparent().is_some(),None),("sapling",key.sapling().is_some(),Some(NetworkUpgrade::Sapling)),("ironwood",key.orchard().is_some(),Some(NetworkUpgrade::Nu6_3))] {
                     if pools.contains(pool) && !present { return Err("MISSING_AUTHORITY".into()); }
-                    // Until the parent supplies an extension migration that preserves
-                    // original containers, reject projections that would discard keys.
-                    if !pools.contains(pool) && present { return Err("UNSUPPORTED_POOL_PROJECTION".into()); }
                     if pools.contains(pool) && upgrade.is_some_and(|nu| p.activation_height(nu).is_none()) { return Err("POOL_UNAVAILABLE".into()); }
                 }
-                let name = match v.get("name") { None=>"",Some(Value::String(s)) if !s.is_empty() && s.len()<=256=>s, _=>return Err("INVALID_ARGUMENT".into()) };
+                let projected=Ufvk::try_from_items(container.items_as_parsed().iter().filter(|k| match k { Fvk::P2pkh(_)=>pools.contains("transparent"),Fvk::Sapling(_)=>pools.contains("sapling"),Fvk::Orchard(_)=>pools.contains("ironwood"),_=>false }).cloned().collect()).map_err(|_|Failure::from("UNSUPPORTED_POOL_PROJECTION"))?;
+                key=UnifiedFullViewingKey::parse(&projected).map_err(|_|Failure::from("INVALID_VIEWING_KEY"))?;
+                let name = match v.get("name") { None=>"",Some(Value::String(s)) if s.len()<=256=>s, _=>return Err("INVALID_ARGUMENT".into()) };
                 let view_only = match v.get("viewOnly") { None=>false,Some(Value::Bool(b))=>*b,_=>return Err("INVALID_ARGUMENT".into()) };
                 active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
                     let genesis: Vec<u8> = ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
                     let birthday = birthday(v.get("birthday").ok_or(Failure::from("INVALID_BIRTHDAY"))?,&active.bytes,&genesis,&p)?;
+                    // Every checkpoint survives reopen and participates in coherence.
+                    for existing in db.get_account_ids()? {
+                        let metadata=stored_metadata(ext,existing)?;
+                        let prior=birthday_from_metadata(&metadata,&active.bytes,&genesis,&p)?;
+                        if prior.prior_chain_state().block_height()==birthday.prior_chain_state().block_height() && prior.prior_chain_state()!=birthday.prior_chain_state() { return Err("INCOHERENT_BIRTHDAY".into()); }
+                    }
                     if db.get_account_for_ufvk(&key)?.is_some() { return Err("ACCOUNT_COLLISION".into()); }
                     if db.get_block_hash(birthday.prior_chain_state().block_height())?.is_some_and(|h| h != birthday.prior_chain_state().block_hash()) { return Err("INCOHERENT_BIRTHDAY".into()); }
                     let account = db.import_account_ufvk(name,&key,&birthday,if view_only { AccountPurpose::ViewOnly } else { AccountPurpose::Spending { derivation:None } },None)?;
-                    Ok(record(&account))
+                    ext.execute("INSERT INTO ext_viewing_accounts(account_uuid,metadata) VALUES(?1,?2)",rusqlite::params![account.id().expose_uuid(),v.to_string()])?;
+                    stored_record(ext,&account)
                 })
             }
             _=>Err("UNSUPPORTED".into())
@@ -204,5 +308,5 @@ pub fn views_call(generation: u32, operation: &str, input: &str) -> std::result:
     execute(generation,operation,&value).map(|v| v.to_string()).map_err(|e|e.0)
 }
 #[cfg(test)]
-#[path = "../../tests/wallet-views-native.rs"]
+#[path = "../../tests/wallet-views/native.rs"]
 mod tests;

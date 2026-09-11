@@ -11,7 +11,7 @@ wallet=runpy.run_path(str(REPO/'build-wallet.py'))
 sha,inventory,require=wallet['sha'],wallet['inventory'],wallet['require']
 
 def main():
-    require(len(sys.argv)==2,'usage: build-views.py NEW_ASSIGNED_OUTPUT')
+    require(len(sys.argv) in [2,3] and (len(sys.argv)==2 or sys.argv[2]=='--proposed-parent-hook'),'usage: build-views.py NEW_ASSIGNED_OUTPUT [--proposed-parent-hook]')
     out=Path(sys.argv[1]).resolve()
     require(out.is_relative_to(SCRATCH) and not out.exists(),'new output under assigned scratch required')
     git=lambda *args: subprocess.check_output(['git','-C',str(REPO),*args])
@@ -21,11 +21,18 @@ def main():
     out.mkdir(parents=True)
     work=Path(tempfile.mkdtemp(prefix='views-build-',dir=SCRATCH)); source=work/'source'; source.mkdir()
     with tarfile.open(fileobj=io.BytesIO(git('archive',revision))) as archive: archive.extractall(source,filter='data')
+    git_inputs=inventory(source)
+    proposed=len(sys.argv)==3
+    if proposed:
+        subprocess.run(['git','apply','--check',str(source/'tests/wallet-views-storage-hook.patch')],cwd=source,check=True)
+        subprocess.run(['git','apply',str(source/'tests/wallet-views-storage-hook.patch')],cwd=source,check=True)
     inputs=inventory(source)
     env={k:v for k,v in os.environ.items() if k not in ['CC','CXX','AR','LD','RANLIB'] and not k.startswith(('CARGO_','RUST','CC_','AR_','CFLAGS','LIBSQLITE','WALLET_'))}
     sdk=wallet['SDK']
     env.update(CARGO_HOME=str(SCRATCH/'cargo'),CARGO_TARGET_DIR=str(work/'target'),CARGO_NET_OFFLINE='true',CARGO_BUILD_JOBS='2',RUSTUP_TOOLCHAIN='stable',TMPDIR=str(SCRATCH/'tmp'),RUSTFLAGS=f'--remap-path-prefix={source}=/source',WALLET_TEST_ROOT=str(work),WALLET_SDK=str(sdk),CC_wasm32_unknown_unknown=str(sdk/'bin/clang'),AR_wasm32_unknown_unknown=str(sdk/'bin/llvm-ar'))
     receipt=dict(format='private-viewing-accounts-build/1',complete=False,revision=revision,tree=git('rev-parse',f'{revision}^{{tree}}').decode().strip(),sources=inputs,work=str(work),commands=[],inheritedStorageBase='dbd67c0b59f35f9661897b82d601a0287f71f719',inheritedPacketMetadataSha256='036e2b524796306137f478662a9bfc7567b3b042c088d33a1df59a4fc4f7f4ad4',acceptance='PENDING independent HIGH and actual Firefox',generator=dict(path=str(wallet['BINDGEN']),sha256=wallet['BINDGEN_SHA']))
+    receipt['gitSources']=git_inputs
+    receipt['proposedParentHook']=dict(appliedInScratch=proposed,sha256=sha(source/'tests/wallet-views-storage-hook.patch'),approval='PENDING parent integration; never production acceptance')
     def run(label,args):
         log=out/f'{label}.log'
         with log.open('xb') as f:
