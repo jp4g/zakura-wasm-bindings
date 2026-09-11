@@ -34,7 +34,9 @@ another worker's or global cache. All output/cache/log paths must be external.
 python3 build.py /home/jack/zakura-bindings-network-scratch /home/jack/zakura-bindings-network-scratch/packet-1
 ```
 
-The destination must be new. The script builds committed HEAD from a Git archive,
+The destination must be new. Scope, tool identity, and committed-script guards
+remain active under Python `-O` and `-OO`. Run the nonexecuting guard regression
+with `python3 tests/test_build_guards.py` (also with `-O` and `-OO`). The script builds committed HEAD from a Git archive,
 uses fresh targets with `--offline --locked`, runs native and generated Node
 checks, and emits genuine web-target glue/WASM/declarations plus `network.mjs`.
 `build.json` records producing commit/tree, lock, tools, graph and exact output

@@ -22,12 +22,17 @@ def git(*args):
     return subprocess.check_output(['git', '-C', str(REPO), *args])
 
 scratch, output = (Path(p).resolve() for p in sys.argv[1:])
-assert not scratch.is_relative_to(REPO) and not output.is_relative_to(REPO), 'build outside source'
-assert not output.exists(), 'output must be new'
-assert sha(BINDGEN.read_bytes()) == BINDGEN_SHA256, 'approved bindgen binary mismatch'
-assert subprocess.check_output([BINDGEN, '--version']).decode().strip() == 'wasm-bindgen 0.2.128'
+if scratch.is_relative_to(REPO) or output.is_relative_to(REPO):
+    raise RuntimeError('build outside source')
+if output.exists():
+    raise RuntimeError('output must be new')
+if sha(BINDGEN.read_bytes()) != BINDGEN_SHA256:
+    raise RuntimeError('approved bindgen binary mismatch')
+if subprocess.check_output([BINDGEN, '--version']).decode().strip() != 'wasm-bindgen 0.2.128':
+    raise RuntimeError('approved bindgen version mismatch')
 revision = git('rev-parse', 'HEAD').decode().strip()
-assert git('show', f'{revision}:build.py') == Path(__file__).read_bytes(), 'commit build script first'
+if git('show', f'{revision}:build.py') != Path(__file__).read_bytes():
+    raise RuntimeError('commit build script first')
 work = Path(tempfile.mkdtemp(prefix='build-', dir=scratch))
 source = work / 'source'
 source.mkdir()
