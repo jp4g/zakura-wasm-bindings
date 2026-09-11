@@ -81,6 +81,13 @@ def main():
         receipt['compilerFiles']={str(p):sha(p) for p in [sysroot/'bin/rustc',sysroot/'bin/cargo',*list((sysroot/'lib').glob('librustc_driver-*')),*list((sysroot/'lib/rustlib').glob('*/bin/rust-lld'))]}
         receipt['sdk']=dict(path=str(sdk),files=inventory(sdk)); receipt['flockSha256']=sha(Path('/usr/bin/flock'))
         run('native',['cargo','test','--offline','--locked','--features','wallet-storage'])
+        run('primitive-build',['cargo','build','--offline','--locked','--release','--target','wasm32-unknown-unknown','--lib'])
+        raw=work/'target/wasm32-unknown-unknown/release/zakura_network_bindings.wasm'
+        primitive=out/'primitive'
+        run('primitive-generate',[wallet['BINDGEN'],'--target','web','--out-dir',primitive,'--out-name','bindings',raw])
+        for name in ['bytes.mjs','network.mjs','transaction.mjs']: shutil.copyfile(source/name,primitive/name)
+        for name in ['node','transaction']: run('test-'+name,['node',f'tests/{name}.mjs',primitive])
+        receipt['primitiveArtifacts']=inventory(primitive)
         env.update(CFLAGS_wasm32_unknown_unknown=f'--target=wasm32-wasi --sysroot={sdk}/share/wasi-sysroot -DSQLITE_OS_OTHER=1 -USQLITE_THREADSAFE -DSQLITE_THREADSAFE=0 -DSQLITE_TEMP_STORE=3 -DSQLITE_OMIT_LOAD_EXTENSION=1',LIBSQLITE3_FLAGS='-DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ZERO_MALLOC -DLONGDOUBLE_TYPE=double -DSQLITE_OMIT_WAL')
         env['RUSTFLAGS']+=' -C link-arg=--max-memory=268435456'
         receipt['environment']={k:v for k,v in env.items() if k.startswith(('CARGO_','RUST','WALLET_','CC_','AR_','CFLAGS','LIBSQLITE'))}
@@ -92,7 +99,7 @@ def main():
         shutil.copytree(source/'wallet-host',bundle/'wallet-host',ignore=shutil.ignore_patterns('*.rs','*.c','*.md','*.txt'))
         shutil.copytree(source/'tests',bundle/'tests')
         shutil.copyfile(work/'views-fixture.json',bundle/'tests/views-fixture.json')
-        for name in ['wallet-inspect','wallet-admission','wallet-node','wallet-crash','node','transaction','wallet-views-node']:
+        for name in ['wallet-inspect','wallet-admission','wallet-node','wallet-crash','wallet-views-node']:
             run('test-'+name,['node',f'tests/{name}.mjs',bundle])
         receipt['features']=run('features',['cargo','tree','--offline','--locked','--features','wallet-storage','--target','wasm32-unknown-unknown','-e','features'])
         require(inventory(source)==inputs,'source mutation')
