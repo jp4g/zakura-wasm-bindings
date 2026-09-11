@@ -3,6 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 use rusqlite::{Connection, OpenFlags};
 use wasm_bindgen::prelude::*;
 use zcash_client_sqlite::{WalletDb, util::Clock, wallet::init::WalletMigrator};
+use zcash_client_backend::data_api::WalletRead;
 
 #[derive(Clone)]
 struct HostClock;
@@ -56,6 +57,20 @@ fn bind_network(conn: &mut Connection, bytes: &[u8], genesis: &[u8]) -> Result<(
         let stored: (u32, Vec<u8>, Vec<u8>) = tx.query_row("SELECT version, parameters, genesis FROM ext_wallet_storage WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|_| "SCHEMA_MISMATCH")?;
         if stored.0 != 1 { return Err("SCHEMA_MISMATCH".into()); }
         if stored.1 != bytes || stored.2 != genesis { return Err("NETWORK_MISMATCH".into()); }
+        let migration_table: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schemer_migrations')", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
+        if migration_table {
+            // Schemerz does not reject unknown applied IDs itself. Pin the exact
+            // published RC4 inventory, including resumable migration prefixes.
+            let mut statement = tx.prepare("SELECT id FROM schemer_migrations LIMIT 67").map_err(|_| "SCHEMA_MISMATCH")?;
+            let rows = statement.query_map([], |r| r.get::<_, Vec<u8>>(0)).map_err(|_| "SCHEMA_MISMATCH")?;
+            for (count, row) in rows.enumerate() {
+                let id = row.map_err(|_| "SCHEMA_MISMATCH")?;
+                let id = uuid::Uuid::from_slice(&id).map_err(|_| "SCHEMA_MISMATCH")?.simple().to_string();
+                if count >= 66 || !include_str!("../wallet-host/migrations.txt").lines().any(|known| known == id) {
+                    return Err("SCHEMA_MISMATCH".into());
+                }
+            }
+        }
     } else {
         let objects: u32 = tx.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
         if objects != 0 { return Err("SCHEMA_MISMATCH".into()); }
@@ -81,14 +96,35 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
         let conn = Connection::open_with_flags_and_vfs(path, flags, "storage-host");
         #[cfg(not(target_arch = "wasm32"))]
         let conn = Connection::open_with_flags(path, flags);
-        let mut conn = conn.map_err(|_| "STORAGE_OPEN_FAILED")?;
-        conn.execute_batch("PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;").map_err(|_| "STORAGE_POLICY_FAILED")?;
-        rusqlite::vtab::array::load_module(&conn).map_err(|_| "STORAGE_INIT_FAILED")?;
-        bind_network(&mut conn, bytes, genesis)?;
+        let conn = conn.map_err(|_| "STORAGE_OPEN_FAILED")?;
         let receipt = Rc::new(RefCell::new(CloseReceipt::default()));
-        let owned = OwnedConnection { connection: Some(conn), receipt: receipt.clone() };
+        let mut owned = OwnedConnection { connection: Some(conn), receipt: receipt.clone() };
+        let prepared = (|| -> Result<(), String> {
+            let conn = std::borrow::BorrowMut::<Connection>::borrow_mut(&mut owned);
+            conn.execute_batch("PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;").map_err(|_| "STORAGE_POLICY_FAILED")?;
+            let journal: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;
+            let synchronous: u32 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;
+            let temp: u32 = conn.query_row("PRAGMA temp_store", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;
+            if journal != "truncate" || synchronous != 2 || temp != 2 { return Err("STORAGE_POLICY_FAILED".into()); }
+            #[cfg(target_arch = "wasm32")]
+            {
+                unsafe extern "C" { fn wallet_policy(conn: *mut rusqlite::ffi::sqlite3) -> i32; }
+                if unsafe { wallet_policy(conn.handle()) } != 0 { return Err("STORAGE_POLICY_FAILED".into()); }
+            }
+            rusqlite::vtab::array::load_module(conn).map_err(|_| "STORAGE_INIT_FAILED")?;
+            bind_network(conn, bytes, genesis)?;
+            // The backend's metadata initializer uses expect. Establish it via a
+            // fallible operation first, so ordinary setup I/O errors are returned.
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS schemer_migrations(id blob PRIMARY KEY)").map_err(|_| "STORAGE_INIT_FAILED")?;
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            drop(owned);
+            if receipt.borrow().error.is_some() { domain.failed = Some(receipt); return Err("STORAGE_CLOSE_FAILED".into()); }
+            return Err(error);
+        }
         let mut wallet = WalletDb::from_connection(owned, document, HostClock, rand_core::UnwrapErr(getrandom::SysRng));
-        if WalletMigrator::new().init_or_migrate(&mut wallet).is_err() {
+        if WalletMigrator::new().init_or_migrate(&mut wallet).is_err() || wallet.get_account_ids().is_err() {
             drop(wallet);
             if receipt.borrow().error.is_some() { domain.failed = Some(receipt); }
             return Err("MIGRATION_REQUIRED".into());

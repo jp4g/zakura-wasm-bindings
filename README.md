@@ -110,3 +110,27 @@ Combined SDK Node consumption passes; new Firefox execution is pending parent
 loopback permission (`listen EPERM` in this worker). Browser support remains required.
 Reports/commands: `/home/jack/zakura-transaction-bindings-logs/REPORT.md`,
 `CLIresult.md`, and `checkpoint.md`. No push, merge, publication or deployment.
+
+## Private wallet storage lifecycle candidate
+
+The optional `wallet-storage` feature and `wallet.mjs` implement an internal schema lifecycle primitive for a later H1 owner. This is **not `wallet_open`, `WalletClient`, or complete recovery**. The branch starts from transaction candidate `acaf706`, which remains under independent review.
+
+`initializeStorage(verifiedWasmBytes, ownedBackend, format, parameters, genesis)` returns an instance-bound storage owner with `binding(generation, instance)` and `close(generation, instance)`. The enclosing host must supply an already validated `zcash-js-network/1` registration and checked genesis; this primitive persists and compares that identity, without making network requests to authenticate it. Parameters lower through the unchanged frozen parser. The backend performs real WalletDb migrations, loads rusqlite's array module and queries the resulting account schema. There are no account/signing/send or arbitrary SQL commands.
+
+The deliberate bound is **one initialization attempt and one active DB per dedicated worker**, with one bundled SQLite instance, no shared memory, a 16 MiB SQLite allocator and a 256 MiB WASM memory maximum. Use a fresh worker for reopening. The raw Rust generation is worker-local; JS also checks a fresh CSPRNG instance identity. Inputs are checked and copied before generated glue and outputs are independent copies. No memory storage fallback exists.
+
+Linux Node uses `wallet-host/node-worker.mjs`, worker-tracked descriptors and `/usr/bin/flock` for cross-process exclusion. Other Node operating systems are unsupported by this bounded adapter. Browser `wallet-host/browser-worker.mjs` uses dedicated-worker OPFS exclusive synchronous access handles. Both enforce TRUNCATE journals, FULL synchronization, temporary memory and a single storage owner. The private packaged worker entries load local artifact bytes; integration with the H1 verified-byte loader and request envelopes remains required before public use.
+
+The host bootstrap commits `ext_wallet_storage` identity before backend migration. Only this primitive's marked databases (or genuinely empty new databases) are admitted; unmarked existing wallets require a separately reviewed adoption interface. Unknown host versions and unknown applied backend migrations reject. Migration errors fail closed; no secret-on-open path is added. Earlier migration transactions can remain committed after interruption; the interrupted transaction rolls back and reopening resumes on the same bound network.
+
+Close errors remain errors, including VFS close errors SQLite itself may ignore. Admission stops, stale operations reject, and the lease remains held until worker destruction after a close failure. Successful close is idempotent at the JS wrapper; raw repeated Rust close rejects. An initialization failure, trap, OOM or worker loss requires domain destruction. Terminating a worker during mutation has an unknown commit outcome and requires reopening, not automatic replay.
+
+Build from committed sources, with the existing cache copied into the assigned scratch `cargo` directory:
+
+```sh
+python3 -O build-wallet.py /home/jack/zakura-wallet-storage-scratch/NEW_BUILD
+```
+
+The builder runs actual native migrations, unchanged primitive Node tests, actual generated wallet WASM lifecycle/fault tests, process-crash recovery and an import/memory audit. It preserves failed stages and complete provenance. Browser execution requires the ordinary host command `node tests/wallet-firefox.mjs NEW_BUILD/bundle` with the existing packaged Firefox/geckodriver. Workspace loopback denial is not browser evidence; see the external `REPORT.md` and `checkpoint.md` in `/home/jack/zakura-wallet-storage-logs` for exact run status and the hash-pinned parent command. Injected I/O/quota faults, native quota exhaustion and UA eviction are separate claims; the latter two are not established here.
+
+[Source/backend/VFS provenance](wallet-host/PROVENANCE.md). This bounded candidate stops for independent review, without claiming acceptance of issues #2, #4 or #5.

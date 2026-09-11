@@ -28,6 +28,17 @@ def require(condition, message):
     if not condition:
         raise RuntimeError(message)
 
+def verify_package(root, archive, digest):
+    require(sha(archive) == digest, f'archive mismatch: {root.name}')
+    with tarfile.open(archive) as package_archive:
+        expected = {str(Path(m.name).relative_to(root.name)): hashlib.sha256(package_archive.extractfile(m).read()).hexdigest()
+                    for m in package_archive.getmembers() if m.isfile()}
+    actual = inventory(root)
+    actual.pop('.cargo-ok', None)
+    actual.pop('.cargo-checksum.json', None)
+    require(actual == expected, f'extracted source mismatch: {root.name}')
+    return expected
+
 def main():
     require(len(sys.argv) == 2, 'usage: build-wallet.py NEW_OUTPUT_UNDER_ASSIGNED_SCRATCH')
     output = Path(sys.argv[1]).resolve()
@@ -44,7 +55,7 @@ def main():
     with tarfile.open(fileobj=io.BytesIO(git('archive', revision))) as archive:
         archive.extractall(source, filter='data')
     inputs = inventory(source)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(('CARGO_', 'RUST', 'CC_', 'AR_', 'CFLAGS', 'LIBSQLITE', 'WALLET_'))}
+    env = {k: v for k, v in os.environ.items() if k not in ['CC', 'CXX', 'AR', 'LD', 'RANLIB'] and not k.startswith(('CARGO_', 'RUST', 'CC_', 'AR_', 'CFLAGS', 'LIBSQLITE', 'WALLET_'))}
     env.update(CARGO_HOME=str(SCRATCH / 'cargo'), CARGO_TARGET_DIR=str(work / 'target'),
                CARGO_NET_OFFLINE='true', CARGO_BUILD_JOBS='2', RUSTUP_TOOLCHAIN='stable',
                TMPDIR=str(SCRATCH / 'tmp'), RUSTFLAGS=f'--remap-path-prefix={source}=/source',
@@ -85,16 +96,7 @@ def main():
                 require(version == '0.10.6', 'protocol version drift')
             archive = SCRATCH / 'cargo/registry/cache' / root.parent.name / f'{name}-{version}.crate'
             digest = checksums[name, version]
-            require(sha(archive) == digest, f'archive mismatch: {name}')
-            # Authenticate the exact source set and bytes against the checksum-pinned
-            # published archive, not a possibly altered .cargo-checksum.json file.
-            with tarfile.open(archive) as package_archive:
-                expected_files = {str(Path(m.name).relative_to(f'{name}-{version}')): hashlib.sha256(package_archive.extractfile(m).read()).hexdigest()
-                                  for m in package_archive.getmembers() if m.isfile()}
-            actual = inventory(root)
-            actual.pop('.cargo-ok', None)
-            actual.pop('.cargo-checksum.json', None)
-            require(actual == expected_files, f'extracted source mismatch: {name}')
+            expected_files = verify_package(root, archive, digest)
             packages[f'{name}@{version}'] = dict(checksum=digest, files=expected_files)
         return packages
 
@@ -106,7 +108,8 @@ def main():
         receipt['toolchain'] = {name: run(name, *args).strip() for name, args in {
             'rustc': ['rustc', '-vV'], 'cargo': ['cargo', '-V'], 'node': ['node', '--version']}.items()}
         receipt['sdk'] = dict(path=str(SDK), files=inventory(SDK))
-        receipt['tools'] = {name: dict(path=shutil.which(name), sha256=sha(Path(shutil.which(name)).resolve())) for name in ['rustc', 'cargo', 'node']}
+        receipt['tools'] = {name: dict(path=shutil.which(name), sha256=sha(Path(shutil.which(name)).resolve())) for name in ['rustc', 'cargo', 'node', 'cc']}
+        run('builder-gates', 'python3', '-O', 'tests/wallet-builder.py')
         run('native', 'cargo', 'test', '--offline', '--locked', '--features', 'wallet-storage')
         run('primitive-build', 'cargo', 'build', '--offline', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '--lib')
         raw = work / 'target/wasm32-unknown-unknown/release/zakura_network_bindings.wasm'
@@ -118,6 +121,8 @@ def main():
         run('old-transaction', 'node', 'tests/transaction.mjs', primitive)
         env.update(CFLAGS_wasm32_unknown_unknown=f'--target=wasm32-wasi --sysroot={SDK}/share/wasi-sysroot -DSQLITE_OS_OTHER=1 -USQLITE_THREADSAFE -DSQLITE_THREADSAFE=0 -DSQLITE_TEMP_STORE=3 -DSQLITE_OMIT_LOAD_EXTENSION=1',
                    LIBSQLITE3_FLAGS='-DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ZERO_MALLOC -DLONGDOUBLE_TYPE=double -DSQLITE_OMIT_WAL')
+        env['RUSTFLAGS'] += ' -C link-arg=--max-memory=268435456'
+        receipt['walletRustflags'] = env['RUSTFLAGS']
         receipt['walletEnvironment'] = {k: v for k, v in env.items() if k.startswith(('CFLAGS', 'LIBSQLITE', 'WALLET_'))}
         run('wallet-build', 'cargo', 'build', '--offline', '--locked', '--release', '--target', 'wasm32-unknown-unknown', '--features', 'wallet-storage', '--lib')
         shutil.copyfile(raw, output / 'wallet.raw.wasm')
@@ -126,6 +131,9 @@ def main():
         for name in ['bytes.mjs', 'wallet.mjs']:
             shutil.copyfile(source / name, bundle / name)
         shutil.copytree(source / 'wallet-host', bundle / 'wallet-host', ignore=shutil.ignore_patterns('*.rs', '*.c', '*.md', '*.txt'))
+        shutil.copytree(source / 'tests', bundle / 'tests')
+        run('wallet-inspect', 'node', 'tests/wallet-inspect.mjs', bundle)
+        run('wallet-crash', 'node', 'tests/wallet-crash.mjs', bundle)
         run('wallet-node', 'node', 'tests/wallet-node.mjs', bundle)
         receipt['featureGraph'] = run('features', 'cargo', 'tree', '--offline', '--locked', '--features', 'wallet-storage', '--target', 'wasm32-unknown-unknown', '-e', 'features')
         require(inventory(source) == inputs, 'source snapshot changed during build')

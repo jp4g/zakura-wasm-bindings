@@ -1,9 +1,10 @@
 import { Worker } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 export function start(bundle, root, create = false, extra = {}) {
-  const worker = new Worker(pathToFileURL(`${bundle}/wallet-host/node-worker.mjs`), {
-    workerData: { root, create, ...extra }, trackUnmanagedFds: true,
+  const worker = new Worker(extra.testWorker ? new URL('./wallet-fault-worker.mjs', import.meta.url) : pathToFileURL(`${bundle}/wallet-host/node-worker.mjs`), {
+    workerData: { root, create, bundle, ...extra }, trackUnmanagedFds: true,
   });
+  let instance;
   let failure, stopped = false, busy = false;
   worker.on('error', e => { failure = e; });
   worker.on('exit', code => { stopped = true; failure ??= Error(`unexpected worker exit ${code}`); });
@@ -20,11 +21,11 @@ export function start(bundle, root, create = false, extra = {}) {
           error ? reject(error) : resolve(value);
         };
         const timer = setTimeout(() => { void worker.terminate(); done(Error('worker deadline')); }, 30000);
-        const message = value => done(null, value);
+        const message = value => { if (value.ok && value.instance) instance = value.instance; done(null, value); };
         const failed = error => done(error);
         const exited = code => done(Error(`unexpected worker exit ${code}`));
         worker.once('message', message); worker.once('error', failed); worker.once('exit', exited);
-        worker.postMessage(request);
+        worker.postMessage('instance' in request ? request : { ...request, instance });
       });
     },
     async destroy() { await worker.terminate(); if (!stopped) throw Error('destruction not observed'); },

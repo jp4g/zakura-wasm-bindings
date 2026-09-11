@@ -24,5 +24,11 @@ fn real_owned_wallet_migrates_closes_and_reopens() {
     assert_eq!(wallet::initialize_path(&path, "zcash-js-network/1", &changed, &[3; 32]).unwrap_err(), "NETWORK_MISMATCH");
     let reopened = wallet::initialize_path(&path, "zcash-js-network/1", &params, &[3; 32]).unwrap();
     assert_ne!(generation, reopened);
+    assert_eq!(wallet::storage_binding(generation).unwrap_err(), "STALE_HANDLE");
     wallet::storage_close(reopened).unwrap();
+    assert_eq!(wallet::storage_close(reopened).unwrap_err(), "STALE_HANDLE");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("INSERT INTO schemer_migrations(id) VALUES(zeroblob(16))", []).unwrap();
+    db.close().unwrap();
+    assert_eq!(wallet::initialize_path(&path, "zcash-js-network/1", &params, &[3; 32]).unwrap_err(), "SCHEMA_MISMATCH");
 }
