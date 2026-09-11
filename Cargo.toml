@@ -1,0 +1,12 @@
+[package]
+name = "zakura-network-bindings"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+zcash_protocol = { version = "=0.10.6", default-features = false }
+wasm-bindgen = "=0.2.128"
