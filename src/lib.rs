@@ -1,0 +1,57 @@
+use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkType, NetworkUpgrade, Parameters};
+use wasm_bindgen::prelude::*;
+
+const UPGRADES: [NetworkUpgrade; 10] = [
+    NetworkUpgrade::Overwinter, NetworkUpgrade::Sapling, NetworkUpgrade::Blossom,
+    NetworkUpgrade::Heartwood, NetworkUpgrade::Canopy, NetworkUpgrade::Nu5,
+    NetworkUpgrade::Nu6, NetworkUpgrade::Nu6_1, NetworkUpgrade::Nu6_2, NetworkUpgrade::Nu6_3,
+];
+const KEYS: [&str; 10] = ["Overwinter", "Sapling", "Blossom", "Heartwood", "Canopy", "Nu5", "Nu6", "Nu6_1", "Nu6_2", "Nu6_3"];
+
+#[derive(Clone, Debug)]
+struct Document {
+    encoding: NetworkType,
+    heights: [Option<BlockHeight>; 10],
+}
+impl Parameters for Document {
+    fn network_type(&self) -> NetworkType { self.encoding }
+    fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
+        UPGRADES.iter().position(|n| *n == nu).and_then(|i| self.heights[i])
+    }
+}
+impl Document {
+    fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+        let invalid = "invalid network document";
+        if bytes.len() > 256 { return Err(invalid); }
+        let text = std::str::from_utf8(bytes).map_err(|_| invalid)?;
+        let rest = text.strip_prefix("{\"encoding\":\"").ok_or(invalid)?;
+        let (name, mut rest) = rest.split_once('"').ok_or(invalid)?;
+        let encoding = match name { "main" => NetworkType::Main, "test" => NetworkType::Test, "regtest" => NetworkType::Regtest, _ => return Err(invalid) };
+        let mut heights = [None; 10];
+        let mut previous = Some(0);
+        for (i, key) in KEYS.iter().enumerate() {
+            rest = rest.strip_prefix(&format!(",\"{key}\":")).ok_or(invalid)?;
+            let end = rest.find([',', '}']).ok_or(invalid)?;
+            let token = &rest[..end];
+            let height = if token == "null" { None } else {
+                let n = token.parse::<u32>().map_err(|_| invalid)?;
+                if token != n.to_string() || previous.is_none_or(|p| n < p) { return Err(invalid); }
+                Some(n)
+            };
+            heights[i] = height.map(BlockHeight::from_u32);
+            previous = height;
+            rest = &rest[end..];
+        }
+        if rest != "}" { return Err(invalid); }
+        Ok(Self { encoding, heights })
+    }
+}
+
+/// Validate the reviewed document and select the pinned upstream branch at height.
+/// The JS entry checks types/ranges before generated glue; raw glue is internal.
+#[wasm_bindgen]
+pub fn consensus_branch(format: &str, bytes: &[u8], height: u32) -> Result<u32, String> {
+    if format != "zcash-js-network/1" { return Err("unsupported network format".into()); }
+    let document = Document::parse(bytes)?;
+    Ok(u32::from(BranchId::for_height(&document, height.into())))
+}
