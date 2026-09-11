@@ -2238,6 +2238,7 @@ dependencies = [
  "zakura-keys",
  "zakura-pczt",
  "zakura-primitives",
+ "zcash_address",
  "zcash_protocol",
  "zip32",
 ]

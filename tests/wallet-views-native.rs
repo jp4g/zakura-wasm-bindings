@@ -38,3 +38,36 @@ fn ufvk_import_retains_native_uuid_and_tracking_after_reopen() {
     assert_eq!(call(g,"account_list",json!({})).unwrap_err(),"STALE_HANDLE");
     crate::wallet::storage_close(g2).unwrap();
 }
+#[test]
+fn birthday_rejects_unconsumed_proto_and_tree_bytes_before_mutation() {
+    let (_path,g)=open();
+    let good=fixture(8);
+    for tree_suffix in [true,false] {
+        let mut bad=good.clone();
+        let mut bytes=hex::decode(bad["birthday"]["priorTreeState"].as_str().unwrap()).unwrap();
+        if tree_suffix {
+            let mut state=TreeState::decode(bytes.as_slice()).unwrap();
+            state.ironwood_tree.push_str("00"); bytes=state.encode_to_vec();
+        } else { bytes.extend_from_slice(&[0x40,0x01]); }
+        bad["birthday"]["priorTreeState"]=json!(hex::encode(bytes));
+        assert_eq!(call(g,"account_import",bad).unwrap_err(),"INVALID_BIRTHDAY");
+        assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
+    }
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn import_enforces_authority_scope_and_rejects_overlapping_upgrades() {
+    use zcash_address::unified::{Ufvk,Fvk,Encoding,Container};
+    let (_path,g)=open();
+    let full=fixture(9);
+    let (network,container)=Ufvk::decode(full["viewingKey"].as_str().unwrap()).unwrap();
+    let key=Ufvk::try_from_items(container.items_as_parsed().iter().filter(|k|matches!(k,Fvk::Sapling(_))).cloned().collect()).unwrap().encode(&network);
+    let mut missing=full.clone(); missing["viewingKey"]=json!(key);
+    assert_eq!(call(g,"account_import",missing.clone()).unwrap_err(),"MISSING_AUTHORITY");
+    missing["enabledPools"]=json!(["sapling"]); missing["viewOnly"]=json!(true);
+    let account=call(g,"account_import",missing).unwrap();
+    assert_eq!(account["viewOnly"],true);
+    assert_eq!(call(g,"account_import",full).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
+    crate::wallet::storage_close(g).unwrap();
+}
