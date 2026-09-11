@@ -1,5 +1,25 @@
 use zcash_protocol::consensus::{BlockHeight, BranchId, NetworkType, NetworkUpgrade, Parameters};
 use wasm_bindgen::prelude::*;
+use zcash_primitives::transaction::Transaction;
+
+/// Internal codec: exact upstream serialization is required before returning identity.
+/// This does not validate signatures, proofs, consensus rules, or activation.
+#[wasm_bindgen]
+pub fn transaction_id(raw: &[u8], branch: u32) -> Result<Vec<u8>, String> {
+    if raw.is_empty() || raw.len() > 2097152 { return Err("invalid transaction bytes".into()); }
+    let branch = BranchId::try_from(branch).map_err(|_| "unknown context branch")?;
+    let mut remaining = raw;
+    let tx = Transaction::read(&mut remaining, branch).map_err(|e| format!("parse: {e}"))?;
+    if !remaining.is_empty() { return Err("trailing bytes".into()); }
+    if !tx.version().has_overwinter() { return Err("unsupported transaction version".into()); }
+    // V5/V6 read their embedded branch and ignore the supplied context.
+    if tx.consensus_branch_id() != branch { return Err("branch mismatch".into()); }
+    if !tx.version().valid_in_branch(branch) { return Err("version/context mismatch".into()); }
+    let mut written = Vec::new();
+    tx.write(&mut written).map_err(|e| format!("write: {e}"))?;
+    if written != raw { return Err("serialization differs from input".into()); }
+    Ok(tx.txid().as_ref().to_vec())
+}
 
 const UPGRADES: [NetworkUpgrade; 10] = [
     NetworkUpgrade::Overwinter, NetworkUpgrade::Sapling, NetworkUpgrade::Blossom,
