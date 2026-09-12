@@ -8,8 +8,16 @@ const files = new Map();
 let next = 1;
 export const state = { last: '', lastCode: 0, closeError: false };
 export function attach(mem, host) {
+  attachMemory(mem);
+  attachBackend(host);
+}
+export function attachMemory(mem) {
   if (memory || !(mem.buffer instanceof ArrayBuffer)) throw Error('host attach/nonshared contract');
-  memory = mem; backend = host;
+  memory = mem;
+}
+export function attachBackend(host) {
+  if (!memory || backend || !host) throw Error('host backend contract');
+  backend = host;
 }
 function bytes(ptr, n) {
   ptr >>>= 0;
