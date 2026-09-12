@@ -2,8 +2,7 @@ use super::*;
 fn query(g:u32,operation:&str,input:Value)->std::result::Result<Value,String> {
     crate::wallet::query::query_call(g,operation,&input.to_string()).map(|s|serde_json::from_str(&s).unwrap())
 }
-#[test]
-fn query_real_scan_history_detail_and_revision_bound_pages() {
+pub(super) fn history_fixture() -> Value {
     let fixture=full_scan_fixture();let (path,g)=open();
     let account=call(g,"account_import",fixture["import"].clone()).unwrap();
     assert_eq!(query(g,"wallet_transaction",json!({"txid":"00".repeat(32)})).unwrap(),Value::Null);
@@ -60,6 +59,7 @@ fn query_real_scan_history_detail_and_revision_bound_pages() {
     assert_eq!(query(g,"wallet_history",json!({"accountId":account["id"],"cursor":cursor})).unwrap_err(),"CURSOR_STALE");
     let page=query(g,"wallet_history",json!({"accountId":account["id"],"limit":1})).unwrap();
     crate::wallet::storage_close(g).unwrap();
+    let database=hex::encode(std::fs::read(&path).unwrap());
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     assert_eq!(query(g,"wallet_history",json!({"accountId":account["id"],"cursor":page["nextCursor"]})).unwrap_err(),"CURSOR_STALE");
     crate::wallet::storage_close(g).unwrap();
@@ -80,7 +80,10 @@ fn query_real_scan_history_detail_and_revision_bound_pages() {
     assert_eq!(query(g,"wallet_transaction",json!({"txid":history["items"][0]["txid"]})).unwrap_err(),"RESOURCE_LIMIT");
     assert_eq!(std::fs::read(&path).unwrap(),before);
     crate::wallet::storage_close(g).unwrap();
+    json!({"database":database,"accountId":account["id"],"txids":[page["items"][0]["txid"],next["items"][0]["txid"]],"target":target})
 }
+#[test]
+fn query_real_scan_history_detail_and_revision_bound_pages() {history_fixture();}
 #[test]
 fn query_enhanced_bytes_are_distinct_from_known_unenhanced_record() {
     let f=enhancement::enhancement_fixture();let (path,g)=open();crate::wallet::storage_close(g).unwrap();
