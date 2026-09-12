@@ -34,6 +34,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                 if db.get_block_hash(target_height.into())?.is_some_and(|h|target_hash!=h.0) {return Err("CHAIN_MISMATCH".into());}
                 // A finite historical target does not rewind the wallet's independently known tip.
                 if db.chain_height()?.is_none_or(|h|u32::from(h)<=target_height) {db.update_chain_tip(target_height.into())?;}
+                super::creation::pending(ext,target_height,&target_hash)?;
                 let ranges=db.suggest_scan_ranges()?;
                 if ranges.len()>1024 {return Err("RESOURCE_LIMIT".into());}
                 let ranges=ranges.iter().map(|r| -> Result<Value> {
@@ -84,6 +85,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                 || db.get_block_hash(state.block_height())?.is_some_and(|h|h!=state.block_hash())
                 || db.get_block_hash(target_height.into())?.is_some_and(|h|target_hash!=h.0) {return Err("CHAIN_MISMATCH".into());}
             let keys=ScanningKeys::from_account_ufvks(db.get_unified_full_viewing_keys()?);
+            super::creation::invalidate(ext)?;
             let mut metadata=db.block_metadata(state.block_height())?;
             let mut nullifiers=Nullifiers::unspent(db)?;
             let mut scanned=Vec::with_capacity(blocks.len());

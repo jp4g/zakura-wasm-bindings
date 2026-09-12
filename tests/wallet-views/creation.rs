@@ -1,0 +1,87 @@
+use super::*;
+fn complete(g:u32, height:u32) -> Value {
+    complete_target(g,height,&"07".repeat(32))
+}
+fn complete_target(g:u32,height:u32,hash:&str) -> Value {
+    let mut tree=TreeState::decode(hex::decode(fixture(40)["birthday"]["priorTreeState"].as_str().unwrap()).unwrap().as_slice()).unwrap();
+    tree.height=height.into();
+    tree.hash=hex::encode(hex::decode(hash).unwrap().into_iter().rev().collect::<Vec<_>>());
+    if height>=100 {tree.ironwood_tree="000000".into();}
+    let target=json!({"height":height,"hash":hash});
+    let plan:Value=serde_json::from_str(&crate::wallet::scan::scan_call(g,"scan_plan",&json!({"target":target}).to_string()).unwrap()).unwrap();
+    json!({"revision":plan["revision"],"target":target,"treeState":hex::encode(tree.encode_to_vec())})
+}
+pub(super) fn ready(g:u32) {
+    let input=complete(g,99);
+    crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap();
+}
+#[test]
+fn creation_empty_completion_reopen_and_newer_target_freshness() {
+    let (path,g)=open();
+    let before=std::fs::read(&path).unwrap();
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    let input=complete(g,99);
+    let mut bad=input.clone();bad["treeState"]=json!("00");
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&bad.to_string()).unwrap_err(),"INVALID_BIRTHDAY");
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
+    crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap();
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let created=hd(g,"account_create_hd",40,json!({})).unwrap();
+    assert_eq!(created["accountIndex"],0);
+    assert_eq!(created["birthdayHeight"],100);
+    let newer=complete(g,100);
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
+    let old=complete(g,99);
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&old.to_string()).unwrap_err(),"SYNC_REQUIRED");
+    // The newer account's unscanned range prevents declaring an endpoint tree complete.
+    let mut newer=newer;newer["revision"]=old["revision"].clone();
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&newer.to_string()).unwrap_err(),"SYNC_REQUIRED");
+    assert_eq!(call(g,"account_list",json!({})).unwrap().as_array().unwrap().len(),1);
+    assert_eq!(hd(g,"account_create_hd",41,json!({"birthday":"fullScan"})).unwrap_err(),"INVALID_ARGUMENT");
+    crate::wallet::storage_close(g).unwrap();
+}
+
+#[test]
+fn creation_scanned_frontiers_and_rewind_invalidation() {
+    let fixture=full_scan_fixture();
+    let (_,g)=open();call(g,"account_import",fixture["import"].clone()).unwrap();
+    let target=fixture["target"].clone();
+    let mut plan:Value=serde_json::from_str(&crate::wallet::scan::scan_call(g,"scan_plan",&json!({"target":target}).to_string()).unwrap()).unwrap();
+    for batch in fixture["batches"].as_array().unwrap() {
+        let mut batch=batch.clone();batch["target"]=target.clone();batch["revision"]=plan["revision"].clone();
+        plan=serde_json::from_str(&crate::wallet::scan::scan_call(g,"scan_ingest_batch",&batch.to_string()).unwrap()).unwrap();
+    }
+    let input=complete_target(g,100,target["hash"].as_str().unwrap()); // Empty frontiers disagree with the real encrypted three-pool scan.
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap_err(),"CHAIN_MISMATCH");
+    let rewind=json!({"revision":input["revision"],"requestedPoint":{"height":99,"hash":"07".repeat(32)}});
+    let result:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_rewind",&rewind.to_string()).unwrap()).unwrap();
+    assert_eq!(result["point"]["height"],96);
+    let input=complete_target(g,96,result["point"]["hash"].as_str().unwrap());
+    crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap();
+    assert_eq!(hd(g,"account_create_hd",41,json!({})).unwrap()["birthdayHeight"],97);
+    let revision:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();
+    crate::wallet::sync::sync_call(g,"scan_rewind",&json!({"revision":revision["revision"],"requestedPoint":result["point"]}).to_string()).unwrap();
+    assert_eq!(hd(g,"account_create_hd",42,json!({})).unwrap_err(),"SYNC_REQUIRED");
+    crate::wallet::storage_close(g).unwrap();
+}
+
+#[test]
+fn creation_completion_revision_failure_rolls_back_and_legacy_open_is_not_sync() {
+    let (path,g)=open();let mut input=complete(g,99);
+    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.as_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
+        ext.execute("UPDATE ext_wallet_revision SET sequence=9223372036854775807",[])?;Ok(())
+    })).unwrap();
+    let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();input["revision"]=state["revision"].clone();
+    let before=std::fs::read(&path).unwrap();
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap_err(),"STORAGE_ERROR");
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();conn.execute_batch("DROP TABLE ext_wallet_creation_snapshot").unwrap();drop(conn);
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
+    ready(g);assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap()["accountIndex"],0);
+    crate::wallet::storage_close(g).unwrap();
+}

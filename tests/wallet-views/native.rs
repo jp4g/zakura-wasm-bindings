@@ -1,5 +1,7 @@
 // Synthetic test authority derived from fixed bytes. NEVER use for production funds.
 use super::*;
+#[path = "creation.rs"]
+mod creation;
 #[path = "sync.rs"]
 mod sync;
 use serde_json::{json, Value};
@@ -612,7 +614,8 @@ fn hd_explicit_native_index_and_next_survive_reopen() {
     crate::wallet::storage_close(g).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
-    let input=json!({"birthday":fixture(40)["birthday"]});
+    creation::ready(g);
+    let input=json!({});
     let next:Value=serde_json::from_str(&views_seed_call(g,"account_create_hd",&input.to_string(),vec![40;length]).unwrap()).unwrap();
     assert_eq!(next["accountIndex"],1);
     crate::wallet::storage_close(g).unwrap();
@@ -645,7 +648,8 @@ fn hd_gap_independent_seed_provenance_and_native_default() {
     }
     crate::wallet::storage_close(g).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
-    let args=json!({"birthday":fixture(40)["birthday"]});
+    creation::ready(g);
+    let args=json!({});
     let next=hd(g,"account_create_hd",40,args.clone()).unwrap();assert_eq!(next["accountIndex"],4);
     let independent=hd(g,"account_create_hd",41,args).unwrap();assert_eq!(independent["accountIndex"],0);
     for a in records {assert_eq!(call(g,"account_get",json!({"accountId":a["id"]})).unwrap(),a);}
@@ -688,9 +692,10 @@ fn hd_validation_and_partial_collision_roll_back_native_state() {
     let a=call(g,"account_import",partial).unwrap();
     let conn=rusqlite::Connection::open(&path).unwrap();
     let tables=["accounts","addresses","ext_viewing_accounts","ext_viewing_addresses"];
+    creation::ready(g);
     let before=policy_rows(&conn,&tables);
     assert_eq!(hd(g,"account_import_hd",40,hd_input(0)).unwrap_err(),"ACCOUNT_COLLISION");
-    assert_eq!(hd(g,"account_create_hd",40,json!({"birthday":fixture(40)["birthday"]})).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"ACCOUNT_COLLISION");
     assert_eq!(policy_rows(&conn,&tables),before);
     assert_eq!(call(g,"account_get",json!({"accountId":a["id"]})).unwrap(),a);
     crate::wallet::storage_close(g).unwrap();
@@ -712,9 +717,10 @@ fn hd_duplicate_overflow_and_cross_import_birthday_coherence() {
     assert_eq!(hd(g,"account_import_hd",40,hd_input(0)).unwrap_err(),"INCOHERENT_BIRTHDAY");
     crate::wallet::storage_close(g).unwrap();
     let (_path,g)=open();
-    let mut full=hd_input(2147483647);full["birthday"]=json!("fullScan");
+    let full=hd_input(2147483647);
     let max=hd(g,"account_import_hd",40,full).unwrap();assert_eq!(max["accountIndex"],2147483647u64);
-    assert_eq!(hd(g,"account_create_hd",40,json!({"birthday":"fullScan"})).unwrap_err(),"ACCOUNT_INDEX_EXHAUSTED");
+    creation::ready(g);
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"ACCOUNT_INDEX_EXHAUSTED");
     assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([max]));
     crate::wallet::storage_close(g).unwrap();
 }
@@ -722,6 +728,7 @@ fn hd_duplicate_overflow_and_cross_import_birthday_coherence() {
 fn hd_metadata_and_commit_failures_roll_back_and_reopen() {
     for commit_failure in [false,true] {
         let (path,g)=open();
+        creation::ready(g);
         let conn=rusqlite::Connection::open(&path).unwrap();
         let tables=["accounts","addresses","ext_viewing_accounts","ext_viewing_addresses"];
         let before=policy_rows(&conn,&tables);
@@ -730,14 +737,14 @@ fn hd_metadata_and_commit_failures_roll_back_and_reopen() {
             // Failure only fires after native account AND default-address writes exist.
             conn.execute_batch("CREATE TRIGGER hd_fail BEFORE INSERT ON ext_viewing_accounts WHEN (SELECT count(*) FROM accounts)>0 AND (SELECT count(*) FROM addresses)>0 BEGIN SELECT RAISE(ABORT,'synthetic metadata failure'); END").unwrap();
         }
-        assert_eq!(hd(g,"account_create_hd",40,json!({"birthday":fixture(40)["birthday"]})).unwrap_err(),"STORAGE_ERROR");
+        assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"STORAGE_ERROR");
         if commit_failure {conn.execute_batch("ROLLBACK").unwrap();}
         else {conn.execute_batch("DROP TRIGGER hd_fail").unwrap();}
         assert_eq!(policy_rows(&conn,&tables),before);
         crate::wallet::storage_close(g).unwrap();
         let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
         assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
-        let a=hd(g,"account_create_hd",40,json!({"birthday":fixture(40)["birthday"]})).unwrap();assert_eq!(a["accountIndex"],0);
+        let a=hd(g,"account_create_hd",40,json!({})).unwrap();assert_eq!(a["accountIndex"],0);
         crate::wallet::storage_close(g).unwrap();
         let metadata:String=conn.query_row("SELECT metadata FROM ext_viewing_accounts",[],|r|r.get(0)).unwrap();
         let value:Value=serde_json::from_str(&metadata).unwrap();assert_eq!(value.as_object().unwrap().len(),3);
@@ -821,7 +828,8 @@ fn mnemonic_native_provenance_boundaries_and_transaction_rollback() {
         crate::wallet::storage_close(g).unwrap();
         let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
         for a in records {assert_eq!(call(g,"account_get",json!({"accountId":a["id"]})).unwrap(),a);}
-        let next:Value=serde_json::from_str(&views_seed_call(g,"account_create_hd",&json!({"birthday":fixture(40)["birthday"]}).to_string(),seed.to_vec()).unwrap()).unwrap();assert_eq!(next["accountIndex"],4);
+        creation::ready(g);
+        let next:Value=serde_json::from_str(&views_seed_call(g,"account_create_hd",&json!({}).to_string(),seed.to_vec()).unwrap()).unwrap();assert_eq!(next["accountIndex"],4);
         crate::wallet::storage_close(g).unwrap();
         let metadata:String=conn.query_row("SELECT metadata FROM ext_viewing_accounts LIMIT 1",[],|r|r.get(0)).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&metadata).unwrap().as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),vec!["birthday","enabledPools","name"]);

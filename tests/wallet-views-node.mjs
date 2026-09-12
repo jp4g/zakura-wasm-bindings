@@ -24,6 +24,12 @@ function start(create=false,ownedRoot=root) {
     async destroy(){let timer;try{await Promise.race([worker.terminate(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('destruction deadline')),5000);})]);}finally{clearTimeout(timer);}assert.ok(stopped,'worker exit observed');},
   };
 }
+async function completeCreation(owner) {
+  const target={height:99,hash:'07'.repeat(32)};
+  const plan=await owner.call('scan_plan',{target});assert.equal(plan.ok,true,show(plan));
+  const completed=await owner.call('scan_complete',{revision:plan.result.revision,target,treeState:fixture.import.birthday.priorTreeState});
+  assert.equal(completed.ok,true,show(completed));
+}
 let owner=start(true), account,list,token,initialRevision;
 const policyAccounts=[];
 try {
@@ -121,9 +127,10 @@ try {
   assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
   hdAddresses=(await owner.call('address_list',args)).result;
   const before=(await owner.call('account_list')).result;
-  const failed=await owner.call('account_create_hd',{birthday:hdInput.birthday},{seed,fault:'commit'});assert.equal(failed.ok,false);
+  await completeCreation(owner);
+  const failed=await owner.call('account_create_hd',{},{seed,fault:'commit'});assert.equal(failed.ok,false);
   assert.deepEqual((await owner.call('account_list')).result,before,'failed native HD commit consumes no index/account');
-  const post=await owner.call('account_create_hd',{birthday:hdInput.birthday},{seed,abort:'duringSync'});assert.equal(post.error,'ABORTED');assert.equal(post.commit,'committed');assert.equal('result' in post,false);
+  const post=await owner.call('account_create_hd',{},{seed,abort:'duringSync'});assert.equal(post.error,'ABORTED');assert.equal(post.commit,'committed');assert.equal('result' in post,false);
   hdPost=(await owner.call('account_list')).result.find(a=>a.accountIndex===4);assert.ok(hdPost);assert.equal(hdPost.signerAttached,false);
   assert.equal((await owner.call('close')).ok,true);
 }finally{await owner.destroy();}
@@ -132,7 +139,7 @@ try {
   assert.equal((await owner.call('initialize')).ok,true);
   for(const account of [hdAccount,hdGap,hdPost])assert.deepEqual((await owner.call('account_get',{accountId:account.id})).result,account);
   assert.deepEqual((await owner.call('address_list',{accountId:hdAccount.id})).result,hdAddresses);
-  const next=await owner.call('account_create_hd',{birthday:hdInput.birthday},{seed});assert.equal(next.ok,true,show(next));assert.equal(next.result.accountIndex,5);
+  const next=await owner.call('account_create_hd',{},{seed});assert.equal(next.ok,true,show(next));assert.equal(next.result.accountIndex,5);
   assert.equal((await owner.call('close')).ok,true);
 }finally{await owner.destroy();}
 for(const file of fs.readdirSync(hdRoot,{recursive:true})) {
@@ -203,7 +210,8 @@ async function checkMnemonic(number,[phrase,pass]) {
     assert.equal((await owner.call('initialize')).ok,true);
     assert.deepEqual((await owner.call('account_get',{accountId:saved.id})).result,saved);
     assert.deepEqual((await owner.call('address_list',{accountId:saved.id})).result,addresses);
-    assert.equal((await owner.call('account_create_hd',{birthday:input.birthday},{seed})).result.accountIndex,4);
+    await completeCreation(owner);
+    assert.equal((await owner.call('account_create_hd',{},{seed})).result.accountIndex,4);
     const post=await owner.call('account_import_mnemonic',{...input,accountIndex:5},{mnemonic,passphrase,abort:'duringSync'});
     assert.equal(post.error,'ABORTED');assert.equal(post.commit,'committed');
     assert.equal((await owner.call('account_list')).result.some(a=>a.accountIndex===5),true);

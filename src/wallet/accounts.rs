@@ -412,7 +412,7 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
     let account_index=match operation {
         "account_import_hd"=>{fields(&v,&["accountIndex","birthday","name","enabledPools"])?;
             Some(zip32::AccountId::try_from(height(&v,"accountIndex")?).map_err(|_|Failure::from("INVALID_ARGUMENT"))?)},
-        "account_create_hd"=>{fields(&v,&["birthday","name","enabledPools"])?;None},
+        "account_create_hd"=>{fields(&v,&["name","enabledPools"])?;None},
         _=>return Err("UNSUPPORTED".into()),
     };
     let defaults=json!(["transparent","sapling","ironwood"]);
@@ -431,8 +431,20 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
         if [NetworkUpgrade::Sapling,NetworkUpgrade::Nu6_3].iter().any(|nu|p.activation_height(*nu).is_none()) {return Err("POOL_UNAVAILABLE".into());}
         active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
             let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
-            let birthday_value=v.get("birthday").ok_or(Failure::from("INVALID_BIRTHDAY"))?;
-            let birthday=birthday(birthday_value,&active.bytes,&genesis,&p)?;
+            let birthday_value=if account_index.is_some() {
+                v.get("birthday").ok_or(Failure::from("INVALID_BIRTHDAY"))?.clone()
+            } else {
+                let value=super::creation::birthday_value(ext,&active.bytes,&genesis)?;
+                let target=height(&value,"firstScanHeight")?-1;
+                if db.chain_height()?.map(u32::from)!=Some(target)
+                    || db.suggest_scan_ranges()?.iter().any(|r|u32::from(r.block_range().start)<=target) {return Err("SYNC_REQUIRED".into());}
+                value
+            };
+            let birthday=birthday(&birthday_value,&active.bytes,&genesis,&p)?;
+            if account_index.is_none() {
+                let hash:Vec<u8>=ext.query_row("SELECT hash FROM ext_wallet_creation_snapshot WHERE id=1",[],|r|r.get(0))?;
+                if birthday.prior_chain_state().block_hash().0.as_slice()!=hash {return Err("SYNC_REQUIRED".into());}
+            }
             let existing=db.get_account_ids()?;
             for account in &existing {
                 let prior=birthday_from_metadata(&stored_metadata(ext,*account)?,&active.bytes,&genesis,&p)?;
