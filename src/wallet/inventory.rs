@@ -39,7 +39,7 @@ pub(super) fn read(ext:&ExtensionTransaction<'_>, operation:&str, input:&Value, 
     ), classified AS (
       SELECT r.*,lower(hex(t.txid)) AS key,t.mined_height,
         (SELECT COUNT(*) FROM v_received_output_spends s JOIN transactions st ON st.id_tx=s.transaction_id WHERE s.pool=r.pool AND s.received_output_id=r.id_within_pool_table AND (st.mined_height IS NOT NULL OR st.expiry_height IS NULL OR st.expiry_height=0 OR ?2 IS NULL OR st.expiry_height>=?2)) AS active_spends,
-        (SELECT COUNT(*) FROM v_received_output_spends s JOIN transactions st ON st.id_tx=s.transaction_id WHERE s.pool=r.pool AND s.received_output_id=r.id_within_pool_table AND st.mined_height IS NOT NULL) AS mined_spends,
+        (SELECT COUNT(*) FROM v_received_output_spends s JOIN transactions st ON st.id_tx=s.transaction_id WHERE s.pool=r.pool AND s.received_output_id=r.id_within_pool_table AND ?7 IS NOT NULL AND st.mined_height<=?7) AS mined_spends,
         (SELECT COUNT(*) FROM v_received_output_spends s JOIN transactions st ON st.id_tx=s.transaction_id WHERE s.pool=r.pool AND s.received_output_id=r.id_within_pool_table AND st.mined_height IS NULL AND (st.expiry_height=0 OR (?2 IS NOT NULL AND st.expiry_height>=?2))) AS pending_spends,
         (SELECT lower(hex(st.txid)) FROM v_received_output_spends s JOIN transactions st ON st.id_tx=s.transaction_id WHERE s.pool=r.pool AND s.received_output_id=r.id_within_pool_table AND (st.mined_height IS NOT NULL OR st.expiry_height IS NULL OR st.expiry_height=0 OR ?2 IS NULL OR st.expiry_height>=?2) ORDER BY st.txid LIMIT 1) AS spender,
         CASE WHEN r.lock_height IS NULL THEN 0 WHEN ?2 IS NULL THEN NULL ELSE r.lock_height>=?2 END AS locked,
@@ -48,7 +48,7 @@ pub(super) fn read(ext:&ExtensionTransaction<'_>, operation:&str, input:&Value, 
       WHERE a.uuid=?1 AND ((?4=1 AND r.pool IN (2,4) AND (?5 IS NULL OR r.pool=?5)) OR (?4=0 AND r.pool=0))
     ), inventory AS (
       SELECT *,CASE WHEN mined_spends=1 AND active_spends=1 THEN 'spent' WHEN active_spends=1 AND pending_spends=1 THEN 'pendingSpend'
-        WHEN active_spends=0 AND ?6 AND mined_height IS NOT NULL AND ((pool!=0 AND authority IS NOT NULL) OR (pool=0 AND observed>=?7)) THEN 'unspent' ELSE 'unknown' END AS state FROM classified
+        WHEN active_spends=0 AND ?6 AND mined_height<=?7 AND ((pool!=0 AND authority IS NOT NULL) OR (pool=0 AND observed>=?7)) THEN 'unspent' ELSE 'unknown' END AS state FROM classified
     ) SELECT json_group_array(json(item)) FROM (SELECT json_array(key,pool,output_index,value,mined_height,lock_height,locked,state,CASE WHEN state IN ('spent','pendingSpend') THEN spender END,CASE WHEN length(CAST(address AS BLOB))<=4096 THEN address END,uneconomic,length(CAST(address AS BLOB))) AS item
       FROM inventory WHERE (?8 IS NULL OR state=?8) AND (?9 IS NULL OR locked=?9) AND (?10 IS NULL OR uneconomic=?10)
       AND (key>?11 OR (key=?11 AND (pool>?12 OR (pool=?12 AND output_index>?13)))) ORDER BY key,pool,output_index LIMIT ?14)";

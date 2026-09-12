@@ -15,7 +15,7 @@ fn inventory_all_rows_filters_spends_locks_and_cursor() {
     let g=reopen();assert_eq!(inventory(g,"wallet_notes",json!({"accountId":f["accountId"],"cursor":cursor})).unwrap_err(),"CURSOR_STALE");crate::wallet::storage_close(g).unwrap();
     // Mutate only the closed synthetic DB: one real received note, explicit native
     // spending relationships and lock columns; production APIs never write this fixture.
-    for (mined,expiry,state) in [(Some(100),Some(110),"spent"),(None,Some(110),"pendingSpend"),(None,Some(99),"unknown"),(None,None,"unknown")] {
+    for (mined,expiry,state) in [(Some(100),Some(110),"spent"),(Some(101),Some(110),"unknown"),(None,Some(110),"pendingSpend"),(None,Some(99),"unknown"),(None,None,"unknown")] {
         let conn=rusqlite::Connection::open(&path).unwrap();
         conn.execute("DELETE FROM sapling_received_note_spends",[]).unwrap();
         conn.execute("INSERT OR REPLACE INTO transactions(id_tx,txid,mined_height,expiry_height,min_observed_height) VALUES(9000,?1,?2,?3,100)",rusqlite::params![&[0x99u8;32],mined,expiry]).unwrap();
@@ -44,6 +44,11 @@ fn inventory_native_complete_notes_and_transparent_observation() {
     for batch in fixture["batches"].as_array().unwrap(){let mut batch=batch.clone();batch["target"]=target.clone();batch["revision"]=plan["revision"].clone();plan=serde_json::from_str(&crate::wallet::scan::scan_call(g,"scan_ingest_batch",&batch.to_string()).unwrap()).unwrap();}
     let page=inventory(g,"wallet_notes",json!({"accountId":account["id"],"spendState":"unspent"})).unwrap();
     assert!(!page["items"].as_array().unwrap().is_empty());assert!(page["items"].as_array().unwrap().iter().all(|n|n["spendingTxid"].is_null()&&n["lockKnown"]==true&&n["lock"].is_null()));
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    conn.execute("UPDATE transactions SET block=NULL,mined_height=101 WHERE id_tx IN (SELECT transaction_id FROM sapling_received_notes)",[]).unwrap();drop(conn);
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert!(inventory(g,"wallet_notes",json!({"accountId":account["id"],"pool":"sapling","spendState":"unspent"})).unwrap()["items"].as_array().unwrap().is_empty());
     crate::wallet::storage_close(g).unwrap();
     let f=enhancement::enhancement_fixture();std::fs::write(&path,hex::decode(f["database"].as_str().unwrap()).unwrap()).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
