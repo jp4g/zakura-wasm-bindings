@@ -26,6 +26,10 @@ for(const args of [{txid:'aa'},Object.defineProperty({},'txid',{get(){invoked++;
 }
 assert.equal(invoked,0);
 for(const args of [{accountId:id,limit:201},{accountId:id,cursor:'a'.repeat(1025)}])assert.throws(()=>call('wallet_history',args),error=>error.commit==='none');
+result={items:[{value:'9',lock:null,lockKnown:false,uneconomic:null,spendState:'unknown'}],nextCursor:null};
+assert.equal(call('wallet_notes',{accountId:id,pool:'sapling',spendState:'unknown'}).items[0].value,9n);
+assert.equal(call('wallet_utxos',{accountId:id}).items[0].lockKnown,false);
+for(const args of [{accountId:id,locked:null},{accountId:id,uneconomic:0},{accountId:id,pool:'legacyOrchard'},{accountId:id,spendState:'available'}])assert.throws(()=>call('wallet_notes',args),error=>error.commit==='none');
 const controller=new AbortController();result=null;after=()=>controller.abort();
 assert.throws(()=>call('wallet_transaction',{txid,signal:controller.signal}),error=>error.message==='ABORTED'&&error.commit==='none');
 console.log('private query dispatch, native representation and read cancellation passed');
