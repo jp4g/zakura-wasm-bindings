@@ -43,7 +43,7 @@ impl Drop for OwnedConnection {
     }
 }
 type Wallet = WalletDb<OwnedConnection, super::Document, HostClock, rand_core::UnwrapErr<getrandom::SysRng>>;
-struct Active { wallet: Wallet, bytes: Vec<u8>, generation: u32, receipt: Rc<RefCell<CloseReceipt>> }
+struct Active { scan_plan: Option<(String,serde_json::Value)>, wallet: Wallet, bytes: Vec<u8>, generation: u32, receipt: Rc<RefCell<CloseReceipt>> }
 #[derive(Default)]
 struct Domain { active: Option<Active>, generation: u32, failed: Option<Rc<RefCell<CloseReceipt>>> }
 // ponytail: one active database per worker; no registry until multiple DBs are required.
@@ -120,7 +120,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
         }
         let wallet = WalletDb::from_connection(owned, document, HostClock, rand_core::UnwrapErr(getrandom::SysRng));
         domain.generation = generation;
-        domain.active = Some(Active { wallet, bytes: bytes.to_vec(), generation, receipt });
+        domain.active = Some(Active { scan_plan:None, wallet, bytes: bytes.to_vec(), generation, receipt });
         Ok(generation)
     })
 }
@@ -167,3 +167,5 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
 mod schema_prefix;
 
 mod accounts;
+
+mod scan;

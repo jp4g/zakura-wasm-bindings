@@ -5,7 +5,8 @@ import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
 const operations = new Set(['account_balance','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_list','account_get','address_current','address_next','address_list','address_at']);
-const writes = new Set(['account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
+const scans = new Set(['scan_plan','scan_ingest_batch']);
+const writes = new Set(['scan_plan','scan_ingest_batch','account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -35,6 +36,51 @@ function lower(value, name = '', depth = 0) {
   }
   return result;
 }
+// Scan protobufs are copied and hex encoded only; Rust owns their interpretation.
+function lowerScan(args, operation) {
+  function fields(value, allowed) {
+    if (!value || Object.getPrototypeOf(value)!==Object.prototype) throw TypeError('INVALID_ARGUMENT');
+    const result=Object.create(null);
+    for (const key of Reflect.ownKeys(value)) {
+      const property=Object.getOwnPropertyDescriptor(value,key);
+      if (!allowed.includes(key)||!property||!('value' in property)) throw TypeError('INVALID_ARGUMENT');
+      result[key]=property.value;
+    }
+    return result;
+  }
+  const input=fields(args,operation==='scan_plan'?['target','signal']:['target','revision','priorTreeState','blocks','signal']);
+  delete input.signal;
+  const target=fields(input.target,['height','hash']);
+  if (!Number.isInteger(target.height)||target.height<0||target.height>=0xffffffff) throw TypeError('INVALID_ARGUMENT');
+  const hex=bytes=>{
+    const ascii=new Uint8Array(bytes.length*2);
+    for(let i=0;i<bytes.length;i++) {
+      const high=bytes[i]>>>4, low=bytes[i]&15;
+      ascii[2*i]=high+(high<10?48:87);
+      ascii[2*i+1]=low+(low<10?48:87);
+    }
+    return new TextDecoder().decode(ascii);
+  };
+  if (typeof target.hash!=='string'||! /^[0-9a-f]{64}$/.test(target.hash)) throw TypeError('INVALID_ARGUMENT');
+  input.target=target;
+  if (operation==='scan_ingest_batch') {
+    if (typeof input.revision!=='string'||input.revision.length>128) throw TypeError('INVALID_ARGUMENT');
+    input.priorTreeState=hex(copyBytes(input.priorTreeState,65536,'INVALID_ARGUMENT'));
+    const blocks=input.blocks;
+    if (!Array.isArray(blocks)||blocks.length<1||blocks.length>16) throw TypeError('RESOURCE_LIMIT');
+    if (Reflect.ownKeys(blocks).length!==blocks.length+1) throw TypeError('INVALID_ARGUMENT');
+    let remaining=2*1024*1024;
+    input.blocks=[];
+    for (let i=0;i<blocks.length;i++) {
+      const property=Object.getOwnPropertyDescriptor(blocks,String(i));
+      if (!property||!('value' in property)) throw TypeError('INVALID_ARGUMENT');
+      const bytes=copyBytes(property.value,remaining,'RESOURCE_LIMIT');
+      remaining-=bytes.length;
+      input.blocks.push(hex(bytes));
+    }
+  }
+  return input;
+}
 function lift(value) {
   if (Array.isArray(value)) return value.map(lift);
   if (value&&typeof value==='object'&&typeof value.index==='string') value.index=BigInt(value.index);
@@ -61,14 +107,20 @@ export function viewsForStorage(storage) {
     generation,instance,
     call(token,owner,operation,args={},seed,mnemonic,passphrase) {
       if(poisoned)throw Error('DOMAIN_INVALID');
-      storage.binding(token,owner); // actual Rust generation + owned JS instance
-      if(!operations.has(operation))throw TypeError('INVALID_ARGUMENT');
-      const descriptor=Object.getOwnPropertyDescriptor(args,'signal');
-      if(descriptor&&!('value' in descriptor))throw TypeError('INVALID_ARGUMENT');
-      const signal=descriptor?.value;
-      abort(signal,'none');
-      const input=JSON.stringify(lower(args));
-      abort(signal,'none');
+      let signal,input;
+      try {
+        storage.binding(token,owner); // actual Rust generation + owned JS instance
+        if(!operations.has(operation)&&!scans.has(operation))throw TypeError('INVALID_ARGUMENT');
+        const descriptor=Object.getOwnPropertyDescriptor(args,'signal');
+        if(descriptor&&!('value' in descriptor))throw TypeError('INVALID_ARGUMENT');
+        signal=descriptor?.value;
+        abort(signal,'none');
+        input=JSON.stringify(scans.has(operation)?lowerScan(args,operation):lower(args));
+        abort(signal,'none');
+      } catch(error) {
+        if(scans.has(operation))throw Object.assign(error instanceof Error?error:Error('INVALID_ARGUMENT'),{commit:'none'});
+        throw error;
+      }
       let result;
       let ownedSeed,ownedMnemonic,ownedPassphrase;
       try {
@@ -87,13 +139,13 @@ export function viewsForStorage(storage) {
           result=binding.views_seed_call(token,operation,input,ownedSeed);
         } else {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
-          result=binding.views_call(token,operation,input);
+          result=scans.has(operation)?binding.scan_call(token,operation,input):binding.views_call(token,operation,input);
         }
       }
       catch(error) {
         // Infallible upstream entropy/clock paths can trap. Never reuse that owner.
         if(typeof error!=='string'){poisoned=true;throw Error('DOMAIN_INVALID');}
-        throw Error(error);
+        throw Object.assign(Error(error),scans.has(operation)?{commit:'none'}:{});
       }
       finally {ownedSeed?.fill(0);ownedMnemonic?.fill(0);ownedPassphrase?.fill(0);}
       abort(signal,writes.has(operation)?'committed':'none');
