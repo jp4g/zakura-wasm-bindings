@@ -1154,6 +1154,11 @@ fn persistent_scan_ingestion_plan_rollback_revision_and_reopen() {
     assert_eq!(scan(g,"scan_ingest_batch",request.clone()).unwrap_err(),"STALE_REVISION");
     let plan=scan(g,"scan_plan",json!({"target":target})).unwrap();
     let mut request=request;request["revision"]=plan["revision"].clone();
+    // Valid protobuf field order and future unknown fields are not a new wire format.
+    let canonical=block.encode_to_vec();assert_eq!(&canonical[..2],&[16,100]);
+    let mut reordered=canonical[2..].to_vec();reordered.extend_from_slice(&canonical[..2]);
+    reordered.extend_from_slice(&[0xa0,0x06,0x00]); // unknown field100, varint0
+    request["blocks"]=json!([hex::encode(reordered)]);
     let committed=scan(g,"scan_ingest_batch",request.clone()).unwrap();
     assert_eq!(committed["start"],100);assert_eq!(committed["endExclusive"],101);
     let balance=call(g,"account_balance",args.clone()).unwrap();

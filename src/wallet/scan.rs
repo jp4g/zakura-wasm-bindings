@@ -61,7 +61,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
             if bytes>2*MAX_BLOCK_BYTES {return Err("RESOURCE_LIMIT".into());}
             let raw=hex::decode(encoded).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
             let block=CompactBlock::decode(raw.as_slice()).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
-            if block.encode_to_vec()!=raw || hex::encode(raw)!=encoded || !block.header.is_empty()
+            if hex::encode(raw)!=encoded || !block.header.is_empty()
                 || block.height>=u64::from(u32::MAX) || block.hash.len()!=32 || block.prev_hash.len()!=32
                 || block.vtx.iter().any(|t|t.txid.len()!=32) {return Err("INVALID_ARGUMENT".into());}
             blocks.push(block);
