@@ -77,7 +77,7 @@ fn memo(value:&Value)->Result<Value> {
     })
 }
 fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
-    fields(input,match operation {"wallet_history"=>&["accountId","cursor","limit"],"wallet_transaction"=>&["txid"],_=>return Err("INVALID_ARGUMENT".into())})?;
+    if !matches!(operation,"wallet_notes"|"wallet_utxos") { fields(input,match operation {"wallet_history"=>&["accountId","cursor","limit"],"wallet_transaction"=>&["txid"],_=>return Err("INVALID_ARGUMENT".into())})?; }
     super::DOMAIN.with(|domain| {
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
         let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
@@ -88,6 +88,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                 "fullyScannedHeight":db.block_fully_scanned()?.map(|b|u32::from(b.block_height())),
                 "maxScannedHeight":db.block_max_scanned()?.map(|b|u32::from(b.block_height())),
                 "scanComplete":summary.as_ref().map(|s|s.is_synced())});
+            if matches!(operation,"wallet_notes"|"wallet_utxos") {return super::inventory::read(ext,operation,input,scan);}
             if operation=="wallet_history" {
                 let account=string(input,"accountId")?;
                 let id=uuid::Uuid::parse_str(account).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
@@ -163,7 +164,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
 }
 #[wasm_bindgen]
 pub fn query_call(generation:u32,operation:&str,input:&str)->std::result::Result<String,String> {
-    if input.len()>2048{return Err("RESOURCE_LIMIT".into());}
+    if input.len()>4096{return Err("RESOURCE_LIMIT".into());}
     let value=serde_json::from_str(input).map_err(|_|"INVALID_ARGUMENT".to_string())?;
     execute(generation,operation,&value).and_then(|v|{let text=v.to_string();if text.len()>MAX_DETAIL{Err("RESOURCE_LIMIT".into())}else{Ok(text)}}).map_err(|e|e.0)
 }

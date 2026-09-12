@@ -1245,3 +1245,5 @@ fn persistent_full_scan_fixture_reopens_with_real_three_pool_balance() {
 mod enhancement;
 
 mod query;
+
+mod inventory;

@@ -175,3 +175,5 @@ mod creation;
 mod enhancement;
 
 mod query;
+
+mod inventory;

@@ -5,7 +5,7 @@ import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
 const operations = new Set(['account_balance','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_list','account_get','address_current','address_next','address_list','address_at']);
-const queries = new Set(['wallet_history','wallet_transaction']);
+const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','wallet_utxos']);
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const scans = new Set(['scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
@@ -71,12 +71,18 @@ function scanHex(bytes) {
 }
 function lowerScan(args, operation) {
   if (queries.has(operation)) {
-    const input=scanFields(args,operation==='wallet_history'?['accountId','cursor','limit','signal']:['txid','signal']);delete input.signal;
-    if(operation==='wallet_history') {
+    const inventory=operation==='wallet_notes'||operation==='wallet_utxos';
+    const input=scanFields(args,inventory?['accountId','cursor','limit','spendState','locked','uneconomic','signal',...(operation==='wallet_notes'?['pool']:[])]:operation==='wallet_history'?['accountId','cursor','limit','signal']:['txid','signal']);delete input.signal;
+    if(operation==='wallet_history'||inventory) {
       if(typeof input.accountId!=='string'||input.accountId.length!==36)throw TypeError('INVALID_ARGUMENT');
-      if(Object.hasOwn(input,'cursor')&&(typeof input.cursor!=='string'||input.cursor.length>1024))throw TypeError('INVALID_ARGUMENT');
+      if(Object.hasOwn(input,'cursor')&&(typeof input.cursor!=='string'||input.cursor.length>(inventory?2048:1024)))throw TypeError('INVALID_ARGUMENT');
       if(Object.hasOwn(input,'limit')&&(!Number.isInteger(input.limit)||input.limit<1||input.limit>200))throw TypeError('INVALID_ARGUMENT');
     }else if(typeof input.txid!=='string'||! /^[0-9a-f]{64}$/.test(input.txid))throw TypeError('INVALID_ARGUMENT');
+    if(inventory) {
+      for(const key of ['locked','uneconomic'])if(Object.hasOwn(input,key)&&typeof input[key]!=='boolean')throw TypeError('INVALID_ARGUMENT');
+      if(Object.hasOwn(input,'spendState')&&!['unspent','pendingSpend','spent','unknown'].includes(input.spendState))throw TypeError('INVALID_ARGUMENT');
+      if(Object.hasOwn(input,'pool')&&!['sapling','ironwood'].includes(input.pool))throw TypeError('INVALID_ARGUMENT');
+    }
     return input;
   }
   if (enhancements.has(operation)) return lowerEnhancement(args,operation);
@@ -224,7 +230,7 @@ export function viewsForStorage(storage) {
       const value=lift(JSON.parse(result));
       if(operation==='account_balance')value.amounts=liftAmounts(value.amounts);
       if(queries.has(operation)&&value!==null) {
-        for(const row of value.items??value.accounts)for(const key of ['balanceDelta','totalReceived','totalSpent','fee'])if(row[key]!==null)row[key]=BigInt(row[key]);
+        for(const row of value.items??value.accounts)for(const key of operation==='wallet_notes'||operation==='wallet_utxos'?['value']:['balanceDelta','totalReceived','totalSpent','fee'])if(row[key]!==null)row[key]=BigInt(row[key]);
         if(operation==='wallet_transaction') {
           const bytes=hex=>{const result=new Uint8Array(hex.length/2);for(let i=0;i<result.length;i++)result[i]=parseInt(hex.slice(2*i,2*i+2),16);return result;};
           if(value.raw!==null)value.raw=bytes(value.raw);
