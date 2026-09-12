@@ -1,9 +1,8 @@
 use super::*;
 fn enhance(g:u32,op:&str,input:Value)->std::result::Result<Value,String>{crate::wallet::enhancement::enhancement_call(g,op,&input.to_string()).map(|s|serde_json::from_str(&s).unwrap())}
-#[test]
-fn enhancement_full_transaction_is_atomic_and_persists_after_reopen() {
+pub(super) fn enhancement_fixture() -> Value {
     use zcash_client_backend::data_api::WalletRead;
-    let (path,g)=open();call(g,"account_import",fixture(10)).unwrap();
+    let (path,g)=open();let account=call(g,"account_import",fixture(10)).unwrap();
     let p=crate::Document::parse(PARAMS).unwrap();
     let key=UnifiedFullViewingKey::decode(&p,fixture(10)["viewingKey"].as_str().unwrap()).unwrap();
     let address=*key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap().0.transparent().unwrap();
@@ -19,6 +18,7 @@ fn enhancement_full_transaction_is_atomic_and_persists_after_reopen() {
     crate::wallet::storage_close(g).unwrap();
     let conn=rusqlite::Connection::open(&path).unwrap();
     conn.execute("INSERT INTO tx_retrieval_queue(txid,query_type) VALUES(?1,1)",[id.as_ref()]).unwrap();drop(conn);
+    let database=hex::encode(std::fs::read(&path).unwrap());
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     let requests=enhance(g,"enhancement_requests",json!({})).unwrap();
     let request=requests["requests"].as_array().unwrap().iter().find(|r|r["txid"]==id.to_string()).unwrap().clone();
@@ -29,6 +29,7 @@ fn enhancement_full_transaction_is_atomic_and_persists_after_reopen() {
     let applied=enhance(g,"enhancement_apply",apply.clone()).unwrap();assert_ne!(applied["revision"],requests["revision"]);
     assert_eq!(enhance(g,"enhancement_apply",apply).unwrap_err(),"STALE_REVISION");
     let remaining=enhance(g,"enhancement_requests",json!({})).unwrap();
+    let balance=call(g,"account_balance",json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}})).unwrap();
     assert!(!remaining["requests"].as_array().unwrap().iter().any(|r|r["kind"]=="enhancement"&&r["txid"]==id.to_string()));
     crate::wallet::DOMAIN.with(|d|assert!(d.borrow().active.as_ref().unwrap().wallet.get_transaction(id).unwrap().is_some()));
     crate::wallet::scan::scan_call(g,"scan_plan",&json!({"target":{"height":101,"hash":"04".repeat(32)}}).to_string()).unwrap();
@@ -60,4 +61,10 @@ fn enhancement_full_transaction_is_atomic_and_persists_after_reopen() {
     let applied=enhance(g,"enhancement_apply",json!({"revision":pending["revision"],"request":status,"result":{"status":"notInMainChain"}})).unwrap();
     assert_ne!(applied["revision"],pending["revision"]);
     crate::wallet::storage_close(g).unwrap();
+    json!({"database":database,"accountId":account["id"],"txid":id.to_string(),"raw":hex::encode(raw),"minedHeight":100,"expectedAmounts":balance["amounts"]})
+}
+
+#[test]
+fn enhancement_full_transaction_is_atomic_and_persists_after_reopen() {
+    enhancement_fixture();
 }
