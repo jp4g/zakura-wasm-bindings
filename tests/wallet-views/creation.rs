@@ -115,3 +115,23 @@ fn creation_completion_revision_failure_rolls_back_and_legacy_open_is_not_sync()
     ready(g);assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap()["accountIndex"],0);
     crate::wallet::storage_close(g).unwrap();
 }
+
+#[test]
+fn creation_pre_sapling_completion_reopen_and_freshness() {
+    for target in [0,16] {
+        let (path,g)=open();
+        let hash=if target==0 {"03".repeat(32)}else{"07".repeat(32)};
+        let input=complete_target(g,target,&hash);
+        crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap();
+        let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();
+        assert!(state["tipHeight"].is_null());
+        crate::wallet::storage_close(g).unwrap();
+        let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap()["birthdayHeight"],target+1);
+        complete(g,17);
+        let old=complete_target(g,target,&hash);
+        assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&old.to_string()).unwrap_err(),"SYNC_REQUIRED");
+        assert_eq!(hd(g,"account_create_hd",41,json!({})).unwrap_err(),"SYNC_REQUIRED");
+        crate::wallet::storage_close(g).unwrap();
+    }
+}
