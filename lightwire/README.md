@@ -12,6 +12,8 @@ const balance = codec.decodeResponse('GetTaddressBalance', responseBytes);
 const block = codec.decodeItem('GetBlockRange', itemBytes);
 ```
 
+The private `codec.encodeTreeState(jsonText)` operation encodes the same bounded `TreeState` response DTO, including `orchard_tree`, using the pinned prost message. This additive operation requires freshly built matching glue/WASM and capsule hashes; it does not change the method/schema revision or validate consensus tree contents.
+
 Initialize once per imported module. Operations are stateless and synchronous; there are no handles, persistent state, sockets, retries, or cleanup callbacks. The generated glue releases operation argument buffers. Every result owns its data; input mutation after a call cannot change it. Import the facade and its matching generated `wasm/` directory together. The raw generated bindings are an internal implementation boundary, not a separately supported JS API.
 
 ## Internal DTO contract

@@ -62,3 +62,16 @@ fn decode(method: &str, bytes: &[u8], item: bool) -> Result<String, String> {
 pub fn lightwire_encode(method: &str, json: &str) -> Result<Vec<u8>, String> { encode_request(method,json) }
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn lightwire_decode(method: &str, bytes: &[u8], item: bool) -> Result<String, String> { decode(method,bytes,item) }
+
+/// Encode the pinned response DTO for JSON-RPC tree-state composition.
+/// Network, hash and commitment-tree interpretation remain the caller's responsibility.
+pub fn encode_tree_state(json: &str) -> Result<Vec<u8>, String> {
+    bounds::json(json, "TreeState")?;
+    let value: messages::TreeState = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if value.encoded_len() > bounds::MAX_MESSAGE { return Err("encoded message limit".into()); }
+    let bytes = value.encode_to_vec();
+    bounds::wire(&bytes, "TreeState")?;
+    Ok(bytes)
+}
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn lightwire_encode_tree_state(json: &str) -> Result<Vec<u8>, String> { encode_tree_state(json) }

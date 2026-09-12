@@ -1,4 +1,4 @@
-import { initSync, lightwire_encode, lightwire_decode } from './wasm/zakura_lightwire.js';
+import { initSync, lightwire_encode, lightwire_decode, lightwire_encode_tree_state } from './wasm/zakura_lightwire.js';
 
 const MAX_MESSAGE = 4 * 1024 * 1024, MAX_JSON = 2 * MAX_MESSAGE;
 const bufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
@@ -55,6 +55,9 @@ export function createLightwire(wasmBytes) {
     encodeRequest(name, request) {
       method(name, 'request');
       return lightwire_encode(name, requestText(request));
+    },
+    encodeTreeState(response) {
+      return lightwire_encode_tree_state(requestText(response));
     },
     decodeResponse(name, payload) {
       method(name, 'response');
