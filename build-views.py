@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Offline account candidate producer; reuses the immutable wallet verifier/tools.
-No generator, backend, schema, or existing builder is rewritten. Output is private.
+Owned backend patches are verified and materialized; output is private.
 """
 import hashlib, io, json, os
 from pathlib import Path
 import shutil, subprocess, sys, tarfile, tempfile, tomllib
 REPO=Path(__file__).resolve().parent
-SCRATCH=Path('/home/jack/zakura-viewing-accounts-scratch')
+SCRATCH=Path('/home/jack/zakura-viewing-accounts-scratch/authorized-native-policy')
 helper_path=REPO/'build-wallet.py'
 helper_bytes=helper_path.read_bytes()
 if helper_bytes!=subprocess.check_output(['git','-C',str(REPO),'show','HEAD:build-wallet.py']):
@@ -16,7 +16,7 @@ exec(compile(helper_bytes,str(helper_path),'exec'),wallet)
 sha,inventory,require=wallet['sha'],wallet['inventory'],wallet['require']
 
 def main():
-    require(len(sys.argv) in [2,3] and (len(sys.argv)==2 or sys.argv[2]=='--proposed-parent-hook'),'usage: build-views.py NEW_ASSIGNED_OUTPUT [--proposed-parent-hook]')
+    require(len(sys.argv)==2,'usage: build-views.py NEW_ASSIGNED_OUTPUT')
     out=Path(sys.argv[1]).resolve()
     require(out.is_relative_to(SCRATCH) and not out.exists(),'new output under assigned scratch required')
     git=lambda *args: subprocess.check_output(['git','-C',str(REPO),*args])
@@ -32,6 +32,8 @@ def main():
     if proposed:
         subprocess.run(['git','apply','--check',str(source/'tests/wallet-views-storage-hook.patch')],cwd=source,check=True)
         subprocess.run(['git','apply',str(source/'tests/wallet-views-storage-hook.patch')],cwd=source,check=True)
+    subprocess.run([sys.executable, str(source/'native-policy/prepare.py')],
+        env={**os.environ, 'CARGO_HOME':str(SCRATCH/'cargo')}, check=True)
     inputs=inventory(source)
     env={k:v for k,v in os.environ.items() if k not in ['CC','CXX','AR','LD','RANLIB'] and not k.startswith(('CARGO_','RUST','CC_','AR_','CFLAGS','LIBSQLITE','WALLET_'))}
     sdk=wallet['SDK']
@@ -40,10 +42,11 @@ def main():
     inherited=Path('/home/jack/zakura-wallet-storage-scratch/build-04/build.json')
     require(sha(inherited)==receipt['inheritedStorageMetadataSha256'],'inherited storage metadata mismatch')
     receipt['inheritedStorageMetadataPath']=str(inherited)
-    receipt['inheritedStorageHolds']=['HIGH schema admission','HIGH Node hardlink ownership; parent integration pending']
+    receipt['storagePrerequisite']='c44bded merged PR3; scoped source incorporation, combined qualification pending'
+    receipt['nativePolicy']=json.loads((source/'native-policy/vendor/receipt.json').read_text())
     receipt['helperSha256']=hashlib.sha256(helper_bytes).hexdigest()
     receipt['gitSources']=git_inputs
-    receipt['proposedParentHook']=dict(appliedInScratch=proposed,sha256=sha(source/'tests/wallet-views-storage-hook.patch'),approval='PENDING parent integration; never production acceptance')
+    receipt['proposedParentHook']=dict(appliedInScratch=proposed,sha256=sha(source/'tests/wallet-views-storage-hook.patch'),approval='hook incorporated under express owner authorization; independent review pending')
     def run(label,args):
         log=out/f'{label}.log'
         with log.open('xb') as f:
@@ -59,6 +62,11 @@ def main():
             root=Path(p['manifest_path']).parent
             if root==source:
                 require(p['name']=='zakura-network-bindings','local root'); continue
+            if root.is_relative_to(source/'native-policy/vendor'):
+                require(p['name'] in receipt['nativePolicy'] and p['version']=='0.1.0-rc4','owned patch identity')
+                require(inventory(root)==receipt['nativePolicy'][p['name']]['files'],'owned patch mutation')
+                packages[p['name']+'@'+p['version']]=receipt['nativePolicy'][p['name']]
+                continue
             require(p['source']=='registry+https://github.com/rust-lang/crates.io-index','registry source required')
             n,v=p['name'],p['version']
             if n.startswith('zakura-'):
@@ -80,7 +88,9 @@ def main():
         receipt['targetLibraries']=inventory(sysroot/'lib/rustlib/wasm32-unknown-unknown/lib')
         receipt['compilerFiles']={str(p):sha(p) for p in [sysroot/'bin/rustc',sysroot/'bin/cargo',*list((sysroot/'lib').glob('librustc_driver-*')),*list((sysroot/'lib/rustlib').glob('*/bin/rust-lld'))]}
         receipt['sdk']=dict(path=str(sdk),files=inventory(sdk)); receipt['flockSha256']=sha(Path('/usr/bin/flock'))
-        run('native',['cargo','test','--offline','--locked','--features','wallet-storage'])
+        # Exhaustive PR3 migration-order tests run separately in native-all.log;
+        # avoid repeating them in each artifact build.
+        run('native',['cargo','test','--offline','--locked','--features','wallet-storage','--','--skip','schema_source_effects_compose','--skip','schema_document_committed_prefixes_resume'])
         run('primitive-build',['cargo','build','--offline','--locked','--release','--target','wasm32-unknown-unknown','--lib'])
         raw=work/'target/wasm32-unknown-unknown/release/zakura_network_bindings.wasm'
         primitive=out/'primitive'

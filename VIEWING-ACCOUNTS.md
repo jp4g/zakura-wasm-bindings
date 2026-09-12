@@ -1,12 +1,40 @@
 # Private viewing account/address candidate
 
-This is real backend code on the existing worker-local WalletDb, not a public WalletClient or root SDK factory. Acceptance is pending independent HIGH review and final storage/host integration. The base is `dbd67c0`; its lifecycle, VFS, adapter and existing builders remain unchanged in this worktree apart from the authorized `mod accounts;` declaration.
+This is real backend code on the existing worker-local WalletDb, not a public WalletClient or root SDK factory. Acceptance is pending independent HIGH review and final storage/host integration. The original base is `dbd67c0`; the authorized correction incorporates the necessary accepted storage prerequisites and owned native policy patches.
 
-## Required parent integration
+## Owned native policy and storage integration
 
-`tests/wallet-views-storage-hook.patch` proposes one call to `accounts::initialize(conn)?` after native migrations on the same owned connection. The parent owns this lifecycle edit. It is **not applied to src/wallet.rs here**. The hook atomically installs and validates the exact version-1 `ext_viewing_*` schema. Account imports atomically retain original viewing containers and birthday protobufs alongside native records; native import alone discards supplied checkpoint frontiers on this pinned graph. A future scan implementation must load this retained checkpoint as its prior state. This slice does not implement scanning or claim native shard caches were populated by import.
+The express owner authorization supersedes the historical VIEW hold. This worktree
+incorporates the necessary merged storage PR3 source from `c44bded`, including exact
+schema admission and Node hardlink ownership checks. The viewing extension is
+explicitly admitted by exact object definitions and initialized on the same owned
+connection after native migrations. Independent review and integration remain the
+coordinator's responsibility.
 
-Without that hook, account import fails closed when extension storage is missing. For review only, `build-views.py OUTPUT --proposed-parent-hook` applies the tracked patch in a fresh scratch source snapshot and records both original Git and actual patched input inventories, patch digest, tool/dependency hashes, commands, logs, and the resulting complete executable closure. A successful build receipt is not parent approval or production acceptance. The unmodified `build-wallet.py` verifier and approved generator/tool paths are reused; no generated glue or dependency source is patched.
+`native-policy/prepare.py` verifies the cached RC4 archives against the pinned
+checksums in `native-policy/upstream.json`, verifies every source file against those
+archives, and applies the two tracked patches to an ignored owned vendor directory.
+Cargo patches select those paths for native and WASM builds. No shared registry
+source is changed and no package is installed. Run preparation once with the
+already-populated isolated `CARGO_HOME`; an existing vendor directory is preserved
+rather than overwritten. `build-views.py OUTPUT` performs this preparation in its
+committed source snapshot and records patched source inventories in the receipt.
+
+The SQLite `WalletWrite::put_blocks` transaction applies account purpose to every
+scanned block before tree persistence, including scans constructed directly from
+UFVKs. True view-only notes keep viewing/history data (including nullifiers and
+positions), but their commitments have no per-note witness mark. Block checkpoints
+remain shared chain state. Omitted/false imports keep normal marked retention.
+Native shielded selection, single-note lookup, witness metadata selection and
+stabilization honor purpose. Transparent selection and spend-oriented outpoint
+lookup exclude true view-only accounts; history rows remain stored. UFVK possession
+is not signer possession. No signer attachment or implicit upgrade is introduced.
+
+This policy applies to newly persisted scans. It is not an erasure migration for
+witness marks created by an older unpatched backend, nor a physical erasure promise.
+The original reviewed candidate had no note-bearing scans. Reusing other populated
+pre-policy databases needs an explicit migration/recovery decision in foreground;
+spend selection is nevertheless gated by native purpose.
 
 ## Private interface
 
@@ -51,4 +79,7 @@ The producer source graph remains the base's Common 1.0.0 package family, `zakur
 
 Inherited Common advisories remain open. Existing delivery evidence reports `RUSTSEC-2023-0089` (`atomic-polyfill@1.0.3`) coalesced across six qualification records; this work performs no new advisory scan and makes no clean-security claim. Encryption at rest, real browser quota exhaustion/eviction, power loss, full H1 negotiation/error/recovery envelopes, verified public loader integration, and final storage/host acceptance remain separate gates. No publication, push or merge is performed.
 
-The current owner correction supersedes the initial transcribed `036e2b...` hash. Verified inherited build04 metadata is `b6779aa79677dd3759628a3752e6997023d2b74184362fc2152038c2483d2041`; inherited WASM is `d24854f7c59bfc568d3bf3b3cf2c077ce617228f39f183b634ee36da7f0c5b69`. The owner reports HIGH inherited schema-admission and Node hardlink-ownership defects. Separate storage owners handle those fixes; this candidate retains the frozen base and does not clear either hold. Parent must combine reviewed storage fixes and the proposed versioned extension hook, rebuild, run Node/Firefox, and obtain independent HIGH acceptance.
+Fresh qualification and exact remaining limitations are recorded in the assigned
+`authorized-native-policy/REPORT.md` and raw command logs. Historical build04/05 and
+parent Firefox evidence are retained evidence, not fresh qualification of these
+changed bytes. No loader-provider review, bypass, push, merge or publication occurs.

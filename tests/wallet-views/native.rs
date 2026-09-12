@@ -16,11 +16,6 @@ fn open() -> (String,u32) {
     let root = std::env::var("WALLET_TEST_ROOT").unwrap();
     let path = format!("{root}/views-{}.db", uuid::Uuid::new_v4());
     let generation = crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
-    // Native control installs the proposed same-DB hook explicitly. Production
-    // WASM uses the parent lifecycle patch; unpatched production fails closed.
-    crate::wallet::storage_close(generation).unwrap();
-    let mut conn=rusqlite::Connection::open(&path).unwrap(); super::initialize(&mut conn).unwrap(); conn.close().unwrap();
-    let generation=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     (path,generation)
 }
 fn call(g: u32, op: &str, input: Value) -> std::result::Result<Value,String> {
@@ -142,7 +137,10 @@ fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
     let input=fixture(10);
     let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
     let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
+    let mut explicit_false=fixture(12);explicit_false["viewOnly"]=json!(false);
+    let mut explicit_true=fixture(14);explicit_true["viewOnly"]=json!(true);
     let output=json!({"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
+        "policyImports":[explicit_false,explicit_true],
         "uivk":key.to_unified_incoming_viewing_key().encode(&p),"defaultAddress":address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()});
     std::fs::write(format!("{root}/views-fixture.json"),output.to_string()).unwrap();
 }
@@ -233,4 +231,108 @@ fn native_default_address_cannot_exceed_recovery_gap_during_import() {
     assert_eq!(call(g,"account_import",fixture(7)).unwrap_err(),"ADDRESS_GAP_LIMIT");
     assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
     crate::wallet::storage_close(g).unwrap();
+}
+
+// Real encrypted compact outputs, decrypted by the pinned scanner and persisted by
+// WalletWrite::put_blocks. Values/keys are synthetic; no provider or funds involved.
+fn policy_block(key: &UnifiedFullViewingKey) -> zcash_client_backend::proto::compact_formats::CompactBlock {
+    use zcash_client_backend::proto::compact_formats::*;
+    use zcash_note_encryption::Domain;
+    use orchard::note::{NoteVersion, RandomSeed, Rho, ExtractedNoteCommitment};
+    use orchard::note_encryption::{IronwoodDomain, IronwoodNoteEncryption, OrchardDomain, OrchardNoteEncryption};
+    let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
+    let dfvk = key.sapling().unwrap();
+    let note = sapling::Note::from_parts(dfvk.default_address().1,
+        sapling::value::NoteValue::from_raw(50_000), sapling::Rseed::AfterZip212([42;32]));
+    let encryptor = sapling::note_encryption::sapling_note_encryption(Some(dfvk.fvk().ovk),note.clone(),[0;512],&mut rng);
+    let output = CompactSaplingOutput { cmu:note.cmu().to_bytes().to_vec(),
+        ephemeral_key:sapling::note_encryption::SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),
+        ciphertext:encryptor.encrypt_note_plaintext()[..52].to_vec() };
+    let fvk = key.orchard().unwrap();
+    let action = |ironwood| {
+        let rho = Rho::from_bytes(&[0;32]).unwrap();
+        let rseed = RandomSeed::from_bytes([43;32],&rho).unwrap();
+        let note = orchard::Note::from_parts(fvk.address_at(0u32,zip32::Scope::External),
+            orchard::value::NoteValue::from_raw(60_000),rho,rseed,
+            if ironwood {NoteVersion::V3} else {NoteVersion::V2}).unwrap();
+        let (epk,ciphertext) = if ironwood {
+            let e=IronwoodNoteEncryption::new(Some(fvk.to_ovk(zip32::Scope::External)),note,[0;512]);
+            (IronwoodDomain::epk_bytes(e.epk()).0,e.encrypt_note_plaintext())
+        } else {
+            let e=OrchardNoteEncryption::new(Some(fvk.to_ovk(zip32::Scope::External)),note,[0;512]);
+            (OrchardDomain::epk_bytes(e.epk()).0,e.encrypt_note_plaintext())
+        };
+        CompactOrchardAction { nullifier:vec![0;32],cmx:ExtractedNoteCommitment::from(note.commitment()).to_bytes().to_vec(),ephemeral_key:epk.to_vec(),ciphertext:ciphertext[..52].to_vec() }
+    };
+    CompactBlock { height:100,hash:vec![8;32],prev_hash:vec![7;32],time:2,
+        vtx:vec![CompactTx { txid:vec![9;32],index:1,outputs:vec![output],actions:vec![action(false)],ironwood_actions:vec![action(true)],..Default::default() }],
+        chain_metadata:Some(ChainMetadata {sapling_commitment_tree_size:1,orchard_commitment_tree_size:1,ironwood_commitment_tree_size:1}),..Default::default() }
+}
+
+#[test]
+fn native_policy_real_scan_retention_selection_and_reopen() {
+    use zcash_client_backend::{scanning::{scan_block,ScanningKeys,Nullifiers},data_api::{InputSource,WalletCommitmentTrees,BlockMetadata,locking::LockFilter}};
+    use zcash_primitives::{block::BlockHash,transaction::TxId};
+    use zcash_protocol::ShieldedPool;
+    for policy in [None,Some(false),Some(true)] {
+        let (path,g)=open();
+        let mut input=fixture(10);
+        if let Some(value)=policy {input["viewOnly"]=json!(value);}
+        let account=call(g,"account_import",input.clone()).unwrap();
+        let account_id=id(&json!({"accountId":account["id"]})).unwrap();
+        let p=crate::Document::parse(PARAMS).unwrap();
+        let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
+        let birthday=birthday(&input["birthday"],PARAMS,&[3;32],&p).unwrap();
+        let keys=ScanningKeys::from_account_ufvks([(account_id,key)]);
+        let cb=policy_block(&UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap());
+        let prior=BlockMetadata::from_parts(99u32.into(),BlockHash([7;32]),Some(0),Some(0),Some(0));
+        let scan=scan_block(&p,cb,&keys,&Nullifiers::empty(),Some(&prior)).unwrap();
+        assert_eq!(scan.transactions()[0].sapling_outputs().len(),1);
+        assert_eq!(scan.transactions()[0].orchard_outputs().len(),1);
+        assert_eq!(scan.transactions()[0].ironwood_outputs().len(),1);
+        crate::wallet::DOMAIN.with(|domain| {
+            let mut domain=domain.borrow_mut();let db=&mut domain.active.as_mut().unwrap().wallet;
+            db.update_chain_tip(100u32.into()).unwrap();
+            db.put_blocks(birthday.prior_chain_state(),vec![scan]).unwrap();
+            let address = *db.get_last_generated_address_matching(account_id,UnifiedAddressRequest::AllAvailableKeys).unwrap().unwrap().transparent().unwrap();
+            let output = zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+                zcash_transparent::bundle::OutPoint::new([10;32],0),
+                zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(70_000),address.script().into()),
+                Some(100u32.into()),Some(account_id),Some(TransparentKeyScope::EXTERNAL),None).unwrap();
+            db.put_received_transparent_utxo(&output).unwrap();
+        });
+        crate::wallet::storage_close(g).unwrap();
+        let conn=rusqlite::Connection::open(&path).unwrap();
+        for pool in ["sapling","orchard","ironwood"] {
+            let count:u32=conn.query_row(&format!("SELECT count(*) FROM {pool}_received_notes WHERE nf IS NOT NULL AND value>0 AND commitment_tree_position=0"),[],|r|r.get(0)).unwrap();
+            assert_eq!(count,1,"viewing history and spentness retained: {pool}");
+        }
+        assert_eq!(conn.query_row("SELECT ufvk IS NOT NULL FROM accounts",[],|r|r.get::<_,bool>(0)).unwrap(),true);
+        conn.close().unwrap();
+        let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
+        crate::wallet::DOMAIN.with(|domain| {
+            let mut domain=domain.borrow_mut();let db=&mut domain.active.as_mut().unwrap().wallet;
+            let expected=usize::from(policy!=Some(true));
+            let sapling=db.with_sapling_tree_mut(|tree| tree.marked_positions()).unwrap();
+            let orchard=db.with_orchard_tree_mut(|tree| tree.marked_positions()).unwrap();
+            let ironwood=db.with_ironwood_tree_mut(|tree| tree.marked_positions()).unwrap().unwrap();
+            assert_eq!([sapling.len(),orchard.len(),ironwood.len()],[expected;3]);
+            let selected = db.select_spendable_notes(account_id,
+                zcash_client_backend::data_api::TargetValue::AtLeast(zcash_protocol::value::Zatoshis::const_from_u64(10_000)),
+                &[ShieldedPool::Sapling,ShieldedPool::Orchard,ShieldedPool::Ironwood],101u32.into(),
+                zcash_client_backend::data_api::wallet::ConfirmationsPolicy::MIN,&[],LockFilter::Unfiltered).unwrap();
+            assert_eq!([selected.sapling().len(),selected.orchard().len(),selected.ironwood().len()],[expected;3]);
+            let address = *db.get_last_generated_address_matching(account_id,UnifiedAddressRequest::AllAvailableKeys).unwrap().unwrap().transparent().unwrap();
+            let outputs = db.get_spendable_transparent_outputs(&address,101u32.into(),
+                zcash_client_backend::data_api::wallet::ConfirmationsPolicy::MIN,
+                zcash_client_backend::data_api::CoinbaseFilter::AllTransparentOutputs,LockFilter::Unfiltered).unwrap();
+            assert_eq!(outputs.len(),expected);
+            assert_eq!(db.get_unspent_transparent_output(&zcash_transparent::bundle::OutPoint::new([10;32],0),101u32.into()).unwrap().is_some(),expected==1);
+            for pool in [ShieldedPool::Sapling,ShieldedPool::Orchard,ShieldedPool::Ironwood] {
+                assert_eq!(db.get_spendable_note(&TxId::from_bytes([9;32]),pool,0,101u32.into(),LockFilter::Unfiltered).unwrap().is_some(),expected==1,"{pool:?}");
+            }
+        });
+        crate::wallet::storage_close(g).unwrap();
+    }
 }

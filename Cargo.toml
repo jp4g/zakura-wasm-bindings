@@ -37,9 +37,18 @@ wasm-bindgen = "=0.2.128"
 zcash_primitives = { package = "zakura-primitives", version = "=1.0.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+sapling = { package = "zakura-sapling-crypto", version = "=1.0.0", default-features = false }
+orchard = { package = "zakura-orchard", version = "=1.0.0", default-features = false }
+zcash_note_encryption = "=0.4.2"
+
 serde_json = "=1.0.151"
 hex = "=0.4.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "=0.4.3", features = ["wasm_js"], optional = true }
 uuid = { version = "=1.26.1", features = ["js"], optional = true }
+
+# Materialized from checksum-verified locked archives by native-policy/prepare.py.
+[patch.crates-io]
+zakura-client-backend = { path = "native-policy/vendor/zakura-client-backend" }
+zakura-client-sqlite = { path = "native-policy/vendor/zakura-client-sqlite" }

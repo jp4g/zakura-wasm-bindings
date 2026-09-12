@@ -25,10 +25,17 @@ function start(create=false,ownedRoot=root) {
   };
 }
 let owner=start(true), account,list,token;
+const policyAccounts=[];
 try {
   token=await owner.call('initialize');assert.equal(token.ok,true,show(token));
   const imported=await owner.call('account_import',fixture.import);assert.equal(imported.ok,true,show(imported));account=imported.result;
   assert.equal(account.viewOnly,false);assert.equal(account.signerAttached,false);
+  for(const input of fixture.policyImports) {
+    for(const k of ['parameters','genesis','priorTreeState'])input.birthday[k]=Uint8Array.from(input.birthday[k].match(/../g),b=>parseInt(b,16));
+    const result=await owner.call('account_import',input);assert.equal(result.ok,true,show(result));
+    assert.equal(result.result.viewOnly,input.viewOnly);assert.equal(result.result.signerAttached,false);policyAccounts.push(result.result);
+  }
+
   const args={accountId:account.id};
   const initial=await owner.call('address_list',args);assert.deepEqual(initial.result,[fixture.defaultAddress]);
   assert.equal((await owner.call('address_current',args)).result,fixture.defaultAddress.address);
@@ -55,7 +62,8 @@ try {
 owner=start();
 try {
   assert.equal((await owner.call('initialize')).ok,true);
-  assert.deepEqual((await owner.call('account_list')).result,[account]);
+  assert.deepEqual((await owner.call('account_list')).result.map(a=>a.id).sort(),[account,...policyAccounts].map(a=>a.id).sort());
+  for(const a of policyAccounts)assert.deepEqual((await owner.call('account_get',{accountId:a.id})).result,a);
   assert.deepEqual((await owner.call('address_list',{accountId:account.id})).result,list);
   assert.equal((await owner.call('account_list',{}, {instance:token.instance})).error,'WRONG_INSTANCE');
   assert.equal((await owner.call('close')).ok,true);

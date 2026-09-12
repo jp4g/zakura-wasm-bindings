@@ -14,22 +14,23 @@ use zcash_keys::address::{Address, UnifiedAddress};
 use zip32::DiversifierIndex;
 use zcash_protocol::consensus::{Parameters, NetworkType, NetworkUpgrade};
 
-// Parent integration hook: called on the same owned connection after native
-// migrations, before opening admission. See the explicit pending storage patch.
+pub(super) const DEFINITIONS: [(&str, &str); 3] = [
+    ("ext_viewing_version","CREATE TABLE ext_viewing_version(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)"),
+    ("ext_viewing_accounts","CREATE TABLE ext_viewing_accounts(account_uuid BLOB PRIMARY KEY CHECK(length(account_uuid)=16),metadata TEXT NOT NULL)"),
+    ("ext_viewing_addresses","CREATE TABLE ext_viewing_addresses(account_uuid BLOB NOT NULL,address TEXT NOT NULL,diversifier TEXT NOT NULL,PRIMARY KEY(account_uuid,address))"),
+];
+
+// Called on the same owned connection after native migrations. Exact extension
+// object admission is composed with the accepted storage schema before writes.
 pub(super) fn initialize(conn: &mut rusqlite::Connection) -> std::result::Result<(),String> {
     (|| -> std::result::Result<(),rusqlite::Error> {
         let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let definitions=[
-            ("ext_viewing_version","CREATE TABLE ext_viewing_version(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)"),
-            ("ext_viewing_accounts","CREATE TABLE ext_viewing_accounts(account_uuid BLOB PRIMARY KEY CHECK(length(account_uuid)=16),metadata TEXT NOT NULL)"),
-            ("ext_viewing_addresses","CREATE TABLE ext_viewing_addresses(account_uuid BLOB NOT NULL,address TEXT NOT NULL,diversifier TEXT NOT NULL,PRIMARY KEY(account_uuid,address))"),
-        ];
         let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ext_viewing_version')",[],|r|r.get(0))?;
         if !exists {
-            for (_,sql) in definitions {tx.execute_batch(sql)?;}
+            for (_,sql) in DEFINITIONS {tx.execute_batch(sql)?;}
             tx.execute("INSERT INTO ext_viewing_version VALUES(1,1)",[])?;
         }
-        for (name,expected) in definitions {
+        for (name,expected) in DEFINITIONS {
             let actual:String=tx.query_row("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",[name],|r|r.get(0))?;
             if actual!=expected {return Err(rusqlite::Error::InvalidQuery);}
         }

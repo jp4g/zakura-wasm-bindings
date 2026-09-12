@@ -1,0 +1,91 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2348,6 +2348,20 @@
+             .transpose()?
+             .flatten();
+ 
++        // AccountPurpose is a retention policy, not proof of secret possession.
++        // Enforce it here even when callers supply scans built from raw UFVKs.
++        let spending_accounts = self.get_account_ids()?.into_iter()
++            .map(|id| self.get_account(id).map(|account| (id, account)))
++            .collect::<Result<Vec<_>, _>>()?;
++        let mut blocks = blocks;
++        for block in &mut blocks {
++            block.retain_spending_state(|id| spending_accounts.iter().any(|(candidate, account)| {
++                candidate == id && account.as_ref().is_some_and(|a| {
++                    a.purpose() != AccountPurpose::ViewOnly
++                })
++            }));
++        }
++
+         ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
+             self,
+             #[cfg(feature = "transparent-inputs")]
+--- a/src/wallet/common.rs
++++ b/src/wallet/common.rs
+@@ -284,6 +284,7 @@
+              WHERE t.txid = :txid
+              AND t.block IS NOT NULL
+              AND rn.{output_index_col} = :output_index
++             AND accounts.has_spend_key = 1
+              AND accounts.ufvk IS NOT NULL
+              AND rn.recipient_key_scope IS NOT NULL
+              AND rn.nf IS NOT NULL
+@@ -606,7 +607,8 @@
+             ON tt.id_tx = tro.transaction_id
+          WHERE accounts.uuid = :account_uuid
+          AND rn.value > :min_value
+-         AND accounts.ufvk IS NOT NULL
++         AND accounts.has_spend_key = 1
++             AND accounts.ufvk IS NOT NULL
+          AND recipient_key_scope IS NOT NULL
+          AND nf IS NOT NULL
+          AND ({})  -- the transaction is unexpired
+@@ -895,6 +897,7 @@
+                 ON tt.id_tx = tro.transaction_id
+              WHERE accounts.uuid = :account_uuid
+              AND rn.value > :min_value
++             AND accounts.has_spend_key = 1
+              AND accounts.ufvk IS NOT NULL
+              AND recipient_key_scope IS NOT NULL
+              AND nf IS NOT NULL
+@@ -1096,7 +1099,8 @@
+                 commitment_tree_position, value
+          FROM {table_prefix}_received_notes rn
+          INNER JOIN transactions ON transactions.id_tx = rn.transaction_id
+-         WHERE value > 5000 -- FIXME #1316, allow selection of dust inputs
++         WHERE EXISTS (SELECT 1 FROM accounts WHERE accounts.id = rn.account_id AND accounts.has_spend_key = 1)
++         AND value > 5000 -- FIXME #1316, allow selection of dust inputs
+          AND recipient_key_scope IS NOT NULL
+          AND nf IS NOT NULL
+          AND commitment_tree_position IS NOT NULL
+--- a/src/wallet/scanning.rs
++++ b/src/wallet/scanning.rs
+@@ -653,6 +653,7 @@
+             "UPDATE {table_prefix}_received_notes
+              SET witness_stabilized = 1
+              WHERE witness_stabilized = 0
++               AND account_id IN (SELECT id FROM accounts WHERE has_spend_key = 1)
+                AND commitment_tree_position IS NOT NULL
+                AND EXISTS (
+                    SELECT 1 FROM {table_prefix}_tree_shards shard
+--- a/src/wallet/transparent.rs
++++ b/src/wallet/transparent.rs
+@@ -1334,7 +1334,8 @@
+          AND (
+              :allow_unspendable
+              OR (
+-                 -- the transaction that created the output is mined or is definitely unexpired
++                 accounts.has_spend_key = 1
++                 AND -- the transaction that created the output is mined or is definitely unexpired
+                  ({}) -- the transaction is unexpired
+                  AND u.id NOT IN ({}) -- and the output is unspent
+                  AND ({}) -- exclude likely-spent wallet-internal ephemeral outputs
+@@ -1391,6 +1392,7 @@
+          JOIN accounts ON accounts.id = u.account_id
+          JOIN addresses ON addresses.id = u.address_id
+          WHERE {address_predicate_sql}
++         AND accounts.has_spend_key = 1
+          AND u.value_zat > :min_value
+          AND ({}) -- the transaction is mined or unexpired with minconf 0
+          AND u.id NOT IN ({}) -- and the output is unspent

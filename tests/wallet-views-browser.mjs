@@ -63,6 +63,13 @@ try {
   for(const k of ['parameters','genesis','priorTreeState'])input.birthday[k]=Uint8Array.from(input.birthday[k].match(/../g),b=>parseInt(b,16));
   const imported=await first.call({op:'account_import',generation:opened.generation,args:input});check(imported.ok,JSON.stringify(imported));
   const account=imported.result, args={accountId:account.id};
+  const policyAccounts=[];
+  for(const input of fixture.policyImports) {
+    for(const k of ['parameters','genesis','priorTreeState'])input.birthday[k]=Uint8Array.from(input.birthday[k].match(/../g),b=>parseInt(b,16));
+    const result=await first.call({op:'account_import',generation:opened.generation,args:input});
+    check(result.ok && result.result.viewOnly===input.viewOnly && !result.result.signerAttached,'explicit native import policy');policyAccounts.push(result.result);
+  }
+
   const listed=await first.call({op:'address_list',generation:opened.generation,args});check(listed.ok && listed.result[0].address===fixture.defaultAddress.address,'native default address');
   const allocated=await first.call({op:'address_next',generation:opened.generation,args});check(allocated.ok,JSON.stringify(allocated,(_,v)=>typeof v==='bigint'?v.toString():v));
   const exact=await first.call({op:'address_at',generation:opened.generation,args:{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}}});check(exact.ok && exact.result.index===309485009821345068724781055n,'88 bit exact index');
@@ -84,6 +91,10 @@ try {
   const reopened = start();
   const again = await reopened.call(initialize(false)); check(again.ok, JSON.stringify(again));
   const stored=await reopened.call({op:'account_get',generation:again.generation,args:{accountId:account.id}});check(stored.ok&&encode(stored.result)===encode(account),'persistent UUID/account');
+  for(const a of policyAccounts) {
+    const result=await reopened.call({op:'account_get',generation:again.generation,args:{accountId:a.id}});
+    check(result.ok && encode(result.result)===encode(a),'explicit import policy survives OPFS reopen');
+  }
   const addresses=await reopened.call({op:'address_list',generation:again.generation,args});check(addresses.ok&&encode(addresses.result)===encode(records),'persistent verified address list');
   check((await reopened.call({op:'account_list',generation:again.generation,instance:opened.instance})).error==='WRONG_INSTANCE','cross-worker handle');
   results.push({case:'same DB account/address after observed destruction',accountId:account.id,addresses:addresses.result.length});

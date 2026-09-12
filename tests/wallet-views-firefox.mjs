@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { ownedLifecycle } from './wallet-views-lifecycle.mjs';
 const base = process.argv[2];
 if (!base) throw Error('bundle path required');
-const logs = '/home/jack/zakura-viewing-accounts-logs/browser-fix/round2';
+const logs = '/home/jack/zakura-viewing-accounts-logs/authorized-native-policy';
 const stamp = Date.now();
 const output = fs.openSync(`${logs}/firefox-driver-${stamp}.log`, 'wx');
 const port = Number(process.env.WALLET_DRIVER_PORT ?? 19486);
