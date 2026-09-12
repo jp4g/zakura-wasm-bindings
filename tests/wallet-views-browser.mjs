@@ -63,6 +63,16 @@ try {
   for(const k of ['parameters','genesis','priorTreeState'])input.birthday[k]=Uint8Array.from(input.birthday[k].match(/../g),b=>parseInt(b,16));
   const imported=await first.call({op:'account_import',generation:opened.generation,args:input});check(imported.ok,JSON.stringify(imported));
   const account=imported.result, args={accountId:account.id};
+  const balanceArgs={...args,confirmations:{trusted:1,untrusted:1,allowZeroConfirmationShielding:true}};
+  const balanceRequest={op:'account_balance',generation:opened.generation,args:balanceArgs};
+  const balance=await first.call(balanceRequest);
+  check(balance.ok&&balance.result.accountId===account.id&&balance.result.amounts===null&&balance.writes===0,'unavailable native balance is null without writes');
+  check(Object.keys(balance.result).sort().join() === 'accountId,amounts','private balance has no scan/revision');
+  const balanceAbort=await first.call({...balanceRequest,abort:'before'});
+  check(balanceAbort.error==='ABORTED'&&balanceAbort.commit==='none'&&balanceAbort.writes===0,'balance preabort no writes');
+  check((await first.call({...balanceRequest,instance:'wrong'})).error==='WRONG_INSTANCE','balance wrong instance');
+  check((await first.call({...balanceRequest,generation:opened.generation+1})).error==='STALE_HANDLE','balance stale generation');
+  check((await first.call({...balanceRequest,args:{...balanceArgs,accountId:'00000000-0000-0000-0000-000000000000'}})).error==='ACCOUNT_NOT_FOUND','balance unknown account');
   const policyAccounts=[];
   for(const input of fixture.policyImports) {
     for(const k of ['parameters','genesis','priorTreeState'])input.birthday[k]=Uint8Array.from(input.birthday[k].match(/../g),b=>parseInt(b,16));
@@ -133,6 +143,7 @@ try {
   await contender.destroy();
   check((await first.call({ op: 'close', generation: opened.generation })).ok, 'close');
   check(!(await first.call({ op: 'account_list', generation: opened.generation })).ok, 'stale operation');
+  check((await first.call(balanceRequest)).error==='STALE_HANDLE','balance after close');
   await first.destroy();
   // No replacement until the server observed the original BiDi realm destroyed.
   const wrong = start(), wrongRequest = initialize(false); wrongRequest.genesis[0] = 4;
@@ -140,6 +151,10 @@ try {
   await wrong.destroy();
   const reopened = start();
   const again = await reopened.call(initialize(false)); check(again.ok, JSON.stringify(again));
+  const balanceAgain=await reopened.call({...balanceRequest,generation:again.generation});
+  check(balanceAgain.ok&&balanceAgain.result.accountId===account.id&&balanceAgain.result.amounts===null&&balanceAgain.writes===0,'balance survives OPFS destruction/reopen');
+  check((await reopened.call({...balanceRequest,generation:again.generation,instance:opened.instance})).error==='WRONG_INSTANCE','balance old owner after reopen');
+  results.push({case:'private native balance OPFS read/preabort/close/destruction/reopen',accountId:account.id});
   const stored=await reopened.call({op:'account_get',generation:again.generation,args:{accountId:account.id}});check(stored.ok&&encode(stored.result)===encode(account),'persistent UUID/account');
   for(const a of policyAccounts) {
     const result=await reopened.call({op:'account_get',generation:again.generation,args:{accountId:a.id}});
@@ -169,6 +184,54 @@ try {
   results.push({case:'mnemonic all counts/NFKD/empty/rollback/abort/OPFS destruction/reopen',cases:mnemonicCases.length});
   check((await reopened.call({ op: 'close', generation: again.generation })).ok, 'reopened close');
   await reopened.destroy();
+  // Reuse native scanner databases and the original observed worker lifecycle.
+  const liftAmounts=v=>typeof v==='string'&&/^[0-9]+$/.test(v)?BigInt(v):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,liftAmounts(x)])):v;
+  const exactBalance=(actual,expected,label)=> {
+    if(expected&&typeof expected==='object') {
+      check(actual&&typeof actual==='object'&&Object.keys(actual).sort().join()===Object.keys(expected).sort().join(),label+' keys');
+      for(const key of Object.keys(expected))exactBalance(actual[key],expected[key],label+'.'+key);
+    } else check(actual===expected,label+' value/type');
+  };
+  check(fixture.balanceCases.length>=4,'populated native fixtures required');
+  for(const scenario of ['coinbase-before-maturity','coinbase-at-maturity'])
+    check(fixture.balanceCases.some(test=>test.scenario===scenario),'scanned maturity fixture required: '+scenario);
+  for(const [index,test] of fixture.balanceCases.entries()) {
+    const balanceRoot=`${root}-balance-${index}`;
+    let oldToken, persisted;
+    for(let reopen=0;reopen<2;reopen++) {
+      const owner=start();
+      const opened=await owner.call({...initialize(reopen===0),root:balanceRoot,...(reopen===0?{database:Uint8Array.from(test.database.match(/../g),b=>parseInt(b,16))}:{})});
+      check(opened.ok&&opened.secure,'populated OPFS initialize');
+      const snapshot=await owner.call({op:'fixture_snapshot'});check(snapshot.ok,'fixture snapshot');
+      const before=snapshot.result;
+      if(persisted)check(before.length===persisted.length&&before.every((b,i)=>b===persisted[i]),'populated bytes survive destruction/reopen');
+      for(const {args,expected} of test.queries) {
+        const saved=structuredClone(args),request={op:'account_balance',generation:opened.generation,args};
+        const result=await owner.call(request);
+        check(result.ok&&result.writes===0,'populated balance read without writes');
+        exactBalance(result.result,{accountId:expected.accountId,amounts:liftAmounts(expected.amounts)},'native balance');
+        exactBalance(args,saved,'caller policy');
+        const pre=await owner.call({...request,abort:'before'});
+        check(pre.error==='ABORTED'&&pre.commit==='none'&&pre.reads===0&&pre.writes===0,'populated preabort no IO');
+        check((await owner.call({...request,instance:'wrong'})).error==='WRONG_INSTANCE','populated wrong owner');
+        check((await owner.call({...request,generation:opened.generation+1})).error==='STALE_HANDLE','populated stale generation');
+        if(oldToken)check((await owner.call({...request,instance:oldToken.instance})).error==='WRONG_INSTANCE','populated old owner');
+        for(const confirmations of [null,{}, {...args.confirmations,trusted:0},{...args.confirmations,untrusted:4294967296},{...args.confirmations,trusted:2,untrusted:1},{...args.confirmations,allowZeroConfirmationShielding:1}]) {
+          const rejected=await owner.call({...request,args:{accountId:args.accountId,confirmations}});
+          check(rejected.error==='INVALID_ARGUMENT'&&rejected.writes===0,'populated invalid policy');
+        }
+      }
+      const request={op:'account_balance',generation:opened.generation,args:test.queries[0].args};
+      check((await owner.call({...request,args:{...request.args,accountId:'00000000-0000-0000-0000-000000000000'}})).error==='ACCOUNT_NOT_FOUND','populated unknown account');
+      const after=await owner.call({op:'fixture_snapshot'});check(after.ok&&after.result.length===before.length&&after.result.every((b,i)=>b===before[i]),'balance queries preserve OPFS bytes');
+      persisted=before;
+      check((await owner.call({op:'close',generation:opened.generation})).ok,'populated close');
+      check((await owner.call(request)).error==='STALE_HANDLE','populated balance after close');
+      oldToken=opened;
+      await owner.destroy();
+    }
+    results.push({case:'native populated OPFS exact bigint/policy/purpose/abort/no mutation/destruction/reopen',index,scenario:test.scenario??(test.locked?'locked':'purpose'),queries:test.queries.length});
+  }
   outcome = { pass: true, root, results, userAgent: navigator.userAgent, actualQuotaExhaustion: false, uaEviction: false };
 } catch (e) { outcome = { pass: false, root, results, error: { name: e.name, message: e.message, stack: e.stack } }; }
 finally { for (const worker of active) worker.terminate(); }

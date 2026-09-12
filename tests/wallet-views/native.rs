@@ -22,6 +22,22 @@ fn call(g: u32, op: &str, input: Value) -> std::result::Result<Value,String> {
     views_call(g,op,&input.to_string()).map(|s| serde_json::from_str(&s).unwrap())
 }
 #[test]
+fn account_balance_unavailable_is_not_unknown() {
+    let (path,g)=open();
+    let account=call(g,"account_import",fixture(10)).unwrap();
+    let args=json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}});
+    let before=std::fs::read(&path).unwrap();
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap(),json!({"accountId":account["id"],"amounts":null}));
+    let mut unknown=args.clone();unknown["accountId"]=json!("00000000-0000-0000-0000-000000000000");
+    assert_eq!(call(g,"account_balance",unknown).unwrap_err(),"ACCOUNT_NOT_FOUND");
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    crate::wallet::storage_close(g).unwrap();
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap_err(),"STALE_HANDLE");
+    let reopened=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(reopened,"account_balance",args).unwrap()["amounts"],Value::Null);
+    crate::wallet::storage_close(reopened).unwrap();
+}
+#[test]
 fn ufvk_import_retains_native_uuid_and_tracking_after_reopen() {
     let (path,g) = open();
     let account = call(g,"account_import",fixture(10)).unwrap();
@@ -139,7 +155,10 @@ fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
     let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
     let mut explicit_false=fixture(12);explicit_false["viewOnly"]=json!(false);
     let mut explicit_true=fixture(14);explicit_true["viewOnly"]=json!(true);
-    let output=json!({"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
+    let mut balance_cases=policy_scan_matrix(false);
+    balance_cases.push(locked_balance_case(&balance_cases[0]));
+    balance_cases.extend(balance_scanner_edge_cases());
+    let output=json!({"balanceCases":balance_cases,"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
         "policyImports":[explicit_false,explicit_true],
         "uivk":key.to_unified_incoming_viewing_key().encode(&p),"defaultAddress":address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()});
     std::fs::write(format!("{root}/views-fixture.json"),output.to_string()).unwrap();
@@ -236,6 +255,9 @@ fn native_default_address_cannot_exceed_recovery_gap_during_import() {
 // Real encrypted compact outputs, decrypted by the pinned scanner and persisted by
 // WalletWrite::put_blocks. Values/keys are synthetic; no provider or funds involved.
 fn policy_block(key: &UnifiedFullViewingKey) -> zcash_client_backend::proto::compact_formats::CompactBlock {
+    balance_block(key,50_000,60_000)
+}
+fn balance_block(key: &UnifiedFullViewingKey, sapling_value:u64, orchard_value:u64) -> zcash_client_backend::proto::compact_formats::CompactBlock {
     use zcash_client_backend::proto::compact_formats::*;
     use zcash_note_encryption::Domain;
     use orchard::note::{NoteVersion, RandomSeed, Rho, ExtractedNoteCommitment};
@@ -243,7 +265,7 @@ fn policy_block(key: &UnifiedFullViewingKey) -> zcash_client_backend::proto::com
     let mut rng = rand_core::UnwrapErr(getrandom::SysRng);
     let dfvk = key.sapling().unwrap();
     let note = sapling::Note::from_parts(dfvk.default_address().1,
-        sapling::value::NoteValue::from_raw(50_000), sapling::Rseed::AfterZip212([42;32]));
+        sapling::value::NoteValue::from_raw(sapling_value), sapling::Rseed::AfterZip212([42;32]));
     let encryptor = sapling::note_encryption::sapling_note_encryption(Some(dfvk.fvk().ovk),note.clone(),[0;512],&mut rng);
     let output = CompactSaplingOutput { cmu:note.cmu().to_bytes().to_vec(),
         ephemeral_key:sapling::note_encryption::SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),
@@ -253,7 +275,7 @@ fn policy_block(key: &UnifiedFullViewingKey) -> zcash_client_backend::proto::com
         let rho = Rho::from_bytes(&[0;32]).unwrap();
         let rseed = RandomSeed::from_bytes([43;32],&rho).unwrap();
         let note = orchard::Note::from_parts(fvk.address_at(0u32,zip32::Scope::External),
-            orchard::value::NoteValue::from_raw(60_000),rho,rseed,
+            orchard::value::NoteValue::from_raw(orchard_value),rho,rseed,
             if ironwood {NoteVersion::V3} else {NoteVersion::V2}).unwrap();
         let (epk,ciphertext) = if ironwood {
             let e=IronwoodNoteEncryption::new(Some(fvk.to_ovk(zip32::Scope::External)),note,[0;512]);
@@ -285,7 +307,8 @@ fn policy_rows(conn: &rusqlite::Connection, tables: &[&str]) -> Vec<Vec<Vec<rusq
     }).collect()
 }
 
-fn policy_scan_matrix(legacy: bool) {
+fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
+    let mut cases=Vec::new();
     use zcash_client_backend::{scanning::{scan_block,ScanningKeys,Nullifiers},data_api::{InputSource,WalletCommitmentTrees,BlockMetadata,locking::LockFilter}};
     use zcash_primitives::{block::BlockHash,transaction::TxId};
     use zcash_protocol::ShieldedPool;
@@ -415,7 +438,32 @@ fn policy_scan_matrix(legacy: bool) {
                 assert_eq!(db.get_spendable_note(&TxId::from_bytes([9;32]),pool,0,101u32.into(),LockFilter::Unfiltered).unwrap().is_some(),expected==1,"{pool:?}");
             }
         });
+        let mut queries=Vec::new();
+        for (trusted,untrusted,zero) in [(1,1,true),(2,10,false)] {
+            let confirmations=json!({"trusted":trusted,"untrusted":untrusted,"allowZeroConfirmationShielding":zero});
+            let args=json!({"accountId":account["id"],"confirmations":confirmations});
+            let native=crate::wallet::DOMAIN.with(|domain| {
+                let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+                let policy=zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new(
+                    std::num::NonZeroU32::new(trusted).unwrap(),std::num::NonZeroU32::new(untrusted).unwrap(),zero).unwrap();
+                let summary=db.get_wallet_summary(policy).unwrap().unwrap();
+                let b=&summary.account_balances()[&account_id];
+                let bucket=|b:&zcash_client_backend::data_api::Balance| json!({
+                    "total":u64::from(b.total()).to_string(),"spendable":u64::from(b.spendable_value()).to_string(),
+                    "locked":u64::from(b.locked_value()).to_string(),"changePendingConfirmation":u64::from(b.change_pending_confirmation()).to_string(),
+                    "pendingSpendability":u64::from(b.value_pending_spendability()).to_string(),"uneconomic":u64::from(b.uneconomic_value()).to_string()});
+                json!({"accountId":account["id"],"amounts":{"total":"240000","uneconomic":"0","observedTotal":"240000",
+                    "transparent":{"regular":bucket(b.unshielded_regular_balance()),"coinbase":bucket(b.unshielded_coinbase_balance())},
+                    "sapling":bucket(b.sapling_balance()),"ironwood":bucket(b.ironwood_balance()),
+                    "unsupportedLegacy":{"kind":"legacyOrchard","balance":bucket(b.orchard_balance())}}})
+            });
+            let bytes=std::fs::read(&path).unwrap();
+            assert_eq!(call(g,"account_balance",args.clone()).unwrap(),native);
+            assert_eq!(std::fs::read(&path).unwrap(),bytes,"balance query cannot write");
+            queries.push(json!({"args":args,"expected":native}));
+        }
         crate::wallet::storage_close(g).unwrap();
+        if reopen==1 {cases.push(json!({"viewOnly":policy,"database":hex::encode(std::fs::read(&path).unwrap()),"queries":queries}));}
         let conn=rusqlite::Connection::open(&path).unwrap();
         assert_eq!(policy_rows(&conn,&preserved_tables),preserved,"history/authority/checkpoints preserved on open {reopen}");
         let after=policy_rows(&conn,&tree_tables);
@@ -431,6 +479,7 @@ fn policy_scan_matrix(legacy: bool) {
         assert_eq!(conn.query_row("SELECT version FROM ext_viewing_version",[],|r|r.get::<_,u32>(0)).unwrap(),2);
         }
     }
+    cases
 }
 
 #[test]
@@ -714,4 +763,225 @@ fn mnemonic_passphrase_normalized_limit_and_nonpersistence() {
         if let Ok(bytes)=std::fs::read(candidate) {for secret in &secrets {assert!(!bytes.windows(secret.len()).any(|w|w==secret),"synthetic authority persisted");}}
     }
     let result=account.to_string();for secret in &secrets {assert!(!result.as_bytes().windows(secret.len()).any(|w|w==secret),"synthetic authority in result");}
+}
+
+#[test]
+fn account_balance_policy_admission_and_native_bucket_extremes() {
+    use zcash_client_backend::data_api::{AccountBalance,Balance};
+    use zcash_protocol::value::{Zatoshis,BalanceError,MAX_MONEY};
+    let (path,g)=open();
+    let a=call(g,"account_import",fixture(10)).unwrap();
+    let policy=json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true});
+    let before=std::fs::read(&path).unwrap();
+    for field in ["trusted","untrusted"] {
+        for value in [json!(0),json!(-1),json!(4294967296u64),json!(1.5),json!("1"),json!(true),Value::Null] {
+            let mut p=policy.clone();p[field]=value;
+            assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
+        }
+    }
+    for p in [json!({}),json!({"trusted":2,"untrusted":1,"allowZeroConfirmationShielding":true}),json!({"trusted":1,"untrusted":1}),json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":"true"}),json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true,"secret":"private caller text"})] {
+        assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
+    }
+    let max=json!({"trusted":u32::MAX,"untrusted":u32::MAX,"allowZeroConfirmationShielding":false});
+    assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":max})).unwrap()["amounts"],Value::Null);
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    crate::wallet::storage_close(g).unwrap();
+
+    let mut native=AccountBalance::ZERO;
+    for (i,mutate) in [AccountBalance::with_sapling_balance_mut::<_,BalanceError>,AccountBalance::with_orchard_balance_mut::<_,BalanceError>,AccountBalance::with_ironwood_balance_mut::<_,BalanceError>,AccountBalance::with_unshielded_regular_balance_mut::<_,BalanceError>,AccountBalance::with_unshielded_coinbase_balance_mut::<_,BalanceError>].into_iter().enumerate() {
+        let n=(i as u64+1)*10_000;
+        mutate(&mut native,move |b:&mut Balance| {
+            b.add_spendable_value(Zatoshis::const_from_u64(n+1))?;
+            b.add_locked_value(Zatoshis::const_from_u64(n+2))?;
+            b.add_pending_change_value(Zatoshis::const_from_u64(n+3))?;
+            b.add_pending_spendable_value(Zatoshis::const_from_u64(n+4))?;
+            b.add_uneconomic_value(Zatoshis::const_from_u64(n+5))
+        }).unwrap();
+    }
+    let amounts=balance_amounts(&native).unwrap();
+    for (i,b) in [&amounts["sapling"],&amounts["unsupportedLegacy"]["balance"],&amounts["ironwood"],&amounts["transparent"]["regular"],&amounts["transparent"]["coinbase"]].into_iter().enumerate() {
+        let n=(i as u64+1)*10_000;
+        assert_eq!(*b,json!({"total":(4*n+10).to_string(),"spendable":(n+1).to_string(),"locked":(n+2).to_string(),"changePendingConfirmation":(n+3).to_string(),"pendingSpendability":(n+4).to_string(),"uneconomic":(n+5).to_string()}));
+    }
+    assert_eq!(amounts["total"],"600050");assert_eq!(amounts["uneconomic"],"150025");assert_eq!(amounts["observedTotal"],"750075");
+    let empty=balance_amounts(&AccountBalance::ZERO).unwrap();assert_eq!(empty["unsupportedLegacy"],Value::Null);
+    assert_eq!(empty["observedTotal"],"0");assert_eq!(empty["sapling"],balance_bucket(&Balance::ZERO));
+    let mut large=AccountBalance::ZERO;
+    large.with_sapling_balance_mut::<_,BalanceError>(|b|b.add_spendable_value(Zatoshis::const_from_u64(MAX_MONEY))).unwrap();
+    assert_eq!(balance_amounts(&large).unwrap()["observedTotal"],MAX_MONEY.to_string());
+    large.with_orchard_balance_mut::<_,BalanceError>(|b|b.add_uneconomic_value(Zatoshis::const_from_u64(1))).unwrap();
+    assert_eq!(balance_amounts(&large).unwrap_err().0,"BALANCE_OVERFLOW");
+}
+
+fn locked_balance_case(source:&Value)->Value {
+    use zcash_client_backend::{data_api::locking::{OutputLockStore,LockOwner},wallet::OutputRef};
+    use zcash_primitives::transaction::TxId;
+    use zcash_protocol::{PoolType,ShieldedPool};
+    let root=std::env::var("WALLET_TEST_ROOT").unwrap();
+    let path=format!("{root}/balance-locked-{}.db",uuid::Uuid::new_v4());
+    std::fs::write(&path,hex::decode(source["database"].as_str().unwrap()).unwrap()).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    crate::wallet::DOMAIN.with(|domain| {
+        let mut d=domain.borrow_mut();let db=&mut d.active.as_mut().unwrap().wallet;
+        db.lock_outputs(&[
+            OutputRef::new(TxId::from_bytes([9;32]),PoolType::Shielded(ShieldedPool::Sapling),0),
+            OutputRef::new(TxId::from_bytes([10;32]),PoolType::Transparent,0),
+        ],LockOwner::new([55;32]),200u32.into()).unwrap();
+    });
+    let mut query=source["queries"][0].clone();
+    query["expected"]["amounts"]["sapling"]["spendable"]=json!("0");
+    query["expected"]["amounts"]["sapling"]["locked"]=json!("50000");
+    query["expected"]["amounts"]["transparent"]["regular"]["spendable"]=json!("0");
+    query["expected"]["amounts"]["transparent"]["regular"]["locked"]=json!("70000");
+    let before=std::fs::read(&path).unwrap();
+    assert_eq!(call(g,"account_balance",query["args"].clone()).unwrap(),query["expected"],"locks remain included once in total");
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    crate::wallet::storage_close(g).unwrap();
+    json!({"database":hex::encode(std::fs::read(path).unwrap()),"queries":[query],"locked":true})
+}
+
+#[test]
+fn account_balance_scanner_empty_uneconomic_coinbase_change() { balance_scanner_edge_cases(); }
+
+#[test]
+fn account_balance_scanned_coinbase_maturity_transition() {
+    let cases=balance_scanner_edge_cases();
+    for (scenario,spendable,pending) in [("coinbase-before-maturity","0","70000"),("coinbase-at-maturity","70000","0")] {
+        let case=cases.iter().find(|case|case["scenario"]==scenario).expect("scanned maturity boundary fixture required");
+        assert_eq!(case["queries"].as_array().unwrap().len(),2);
+        for query in case["queries"].as_array().unwrap() {
+            assert_eq!(query["expected"]["amounts"]["transparent"]["coinbase"],json!({
+                "total":"70000","spendable":spendable,"locked":"0",
+                "changePendingConfirmation":"0","pendingSpendability":pending,"uneconomic":"0"
+            }));
+        }
+    }
+}
+
+fn balance_scanner_edge_cases()->Vec<Value> {
+    use zcash_client_backend::{scanning::{scan_block,ScanningKeys,Nullifiers},data_api::{BlockMetadata,Balance}};
+    use zcash_client_backend::proto::compact_formats::CompactSaplingSpend;
+    use zcash_primitives::block::BlockHash;
+    let mut cases=Vec::new();
+    for scenario in ["empty","uneconomic","coinbase","change","coinbase-before-maturity","coinbase-at-maturity"] {
+        // Pinned SQLite uses target = tip + 1 and target - mined >= 100.
+        let tip=match scenario {"change"=>101u32,"coinbase-before-maturity"=>198,"coinbase-at-maturity"=>199,_=>100};
+        let coinbase=scenario.starts_with("coinbase");
+        let (path,g)=open();
+        let mut input=fixture(10);
+        input["birthday"].as_object_mut().unwrap().remove("recoverUntilExclusive");
+        let account=call(g,"account_import",input.clone()).unwrap();
+        let account_id=id(&json!({"accountId":account["id"]})).unwrap();
+        let p=crate::Document::parse(PARAMS).unwrap();
+        let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
+        let birthday=birthday(&input["birthday"],PARAMS,&[3;32],&p).unwrap();
+        let keys=ScanningKeys::from_account_ufvks([(account_id,key.clone())]);
+        let mut cb=if scenario=="uneconomic" {balance_block(&key,1,5_000)} else {policy_block(&key)};
+        if scenario=="empty" {
+            cb.vtx.clear();
+            let m=cb.chain_metadata.as_mut().unwrap();
+            m.sapling_commitment_tree_size=0;m.orchard_commitment_tree_size=0;m.ironwood_commitment_tree_size=0;
+        }
+        if coinbase {cb.vtx[0].index=0;}
+        let prior=BlockMetadata::from_parts(99u32.into(),BlockHash([7;32]),Some(0),Some(0),Some(0));
+        let scan=scan_block(&p,cb,&keys,&Nullifiers::empty(),Some(&prior)).unwrap();
+        let mut scans=Vec::new();
+        if scenario=="change" {
+            let mut nullifiers=Nullifiers::empty();nullifiers.update_with(&scan);
+            let mut next=balance_block(&key,40_000,45_000);
+            next.height=101;next.hash=vec![12;32];next.prev_hash=vec![8;32];
+            next.vtx[0].txid=vec![13;32];
+            next.vtx[0].spends.push(CompactSaplingSpend {nf:nullifiers.sapling()[0].1.0.to_vec()});
+            let m=next.chain_metadata.as_mut().unwrap();
+            m.sapling_commitment_tree_size=2;m.orchard_commitment_tree_size=2;m.ironwood_commitment_tree_size=2;
+            let next=scan_block(&p,next,&keys,&nullifiers,Some(&scan.to_block_metadata())).unwrap();
+            assert!(next.transactions()[0].sapling_outputs()[0].is_change(),"scanner identifies change from actual prior note spend");
+            scans.push(scan);scans.push(next);
+        } else {scans.push(scan);}
+        if coinbase {
+            // Advance actual scanned chain state, retaining the original transaction at 100.
+            for height in 101..=tip {
+                let prior=scans.last().unwrap().to_block_metadata();
+                let next=zcash_client_backend::proto::compact_formats::CompactBlock {
+                    height:height.into(),hash:vec![height as u8;32],prev_hash:prior.block_hash().0.to_vec(),time:height,
+                    chain_metadata:Some(zcash_client_backend::proto::compact_formats::ChainMetadata {
+                        sapling_commitment_tree_size:1,orchard_commitment_tree_size:1,ironwood_commitment_tree_size:1
+                    }),..Default::default()
+                };
+                scans.push(scan_block(&p,next,&keys,&Nullifiers::empty(),Some(&prior)).unwrap());
+            }
+        }
+        crate::wallet::DOMAIN.with(|domain| {
+            let mut d=domain.borrow_mut();let db=&mut d.active.as_mut().unwrap().wallet;
+            db.update_chain_tip(tip.into()).unwrap();
+            db.put_blocks(birthday.prior_chain_state(),scans).unwrap();
+            if coinbase {
+                // Same transaction scanned at index zero supplies native coinbase identity.
+                let address=*db.get_last_generated_address_matching(account_id,UnifiedAddressRequest::AllAvailableKeys).unwrap().unwrap().transparent().unwrap();
+                let output=zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
+                    zcash_transparent::bundle::OutPoint::new([9;32],0),
+                    zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(70_000),address.script().into()),
+                    Some(100u32.into()),Some(account_id),Some(TransparentKeyScope::EXTERNAL),None).unwrap();
+                db.put_received_transparent_utxo(&output).unwrap();
+            }
+        });
+        let mut queries=Vec::new();
+        for trusted in [1,2] {
+            let args=json!({"accountId":account["id"],"confirmations":{"trusted":trusted,"untrusted":trusted,"allowZeroConfirmationShielding":false}});
+            let expected=crate::wallet::DOMAIN.with(|domain| {
+                let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+                let policy=zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new(
+                    std::num::NonZeroU32::new(trusted).unwrap(),std::num::NonZeroU32::new(trusted).unwrap(),false).unwrap();
+                let summary=db.get_wallet_summary(policy).unwrap().expect("scanned summary available");
+                let b=&summary.account_balances()[&account_id];
+                match scenario {
+                    "empty"=>{assert_eq!(u64::from(b.total()),0);assert_eq!(u64::from(b.uneconomic_value()),0);},
+                    "uneconomic"=>{
+                        assert_eq!(u64::from(b.total()),0);assert_eq!(u64::from(b.uneconomic_value()),10_001);
+                        assert_eq!(u64::from(b.sapling_balance().uneconomic_value()),1);
+                        assert_eq!(u64::from(b.orchard_balance().uneconomic_value()),5_000);
+                        assert_eq!(u64::from(b.ironwood_balance().uneconomic_value()),5_000);
+                    },
+                    "coinbase"=>{
+                        assert_eq!(u64::from(b.unshielded_regular_balance().total()),0);
+                        assert_eq!(u64::from(b.unshielded_coinbase_balance().total()),70_000);
+                        assert_eq!(u64::from(b.unshielded_coinbase_balance().value_pending_spendability()),70_000);
+                    },
+                    "coinbase-before-maturity"|"coinbase-at-maturity"=>{
+                        assert_eq!(*b.unshielded_regular_balance(),Balance::ZERO);
+                        let cb=b.unshielded_coinbase_balance();
+                        assert_eq!([
+                            u64::from(cb.total()),u64::from(cb.spendable_value()),u64::from(cb.locked_value()),
+                            u64::from(cb.change_pending_confirmation()),u64::from(cb.value_pending_spendability()),u64::from(cb.uneconomic_value())
+                        ],if tip==199 {[70_000,70_000,0,0,0,0]} else {[70_000,0,0,0,70_000,0]});
+                    },
+                    "change"=>{
+                        assert_eq!(u64::from(b.sapling_balance().total()),40_000,"spent note excluded");
+                        for (balance,value) in [(b.sapling_balance(),40_000),(b.orchard_balance(),45_000),(b.ironwood_balance(),45_000)] {
+                            assert_eq!(u64::from(balance.change_pending_confirmation()),if trusted==2 {value} else {0});
+                        }
+                        assert_eq!(u64::from(b.sapling_balance().spendable_value()),if trusted==1 {40_000} else {0});
+                    },
+                    _=>unreachable!(),
+                }
+                let bucket=|b:&Balance|json!({"total":u64::from(b.total()).to_string(),"spendable":u64::from(b.spendable_value()).to_string(),"locked":u64::from(b.locked_value()).to_string(),"changePendingConfirmation":u64::from(b.change_pending_confirmation()).to_string(),"pendingSpendability":u64::from(b.value_pending_spendability()).to_string(),"uneconomic":u64::from(b.uneconomic_value()).to_string()});
+                let legacy=b.orchard_balance();
+                json!({"accountId":account["id"],"amounts":{"total":u64::from(b.total()).to_string(),"uneconomic":u64::from(b.uneconomic_value()).to_string(),
+                    "observedTotal":(u64::from(b.total())+u64::from(b.uneconomic_value())).to_string(),
+                    "transparent":{"regular":bucket(b.unshielded_regular_balance()),"coinbase":bucket(b.unshielded_coinbase_balance())},
+                    "sapling":bucket(b.sapling_balance()),"ironwood":bucket(b.ironwood_balance()),
+                    "unsupportedLegacy":if legacy.total()==zcash_protocol::value::Zatoshis::ZERO&&legacy.uneconomic_value()==zcash_protocol::value::Zatoshis::ZERO {Value::Null} else {json!({"kind":"legacyOrchard","balance":bucket(legacy)})}}})
+            });
+            let before=std::fs::read(&path).unwrap();
+            assert_eq!(call(g,"account_balance",args.clone()).unwrap(),expected,"{scenario}");
+            assert_eq!(std::fs::read(&path).unwrap(),before);
+            queries.push(json!({"args":args,"expected":expected}));
+        }
+        crate::wallet::storage_close(g).unwrap();
+        let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        for query in &queries {assert_eq!(call(g,"account_balance",query["args"].clone()).unwrap(),query["expected"],"{scenario} reopen");}
+        crate::wallet::storage_close(g).unwrap();
+        cases.push(json!({"scenario":scenario,"database":hex::encode(std::fs::read(&path).unwrap()),"queries":queries}));
+    }
+    cases
 }

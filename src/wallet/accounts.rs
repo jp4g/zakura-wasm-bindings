@@ -80,6 +80,26 @@ fn record(account: &impl Account<AccountId=AccountUuid>) -> Value {
         "birthdayHeight":u32::from(account.birthday_height()),"accountIndex":account.source().key_derivation().map(|d|u32::from(d.account_index())),
         "viewOnly":account.purpose()==AccountPurpose::ViewOnly,"signerAttached":false})
 }
+fn balance_bucket(balance: &zcash_client_backend::data_api::Balance) -> Value {
+    json!({"total":u64::from(balance.total()).to_string(),
+        "spendable":u64::from(balance.spendable_value()).to_string(),
+        "locked":u64::from(balance.locked_value()).to_string(),
+        "changePendingConfirmation":u64::from(balance.change_pending_confirmation()).to_string(),
+        "pendingSpendability":u64::from(balance.value_pending_spendability()).to_string(),
+        "uneconomic":u64::from(balance.uneconomic_value()).to_string()})
+}
+fn balance_amounts(balance: &zcash_client_backend::data_api::AccountBalance) -> Result<Value> {
+    let total=balance.total();
+    let uneconomic=balance.uneconomic_value();
+    let observed=(total+uneconomic).ok_or(Failure::from("BALANCE_OVERFLOW"))?;
+    let legacy=balance.orchard_balance();
+    Ok(json!({"total":u64::from(total).to_string(),"uneconomic":u64::from(uneconomic).to_string(),
+        "observedTotal":u64::from(observed).to_string(),
+        "transparent":{"regular":balance_bucket(balance.unshielded_regular_balance()),"coinbase":balance_bucket(balance.unshielded_coinbase_balance())},
+        "sapling":balance_bucket(balance.sapling_balance()),"ironwood":balance_bucket(balance.ironwood_balance()),
+        "unsupportedLegacy":if *legacy==zcash_client_backend::data_api::Balance::ZERO {Value::Null}
+            else {json!({"kind":"legacyOrchard","balance":balance_bucket(legacy)})}}))
+}
 fn stored_metadata(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: AccountUuid) -> Result<Value> {
     let text:String=ext.query_row("SELECT metadata FROM ext_viewing_accounts WHERE account_uuid=?1 AND length(CAST(metadata AS BLOB))<=160000",[account.expose_uuid()],|r|r.get(0))?;
     serde_json::from_str(&text).map_err(|_|"INVALID_ACCOUNT_METADATA".into())
@@ -199,6 +219,22 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
         let mut domain = domain.try_borrow_mut().map_err(|_| Failure::from("STORAGE_BUSY"))?;
         let active = domain.active.as_mut().filter(|a| a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         match operation {
+            "account_balance" => {
+                fields(v,&["accountId","confirmations"])?;
+                let account=id(v)?;
+                let confirmations=v.get("confirmations").ok_or(Failure::from("INVALID_ARGUMENT"))?;
+                fields(confirmations,&["trusted","untrusted","allowZeroConfirmationShielding"])?;
+                let nonzero=|name| std::num::NonZeroU32::new(height(confirmations,name)?).ok_or(Failure::from("INVALID_ARGUMENT"));
+                let policy=zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new(
+                    nonzero("trusted")?,nonzero("untrusted")?,
+                    confirmations.get("allowZeroConfirmationShielding").and_then(Value::as_bool).ok_or(Failure::from("INVALID_ARGUMENT"))?,
+                ).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+                active.wallet.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?;
+                let amounts=active.wallet.get_wallet_summary(policy)?.map(|summary| {
+                    balance_amounts(summary.account_balances().get(&account).ok_or(Failure::from("BACKEND_ERROR"))?)
+                }).transpose()?;
+                Ok(json!({"accountId":account.expose_uuid().to_string(),"amounts":amounts}))
+            }
             "account_list" => {
                 fields(v,&[])?;
                 active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
