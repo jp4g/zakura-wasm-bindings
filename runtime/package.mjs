@@ -7,13 +7,15 @@ import { createHash } from 'node:crypto';
 import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dist/index.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const nativeReceipt = '611e3d508b617aa9992464480d84a95bf6e3606a98fca45e783b718cdc457807';
+const nativeReceipt = '1b550fd0c8b966da8d901670160e556660edf3bef291b413b18332f1ff009679';
 const overlayRevision = '72fd15d';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
+// Version 2 adds required ScanState and its durable revision table. The native
+// storage marker stays version 1; the accepted Rust owner migrates legacy files.
 export const profile = {
   contractRevision: 'zakura-private-wallet/1', abiVersion: 'checked-bindgen-0.2.128/1',
-  schemas: { operations: { walletViews: '1', consensusContext: '1', decodeTransaction: '1' },
-    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/1',
+  schemas: { operations: { walletViews: '2', consensusContext: '1', decodeTransaction: '1' },
+    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/2',
     hostServices: { nodeFilesystem: 'linux-flock/1', browserOpfs: 'sync-access-handle/1', storage: 'scalar-vfs/1' } },
 };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -29,7 +31,7 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   const receiptBytes = readFileSync(resolve(nativeBuild, 'build.json'));
   requireThat(sha(receiptBytes) === nativeReceipt, 'accepted native receipt mismatch');
   const receipt = JSON.parse(receiptBytes);
-  requireThat(receipt.complete && receipt.revision === '9af4c7aaa1eec28e78645a3d8386af4c9c90cffc', 'native build identity');
+  requireThat(receipt.complete && receipt.revision === '7213f9014b49219af200a6aafedb72a87c75b1b3', 'native build identity');
   const inputs = {};
   for (const [name, digest] of Object.entries(receipt.artifacts)) {
     const bytes = readFileSync(resolve(nativeBuild, 'bundle', name));
