@@ -432,3 +432,156 @@ fn policy_scan_matrix(legacy: bool) {
         }
     }
 }
+
+#[test]
+fn hd_explicit_native_index_and_next_survive_reopen() {
+    for length in [32,64] {
+    let (path,g)=open();
+    let input=json!({"birthday":fixture(40)["birthday"],"accountIndex":0,"name":"private HD"});
+    let account:Value=serde_json::from_str(&views_seed_call(g,"account_import_hd",&input.to_string(),vec![40;length]).unwrap()).unwrap();
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let key=UnifiedSpendingKey::from_seed(&p,&vec![40;length],zip32::AccountId::ZERO).unwrap().to_unified_full_viewing_key();
+    let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
+    assert_eq!(call(g,"address_list",json!({"accountId":account["id"]})).unwrap(),json!([address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()]));
+    assert_eq!(account["accountIndex"],0);
+    assert_eq!(account["signerAttached"],false);
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
+    let input=json!({"birthday":fixture(40)["birthday"]});
+    let next:Value=serde_json::from_str(&views_seed_call(g,"account_create_hd",&input.to_string(),vec![40;length]).unwrap()).unwrap();
+    assert_eq!(next["accountIndex"],1);
+    crate::wallet::storage_close(g).unwrap();
+    }
+}
+
+fn hd(g:u32, op:&str, seed:u8, input:Value) -> std::result::Result<Value,String> {
+    views_seed_call(g,op,&input.to_string(),vec![seed;32]).map(|s|serde_json::from_str(&s).unwrap())
+}
+fn hd_input(index:u32) -> Value {json!({"accountIndex":index,"birthday":fixture(40)["birthday"]})}
+#[test]
+fn hd_gap_independent_seed_provenance_and_native_default() {
+    let (path,g)=open();
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let mut records=Vec::new();
+    for index in [0,3] {
+        let a=hd(g,"account_import_hd",40,hd_input(index)).unwrap();
+        assert_eq!(a["accountIndex"],index);
+        let key=UnifiedSpendingKey::from_seed(&p,&[40;32],zip32::AccountId::try_from(index).unwrap()).unwrap().to_unified_full_viewing_key();
+        let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
+        assert_eq!(call(g,"address_list",json!({"accountId":a["id"]})).unwrap(),json!([address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()]));
+        super::super::DOMAIN.with(|domain| {
+            let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+            let native=db.get_account(id(&json!({"accountId":a["id"]})).unwrap()).unwrap().unwrap();
+            assert!(matches!(native.source(),zcash_client_backend::data_api::AccountSource::Derived{..}));
+            assert_eq!(native.source().key_derivation().unwrap().seed_fingerprint(),&zip32::fingerprint::SeedFingerprint::from_seed(&[40;32]).unwrap());
+            assert_eq!(native.source().key_source(),None);
+        });
+        records.push(a);
+    }
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let args=json!({"birthday":fixture(40)["birthday"]});
+    let next=hd(g,"account_create_hd",40,args.clone()).unwrap();assert_eq!(next["accountIndex"],4);
+    let independent=hd(g,"account_create_hd",41,args).unwrap();assert_eq!(independent["accountIndex"],0);
+    for a in records {assert_eq!(call(g,"account_get",json!({"accountId":a["id"]})).unwrap(),a);}
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn hd_seed_domain_rejects_before_mutation() {
+    let (path,g)=open();
+    let before=std::fs::read(&path).unwrap();
+    for length in [33,0,16,31,48,63,65,252,253] {
+        for op in ["account_import_hd","account_create_hd"] {
+            let mut input=hd_input(0);
+            if op=="account_create_hd" {input.as_object_mut().unwrap().remove("accountIndex");}
+            assert_eq!(views_seed_call(g,op,&input.to_string(),vec![40;length]).unwrap_err(),"INVALID_ARGUMENT","{op} seed length {length}");
+            assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
+            assert_eq!(std::fs::read(&path).unwrap(),before,"invalid seed leaves DB bytes unchanged");
+        }
+    }
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn hd_validation_and_partial_collision_roll_back_native_state() {
+    let (path,g)=open();
+    for index in [json!(-1),json!(2147483648u64),json!(1.5),json!("0"),Value::Null] {
+        let mut v=hd_input(0);v["accountIndex"]=index;
+        assert_eq!(hd(g,"account_import_hd",40,v).unwrap_err(),"INVALID_ARGUMENT");
+    }
+    for length in [0,31,253] {assert_eq!(views_seed_call(g,"account_import_hd",&hd_input(0).to_string(),vec![40;length]).unwrap_err(),"INVALID_ARGUMENT");}
+    for pools in [json!(["sapling"]),json!([])] {
+        let mut v=hd_input(0);v["enabledPools"]=pools;assert_eq!(hd(g,"account_import_hd",40,v).unwrap_err(),"UNSUPPORTED_HD_POOLS");
+    }
+    let mut bad=hd_input(0);bad["birthday"]["genesis"]=json!("04".repeat(32));
+    assert_eq!(hd(g,"account_import_hd",40,bad).unwrap_err(),"NETWORK_MISMATCH");
+    let mut bad=hd_input(0);bad["birthday"]["priorTreeState"]=json!("00");
+    assert_eq!(hd(g,"account_import_hd",40,bad).unwrap_err(),"INVALID_BIRTHDAY");
+    let mut bad=hd_input(0);bad["seed"]=json!("forbidden");
+    assert_eq!(hd(g,"account_import_hd",40,bad).unwrap_err(),"INVALID_ARGUMENT");
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
+    let mut partial=fixture(40);partial["enabledPools"]=json!(["sapling"]);partial["viewOnly"]=json!(true);partial["name"]=json!("retain me");
+    let a=call(g,"account_import",partial).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    let tables=["accounts","addresses","ext_viewing_accounts","ext_viewing_addresses"];
+    let before=policy_rows(&conn,&tables);
+    assert_eq!(hd(g,"account_import_hd",40,hd_input(0)).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(hd(g,"account_create_hd",40,json!({"birthday":fixture(40)["birthday"]})).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(policy_rows(&conn,&tables),before);
+    assert_eq!(call(g,"account_get",json!({"accountId":a["id"]})).unwrap(),a);
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(policy_rows(&conn,&tables),before);
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn hd_duplicate_overflow_and_cross_import_birthday_coherence() {
+    let (_path,g)=open();
+    hd(g,"account_import_hd",40,hd_input(0)).unwrap();
+    assert_eq!(hd(g,"account_import_hd",40,hd_input(0)).unwrap_err(),"ACCOUNT_COLLISION");
+    let mut conflicting=fixture(41);
+    let mut state=TreeState::decode(hex::decode(conflicting["birthday"]["priorTreeState"].as_str().unwrap()).unwrap().as_slice()).unwrap();
+    state.hash="08".repeat(32);conflicting["birthday"]["priorTreeState"]=json!(hex::encode(state.encode_to_vec()));
+    assert_eq!(call(g,"account_import",conflicting.clone()).unwrap_err(),"INCOHERENT_BIRTHDAY");
+    crate::wallet::storage_close(g).unwrap();
+    let (_path,g)=open();call(g,"account_import",conflicting).unwrap();
+    assert_eq!(hd(g,"account_import_hd",40,hd_input(0)).unwrap_err(),"INCOHERENT_BIRTHDAY");
+    crate::wallet::storage_close(g).unwrap();
+    let (_path,g)=open();
+    let mut full=hd_input(2147483647);full["birthday"]=json!("fullScan");
+    let max=hd(g,"account_import_hd",40,full).unwrap();assert_eq!(max["accountIndex"],2147483647u64);
+    assert_eq!(hd(g,"account_create_hd",40,json!({"birthday":"fullScan"})).unwrap_err(),"ACCOUNT_INDEX_EXHAUSTED");
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([max]));
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn hd_metadata_and_commit_failures_roll_back_and_reopen() {
+    for commit_failure in [false,true] {
+        let (path,g)=open();
+        let conn=rusqlite::Connection::open(&path).unwrap();
+        let tables=["accounts","addresses","ext_viewing_accounts","ext_viewing_addresses"];
+        let before=policy_rows(&conn,&tables);
+        if commit_failure {conn.execute_batch("BEGIN; SELECT * FROM accounts;").unwrap();}
+        else {
+            // Failure only fires after native account AND default-address writes exist.
+            conn.execute_batch("CREATE TRIGGER hd_fail BEFORE INSERT ON ext_viewing_accounts WHEN (SELECT count(*) FROM accounts)>0 AND (SELECT count(*) FROM addresses)>0 BEGIN SELECT RAISE(ABORT,'synthetic metadata failure'); END").unwrap();
+        }
+        assert_eq!(hd(g,"account_create_hd",40,json!({"birthday":fixture(40)["birthday"]})).unwrap_err(),"STORAGE_ERROR");
+        if commit_failure {conn.execute_batch("ROLLBACK").unwrap();}
+        else {conn.execute_batch("DROP TRIGGER hd_fail").unwrap();}
+        assert_eq!(policy_rows(&conn,&tables),before);
+        crate::wallet::storage_close(g).unwrap();
+        let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
+        let a=hd(g,"account_create_hd",40,json!({"birthday":fixture(40)["birthday"]})).unwrap();assert_eq!(a["accountIndex"],0);
+        crate::wallet::storage_close(g).unwrap();
+        let metadata:String=conn.query_row("SELECT metadata FROM ext_viewing_accounts",[],|r|r.get(0)).unwrap();
+        let value:Value=serde_json::from_str(&metadata).unwrap();assert_eq!(value.as_object().unwrap().len(),3);
+        for candidate in [&path, &format!("{path}-journal")] {
+            if let Ok(bytes)=std::fs::read(candidate) {
+                let usk=UnifiedSpendingKey::from_seed(&crate::Document::parse(PARAMS).unwrap(),&[40;32],zip32::AccountId::ZERO).unwrap();
+                for secret in [vec![40;32],hex::encode([40;32]).into_bytes(),usk.sapling().to_bytes().to_vec(),usk.orchard().to_bytes().to_vec(),usk.transparent().to_bytes()] {assert!(!bytes.windows(secret.len()).any(|w|w==secret),"synthetic secret persisted");}
+            }
+        }
+    }
+}

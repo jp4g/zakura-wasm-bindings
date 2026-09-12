@@ -81,3 +81,55 @@ owner=start(false,entropyRoot);
 try{assert.equal((await owner.call('initialize')).ok,true);assert.deepEqual((await owner.call('account_list')).result,[]);assert.equal((await owner.call('close')).ok,true);}
 finally{await owner.destroy();}
 console.log(JSON.stringify({pass:true,case:'entropy trap invalidates owner; destroyed owner reopens with no imported account',root:entropyRoot}));
+
+for(const seedLength of [32,64]) {
+const hdRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-hd-`);
+const seed=new Uint8Array(seedLength).fill(40), hdInput={birthday:fixture.import.birthday,accountIndex:0,name:'private HD'};
+let hdAccount,hdAddresses,hdGap,hdPost;
+owner=start(true,hdRoot);
+try {
+  const opened=await owner.call('initialize');assert.equal(opened.ok,true);
+  assert.equal((await owner.call('account_import_hd',hdInput,{seed,abort:'before'})).commit,'none');
+  assert.deepEqual((await owner.call('account_list')).result,[]);
+  for(const invalid of [...[0,16,31,33,48,63,65,252,253].map(n=>new Uint8Array(n).fill(42)),[1,2,3]]) {
+    const saved=invalid.slice();
+    for(const op of ['account_import_hd','account_create_hd']) {
+      assert.equal((await owner.call(op,op==='account_import_hd'?hdInput:{birthday:hdInput.birthday},{seed:invalid})).error,'INVALID_ARGUMENT');
+      assert.deepEqual(invalid,saved,'rejected caller bytes unchanged');
+      assert.deepEqual((await owner.call('account_list')).result,[],'invalid seed leaves no account');
+    }
+  }
+  assert.equal((await owner.call('account_import_hd',{...hdInput,enabledPools:['sapling']},{seed})).error,'UNSUPPORTED_HD_POOLS');
+  assert.equal((await owner.call('account_import_hd',hdInput,{seed,instance:'wrong'})).error,'WRONG_INSTANCE');
+  assert.equal((await owner.call('account_import_hd',hdInput,{seed,generation:opened.generation+1})).error,'STALE_HANDLE');
+  const imported=await owner.call('account_import_hd',hdInput,{seed});assert.equal(imported.ok,true,show(imported));hdAccount=imported.result;
+  assert.equal(hdAccount.accountIndex,0);assert.equal(hdAccount.signerAttached,false);assert.equal(hdAccount.viewOnly,false);
+  assert.deepEqual(seed,new Uint8Array(seedLength).fill(40),'application-owned bytes unchanged');
+  assert.equal((await owner.call('account_import_hd',hdInput,{seed})).error,'ACCOUNT_COLLISION');
+  const gap=await owner.call('account_import_hd',{...hdInput,accountIndex:3,enabledPools:['ironwood','transparent','sapling']},{seed});assert.equal(gap.ok,true,show(gap));hdGap=gap.result;
+  const args={accountId:hdAccount.id};
+  assert.equal(typeof (await owner.call('address_current',args)).result,'string');
+  assert.equal((await owner.call('address_next',args)).ok,true);
+  assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
+  hdAddresses=(await owner.call('address_list',args)).result;
+  const before=(await owner.call('account_list')).result;
+  const failed=await owner.call('account_create_hd',{birthday:hdInput.birthday},{seed,fault:'commit'});assert.equal(failed.ok,false);
+  assert.deepEqual((await owner.call('account_list')).result,before,'failed native HD commit consumes no index/account');
+  const post=await owner.call('account_create_hd',{birthday:hdInput.birthday},{seed,abort:'duringSync'});assert.equal(post.error,'ABORTED');assert.equal(post.commit,'committed');assert.equal('result' in post,false);
+  hdPost=(await owner.call('account_list')).result.find(a=>a.accountIndex===4);assert.ok(hdPost);assert.equal(hdPost.signerAttached,false);
+  assert.equal((await owner.call('close')).ok,true);
+}finally{await owner.destroy();}
+owner=start(false,hdRoot);
+try {
+  assert.equal((await owner.call('initialize')).ok,true);
+  for(const account of [hdAccount,hdGap,hdPost])assert.deepEqual((await owner.call('account_get',{accountId:account.id})).result,account);
+  assert.deepEqual((await owner.call('address_list',{accountId:hdAccount.id})).result,hdAddresses);
+  const next=await owner.call('account_create_hd',{birthday:hdInput.birthday},{seed});assert.equal(next.ok,true,show(next));assert.equal(next.result.accountIndex,5);
+  assert.equal((await owner.call('close')).ok,true);
+}finally{await owner.destroy();}
+for(const file of fs.readdirSync(hdRoot,{recursive:true})) {
+  const path=`${hdRoot}/${file}`;if(!fs.statSync(path).isFile())continue;
+  const bytes=fs.readFileSync(path);assert.equal(bytes.includes(Buffer.from(seed)),false,'synthetic seed absent from persisted files');assert.equal(bytes.includes(Buffer.from(seed).toString('hex')),false);
+}
+console.log(JSON.stringify({pass:true,case:'private HD explicit/gap/native next; commit rollback; abort semantics; all addresses; destroyed owner reopen; seed byte absence',root:hdRoot,seedLength}));
+}

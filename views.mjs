@@ -4,8 +4,8 @@ import { initializeStorage } from './wallet.mjs';
 import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
-const operations = new Set(['account_import','account_list','account_get','address_current','address_next','address_list','address_at']);
-const writes = new Set(['account_import','address_next','address_at']);
+const operations = new Set(['account_import','account_import_hd','account_create_hd','account_list','account_get','address_current','address_next','address_list','address_at']);
+const writes = new Set(['account_import','account_import_hd','account_create_hd','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -24,7 +24,7 @@ function lower(value, name = '', depth = 0) {
   if (typeof value==='number'&&Number.isSafeInteger(value)) return value;
   if (Array.isArray(value)) {if(name!=='enabledPools'||value.length<1||value.length>3)throw TypeError('INVALID_ARGUMENT');return value.map(v=>lower(v,'',depth+1));}
   if (!value||Object.getPrototypeOf(value)!==Object.prototype) throw TypeError('INVALID_ARGUMENT');
-  const allowed=depth===0?['accountId','viewingKey','birthday','name','viewOnly','enabledPools','request','index','signal']:name==='birthday'?['parameters','genesis','firstScanHeight','priorTreeState','recoverUntilExclusive','source']:name==='request'?['format','transparent','sapling','ironwood']:[];
+  const allowed=depth===0?['accountIndex','accountId','viewingKey','birthday','name','viewOnly','enabledPools','request','index','signal']:name==='birthday'?['parameters','genesis','firstScanHeight','priorTreeState','recoverUntilExclusive','source']:name==='request'?['format','transparent','sapling','ironwood']:[];
   const result=Object.create(null);
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key!=='string'||!allowed.includes(key))throw TypeError('INVALID_ARGUMENT');
@@ -47,7 +47,7 @@ export async function initializeViews(wasm,backend,format,parameters,genesis) {
   let poisoned=false;
   return Object.freeze({
     generation,instance,
-    call(token,owner,operation,args={}) {
+    call(token,owner,operation,args={},seed) {
       if(poisoned)throw Error('DOMAIN_INVALID');
       storage.binding(token,owner); // actual Rust generation + owned JS instance
       if(!operations.has(operation))throw TypeError('INVALID_ARGUMENT');
@@ -58,12 +58,23 @@ export async function initializeViews(wasm,backend,format,parameters,genesis) {
       const input=JSON.stringify(lower(args));
       abort(signal,'none');
       let result;
-      try {result=binding.views_call(token,operation,input);}
+      let ownedSeed;
+      try {
+        if(operation==='account_import_hd'||operation==='account_create_hd') {
+          try {ownedSeed=copyBytes(seed,64,'INVALID_ARGUMENT');}catch {throw 'INVALID_ARGUMENT';}
+          if(ownedSeed.length!==32&&ownedSeed.length!==64)throw 'INVALID_ARGUMENT';
+          result=binding.views_seed_call(token,operation,input,ownedSeed);
+        } else {
+          if(seed!==undefined)throw 'INVALID_ARGUMENT';
+          result=binding.views_call(token,operation,input);
+        }
+      }
       catch(error) {
         // Infallible upstream entropy/clock paths can trap. Never reuse that owner.
         if(typeof error!=='string'){poisoned=true;throw Error('DOMAIN_INVALID');}
         throw Error(error);
       }
+      finally {ownedSeed?.fill(0);}
       abort(signal,writes.has(operation)?'committed':'none');
       return lift(JSON.parse(result));
     },

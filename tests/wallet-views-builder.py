@@ -2,7 +2,7 @@
 from pathlib import Path
 import os, shutil, subprocess, sys, tempfile
 root=Path(__file__).resolve().parents[1]
-work=Path(tempfile.mkdtemp(prefix='views-producer-gate-',dir='/home/jack/zakura-viewing-accounts-scratch/native-policy-r2'))
+work=Path(tempfile.mkdtemp(prefix='views-producer-gate-',dir='/home/jack/zakura-account-compose-scratch/fixes/r1'))
 for name in ['build-views.py','build-wallet.py']: shutil.copyfile(root/name,work/name)
 for argv in [['git','init','-q'],['git','add','.'],['git','-c','user.name=synthetic-test','-c','user.email=synthetic@example.invalid','commit','-qm','synthetic local producer gate']]:
     subprocess.run(argv,cwd=work,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)

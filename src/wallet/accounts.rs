@@ -1,5 +1,6 @@
 //! Private UFVK and durable address operations on the existing storage owner.
 use wasm_bindgen::prelude::*;
+use secrecy::{SecretVec, ExposeSecret};
 use prost::Message;
 use serde_json::{json, Value};
 use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, AddressSource, WalletRead, WalletWrite}, proto::service::TreeState};
@@ -51,6 +52,8 @@ pub(super) fn initialize(conn: &mut rusqlite::Connection) -> std::result::Result
 struct Failure(String);
 impl From<rusqlite::Error> for Failure { fn from(_: rusqlite::Error) -> Self { Self("STORAGE_ERROR".into()) } }
 impl From<SqliteClientError> for Failure { fn from(e: SqliteClientError) -> Self { Self(match e {
+    SqliteClientError::AccountCollision(..)=>"ACCOUNT_COLLISION",
+    SqliteClientError::Zip32AccountIndexOutOfRange=>"ACCOUNT_INDEX_EXHAUSTED",
     SqliteClientError::ReachedGapLimit(..)=>"ADDRESS_GAP_LIMIT",
     SqliteClientError::ChainHeightUnknown=>"SYNC_REQUIRED",
     SqliteClientError::DiversifierIndexReuse(..)=>"ADDRESS_INDEX_REUSE",
@@ -72,7 +75,7 @@ fn id(v: &Value) -> Result<AccountUuid> {
 }
 fn record(account: &impl Account<AccountId=AccountUuid>) -> Value {
     json!({"id":account.id().expose_uuid().to_string(),"name":account.name().filter(|n| !n.is_empty()),
-        "birthdayHeight":u32::from(account.birthday_height()),"accountIndex":null,
+        "birthdayHeight":u32::from(account.birthday_height()),"accountIndex":account.source().key_derivation().map(|d|u32::from(d.account_index())),
         "viewOnly":account.purpose()==AccountPurpose::ViewOnly,"signerAttached":false})
 }
 fn stored_metadata(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: AccountUuid) -> Result<Value> {
@@ -323,6 +326,64 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
             }
             _=>Err("UNSUPPORTED".into())
         }
+    })
+}
+// Private prerequisite: caller supplies a birthday trust input, not verified current state.
+// Vec ownership crosses generated glue once and immediately enters a zeroizing wrapper.
+#[wasm_bindgen]
+pub fn views_seed_call(generation: u32, operation: &str, input: &str, seed: Vec<u8>) -> std::result::Result<String,String> {
+    let seed=SecretVec::new(seed);
+    execute_seed(generation,operation,input,&seed).map(|v|v.to_string()).map_err(|e|e.0)
+}
+fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<u8>) -> Result<Value> {
+    if input.len()>160000 || !matches!(seed.expose_secret().len(),32|64) {return Err("INVALID_ARGUMENT".into());}
+    let v:Value=serde_json::from_str(input).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+    let account_index=match operation {
+        "account_import_hd"=>{fields(&v,&["accountIndex","birthday","name","enabledPools"])?;
+            Some(zip32::AccountId::try_from(height(&v,"accountIndex")?).map_err(|_|Failure::from("INVALID_ARGUMENT"))?)},
+        "account_create_hd"=>{fields(&v,&["birthday","name","enabledPools"])?;None},
+        _=>return Err("UNSUPPORTED".into()),
+    };
+    let defaults=json!(["transparent","sapling","ironwood"]);
+    let enabled=v.get("enabledPools").unwrap_or(&defaults).as_array().ok_or(Failure::from("INVALID_ARGUMENT"))?;
+    let mut pools=std::collections::BTreeSet::new();
+    for pool in enabled {
+        let pool=pool.as_str().ok_or(Failure::from("INVALID_ARGUMENT"))?;
+        if !matches!(pool,"transparent"|"sapling"|"ironwood") || !pools.insert(pool) {return Err("INVALID_ARGUMENT".into());}
+    }
+    if pools.len()!=3 {return Err("UNSUPPORTED_HD_POOLS".into());}
+    let name=match v.get("name") {None=>"",Some(Value::String(s)) if s.len()<=256=>s,_=>return Err("INVALID_ARGUMENT".into())};
+    super::DOMAIN.with(|domain| {
+        let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
+        let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
+        let p=active.wallet.params().clone();
+        if [NetworkUpgrade::Sapling,NetworkUpgrade::Nu6_3].iter().any(|nu|p.activation_height(*nu).is_none()) {return Err("POOL_UNAVAILABLE".into());}
+        active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
+            let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
+            let birthday_value=v.get("birthday").ok_or(Failure::from("INVALID_BIRTHDAY"))?;
+            let birthday=birthday(birthday_value,&active.bytes,&genesis,&p)?;
+            let existing=db.get_account_ids()?;
+            for account in &existing {
+                let prior=birthday_from_metadata(&stored_metadata(ext,*account)?,&active.bytes,&genesis,&p)?;
+                if prior.prior_chain_state().block_height()==birthday.prior_chain_state().block_height() && prior.prior_chain_state()!=birthday.prior_chain_state() {return Err("INCOHERENT_BIRTHDAY".into());}
+            }
+            if db.get_block_hash(birthday.prior_chain_state().block_height())?.is_some_and(|h|h!=birthday.prior_chain_state().block_hash()) {return Err("INCOHERENT_BIRTHDAY".into());}
+            let (account,usk)=if let Some(index)=account_index {
+                db.import_account_hd(name,seed,index,&birthday,None)?
+            } else {
+                let (id,usk)=db.create_account(name,seed,&birthday,None)?;
+                (db.get_account(id)?.ok_or(Failure::from("STORAGE_ERROR"))?,usk)
+            };
+            // No signer exists in this prerequisite. Ordinary drop is not a RAM-erasure claim.
+            drop(usk);
+            // Native add_account can upgrade a partial UFVK and return its old UUID.
+            if existing.contains(&account.id()) {return Err("ACCOUNT_COLLISION".into());}
+            let (ua,j)=account.uivk().default_address(UnifiedAddressRequest::AllAvailableKeys).map_err(|_|Failure::from("ADDRESS_UNAVAILABLE"))?;
+            if ua.has_transparent() && NonHardenedChildIndex::try_from(j).map_or(true,|i|i.index()>=GapLimits::default().external()) {return Err("ADDRESS_GAP_LIMIT".into());}
+            let metadata=json!({"birthday":birthday_value,"name":v.get("name"),"enabledPools":defaults});
+            ext.execute("INSERT INTO ext_viewing_accounts(account_uuid,metadata) VALUES(?1,?2)",rusqlite::params![account.id().expose_uuid(),metadata.to_string()])?;
+            stored_record(ext,&account)
+        })
     })
 }
 #[wasm_bindgen]
