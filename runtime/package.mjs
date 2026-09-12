@@ -7,14 +7,14 @@ import { createHash } from 'node:crypto';
 import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dist/index.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const nativeReceipt = '5a54f0091069dd23fbc6e26620a10e2e0ebb8029c67f0f6ec17dbd4660ca2d19';
-const overlayRevision = 'b7efdb8';
+const nativeReceipt = 'e14bba343dad6564e71ff7f9077f6cc3f4a72e9fa350914cf2cd7bbe209f5ff5';
+const overlayRevision = '7f5f597';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
 // Version 3 adds the durable creation snapshot and local-only account creation.
 // The storage marker stays version 1; the Rust owner migrates legacy files.
 export const profile = {
   contractRevision: 'zakura-private-wallet/1', abiVersion: 'checked-bindgen-0.2.128/1',
-  schemas: { operations: { walletViews: '3', walletScan: '1', walletSync: '2', walletEnhancement: '1', walletQueries: '1', consensusContext: '1', decodeTransaction: '1' },
+  schemas: { operations: { walletViews: '3', walletScan: '1', walletSync: '2', walletEnhancement: '1', walletQueries: '2', consensusContext: '1', decodeTransaction: '1' },
     protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/3',
     hostServices: { nodeFilesystem: 'linux-flock/1', browserOpfs: 'sync-access-handle/1', storage: 'scalar-vfs/1' } },
 };
@@ -31,7 +31,7 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   const receiptBytes = readFileSync(resolve(nativeBuild, 'build.json'));
   requireThat(sha(receiptBytes) === nativeReceipt, 'accepted native receipt mismatch');
   const receipt = JSON.parse(receiptBytes);
-  requireThat(receipt.complete && receipt.revision === 'b7efdb8e6683aff623ec76d11e6706c99a429e58', 'native build identity');
+  requireThat(receipt.complete && receipt.revision === '7f5f597de0efd5efd13ff89faf84ec99efc9dc0e', 'native build identity');
   const inputs = {};
   for (const [name, digest] of Object.entries(receipt.artifacts)) {
     const bytes = readFileSync(resolve(nativeBuild, 'bundle', name));
