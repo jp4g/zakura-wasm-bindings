@@ -229,11 +229,19 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                     nonzero("trusted")?,nonzero("untrusted")?,
                     confirmations.get("allowZeroConfirmationShielding").and_then(Value::as_bool).ok_or(Failure::from("INVALID_ARGUMENT"))?,
                 ).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
-                active.wallet.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?;
-                let amounts=active.wallet.get_wallet_summary(policy)?.map(|summary| {
-                    balance_amounts(summary.account_balances().get(&account).ok_or(Failure::from("BACKEND_ERROR"))?)
-                }).transpose()?;
-                Ok(json!({"accountId":account.expose_uuid().to_string(),"amounts":amounts}))
+                active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
+                    db.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?;
+                    let summary=db.get_wallet_summary_in_transaction(policy)?;
+                    let amounts=summary.as_ref().map(|summary| {
+                        balance_amounts(summary.account_balances().get(&account).ok_or(Failure::from("BACKEND_ERROR"))?)
+                    }).transpose()?;
+                    let scan=json!({"revision":super::revision::read(ext)?,
+                        "tipHeight":db.chain_height()?.map(u32::from),
+                        "fullyScannedHeight":db.block_fully_scanned()?.map(|b|u32::from(b.block_height())),
+                        "maxScannedHeight":db.block_max_scanned()?.map(|b|u32::from(b.block_height())),
+                        "scanComplete":summary.as_ref().map(|s|s.is_synced())});
+                    Ok(json!({"accountId":account.expose_uuid().to_string(),"scan":scan,"amounts":amounts}))
+                })
             }
             "account_list" => {
                 fields(v,&[])?;
@@ -279,6 +287,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                         let height=db.chain_height()?.unwrap_or(db.get_account(account)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?.birthday_height());
                         db.mark_transparent_addresses_exposed(&[(selected.0,height)])?;
                         ext.execute("INSERT OR IGNORE INTO ext_viewing_addresses(account_uuid,address,diversifier) VALUES(?1,?2,?3)",rusqlite::params![account.expose_uuid(),string(&row,"address")?,string(&row,"index")?])?;
+                        super::revision::advance(ext)?;
                         if !exposed_transparent(db,ext,&p,account)?.contains(&row){return Err("INVALID_STORED_ADDRESS".into());}
                         Ok(row)
                     });
@@ -298,7 +307,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                     };
                 }
                 let j=if operation=="address_at" { Some(index(v)?) } else { None };
-                active.wallet.transactionally(|db| -> Result<Value> {
+                active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
                     let (ua,j)=if let Some(j)=j {
                         let expected=key.address(j,req).map_err(|_|Failure::from("ADDRESS_UNAVAILABLE"))?;
                         if expected.has_transparent() {
@@ -315,6 +324,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                     };
                     let record=address_record(&p,&key,&ua,j)?;
                     if !address_list(db,&p,account)?.contains(&record) { return Err("INVALID_STORED_ADDRESS".into()); }
+                    super::revision::advance(ext)?;
                     Ok(record)
                 })
             }
@@ -359,6 +369,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                     if default_address.has_transparent() && NonHardenedChildIndex::try_from(default_index).map_or(true,|i|i.index()>=GapLimits::default().external()) {return Err("ADDRESS_GAP_LIMIT".into());}
                     let account = db.import_account_ufvk(name,&key,&birthday,if view_only { AccountPurpose::ViewOnly } else { AccountPurpose::Spending { derivation:None } },None)?;
                     ext.execute("INSERT INTO ext_viewing_accounts(account_uuid,metadata) VALUES(?1,?2)",rusqlite::params![account.id().expose_uuid(),v.to_string()])?;
+                    super::revision::advance(ext)?;
                     stored_record(ext,&account)
                 })
             }
@@ -442,6 +453,7 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
             if ua.has_transparent() && NonHardenedChildIndex::try_from(j).map_or(true,|i|i.index()>=GapLimits::default().external()) {return Err("ADDRESS_GAP_LIMIT".into());}
             let metadata=json!({"birthday":birthday_value,"name":v.get("name"),"enabledPools":defaults});
             ext.execute("INSERT INTO ext_viewing_accounts(account_uuid,metadata) VALUES(?1,?2)",rusqlite::params![account.id().expose_uuid(),metadata.to_string()])?;
+            super::revision::advance(ext)?;
             stored_record(ext,&account)
         })
     })

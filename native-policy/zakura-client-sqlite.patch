@@ -1,6 +1,23 @@
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -2348,6 +2348,20 @@
+@@ -439,6 +439,16 @@
+     }
+ }
+
++impl<P: consensus::Parameters, CL, R> WalletDb<SqlTransaction<'_>, P, CL, R> {
++    /// Reads the existing native summary within the caller's atomic extension transaction.
++    pub fn get_wallet_summary_in_transaction(
++        &self,
++        policy: ConfirmationsPolicy,
++    ) -> Result<Option<WalletSummary<AccountUuid>>, SqliteClientError> {
++        wallet::get_wallet_summary(self.conn.0, &self.params, policy, &SubtreeProgressEstimator)
++    }
++}
++
+ impl<C, P, CL, R> WalletDb<C, P, CL, R> {
+     /// Returns the network parameters that this walletdb instance is bound to.
+     pub fn params(&self) -> &P {
+@@ -2348,6 +2358,20 @@
              .transpose()?
              .flatten();
 
@@ -21,7 +38,7 @@
          ll::wallet::put_blocks::<_, SqliteClientError, commitment_tree::Error>(
              self,
              #[cfg(feature = "transparent-inputs")]
-@@ -3096,6 +3110,52 @@
+@@ -3096,6 +3120,52 @@
              observation_height,
          )
      }

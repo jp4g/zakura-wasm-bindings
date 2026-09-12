@@ -21,20 +21,133 @@ fn open() -> (String,u32) {
 fn call(g: u32, op: &str, input: Value) -> std::result::Result<Value,String> {
     views_call(g,op,&input.to_string()).map(|s| serde_json::from_str(&s).unwrap())
 }
+fn native_scan_fixture() -> Value {
+    crate::wallet::DOMAIN.with(|domain| {
+        let domain=domain.borrow(); let db=&domain.active.as_ref().unwrap().wallet;
+        json!({"tipHeight":db.chain_height().unwrap().map(u32::from),
+            "fullyScannedHeight":db.block_fully_scanned().unwrap().map(|b|u32::from(b.block_height())),
+            "maxScannedHeight":db.block_max_scanned().unwrap().map(|b|u32::from(b.block_height())),
+            "scanComplete":db.get_wallet_summary(zcash_client_backend::data_api::wallet::ConfirmationsPolicy::MIN).unwrap().map(|s|s.is_synced())})
+    })
+}
+// Existing amount fixtures are portable across ownership epochs. Scan metadata is
+// checked independently below rather than baking a random epoch into fixtures.
+fn balance_amount_fixture(g: u32, input: Value) -> std::result::Result<Value,String> {
+    let mut result=call(g,"account_balance",input)?;
+    assert!(result["scan"]["revision"].as_str().is_some());
+    let mut scan=result["scan"].clone();scan.as_object_mut().unwrap().remove("revision");
+    assert_eq!(scan,native_scan_fixture());
+    result.as_object_mut().unwrap().remove("scan");
+    Ok(result)
+}
+#[test]
+fn account_balance_revision_commits_rolls_back_and_changes_owner() {
+    let (path,g)=open();
+    let account=call(g,"account_import",fixture(10)).unwrap();
+    let args=json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}});
+    let first=call(g,"account_balance",args.clone()).unwrap();
+    let epoch=first["scan"]["revision"].as_str().unwrap().split(':').next().unwrap().to_owned();
+    assert_eq!(hex::decode(&epoch).unwrap().len(),16);
+    assert_eq!(first["scan"],json!({"revision":format!("{epoch}:1"),"tipHeight":99,"fullyScannedHeight":null,"maxScannedHeight":null,"scanComplete":null}));
+    assert_eq!(first["amounts"],Value::Null);
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap(),first);
+    assert_eq!(call(g,"account_import",fixture(10)).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap(),first);
+    call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"transparent"}})).unwrap();
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap()["scan"]["revision"],format!("{epoch}:2"));
+    crate::wallet::DOMAIN.with(|domain| {
+        domain.borrow_mut().active.as_mut().unwrap().wallet.transactionally_with_extension(|_,ext| -> Result<()> {
+            ext.execute("UPDATE ext_wallet_revision SET sequence=9223372036854775807",[])?;
+            Ok(())
+        }).unwrap();
+    });
+    let accounts=call(g,"account_list",json!({})).unwrap();
+    let bytes=std::fs::read(&path).unwrap();
+    assert_eq!(call(g,"account_import",fixture(11)).unwrap_err(),"STORAGE_ERROR");
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),accounts);
+    assert_eq!(std::fs::read(&path).unwrap(),bytes,"revision failure rolls back native account writes");
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let reopened=call(g,"account_balance",args).unwrap();
+    let revision=reopened["scan"]["revision"].as_str().unwrap();
+    assert_ne!(revision.split(':').next().unwrap(),epoch);
+    assert!(revision.ends_with(":0"));
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),accounts);
+    crate::wallet::storage_close(g).unwrap();
+}
+
+#[test]
+fn revision_legacy_migration_and_corrupt_row_admission() {
+    let (path,g)=open();
+    crate::wallet::storage_close(g).unwrap();
+    let mut conn=rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE ext_wallet_revision").unwrap();
+    let before=std::fs::read(&path).unwrap();
+    let reader=rusqlite::Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN; SELECT * FROM accounts").unwrap();
+    conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+    assert_eq!(super::super::revision::initialize(&mut conn,&[42;16]).unwrap_err(),"STORAGE_INIT_FAILED");
+    assert_eq!(std::fs::read(&path).unwrap(),before,"failed migration commit leaves no revision table");
+    reader.execute_batch("ROLLBACK").unwrap();drop(reader);
+    drop(conn);
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    super::super::revision::validate(&conn).unwrap();
+    drop(conn);
+    let valid=std::fs::read(&path).unwrap();
+    for sql in ["DELETE FROM ext_wallet_revision", "UPDATE ext_wallet_revision SET sequence=-1",
+        "UPDATE ext_wallet_revision SET sequence=1.5", "UPDATE ext_wallet_revision SET epoch='0123456789abcdef'",
+        "UPDATE ext_wallet_revision SET epoch=zeroblob(15)",
+        "INSERT INTO ext_wallet_revision VALUES(2,zeroblob(16),0)",
+        "ALTER TABLE ext_wallet_revision ADD COLUMN extra TEXT"] {
+        std::fs::write(&path,&valid).unwrap();
+        let conn=rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA ignore_check_constraints=ON").unwrap();
+        conn.execute_batch(sql).unwrap(); drop(conn);
+        let before=std::fs::read(&path).unwrap();
+        assert_eq!(crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap_err(),"SCHEMA_MISMATCH","{sql}");
+        assert_eq!(std::fs::read(&path).unwrap(),before,"{sql}");
+    }
+}
+
+#[test]
+fn revision_view_is_rejected_before_its_expression_is_prepared() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let (path,g)=open();
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE ext_wallet_revision; CREATE VIEW ext_wallet_revision AS SELECT 1 AS id,randomblob(16) AS epoch,0 AS sequence").unwrap();
+    let expressions=Arc::new(AtomicUsize::new(0));
+    let observed=expressions.clone();
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+        if matches!(ctx.action,AuthAction::Function { function_name: "randomblob" }) {
+            observed.fetch_add(1,Ordering::SeqCst);
+        }
+        Authorization::Allow
+    }));
+    assert_eq!(crate::wallet::validate_schema(&conn,PARAMS,&[3;32]).unwrap_err(),"SCHEMA_MISMATCH");
+    assert_eq!(expressions.load(Ordering::SeqCst),0,"schema admission must not prepare an unadmitted view expression");
+    // The counterexample view has a valid-looking row; demonstrate the observer
+    // detects exactly the SELECT which pre-admission validation must avoid.
+    super::super::revision::validate(&conn).unwrap();
+    assert_eq!(expressions.load(Ordering::SeqCst),1);
+}
 #[test]
 fn account_balance_unavailable_is_not_unknown() {
     let (path,g)=open();
     let account=call(g,"account_import",fixture(10)).unwrap();
     let args=json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}});
     let before=std::fs::read(&path).unwrap();
-    assert_eq!(call(g,"account_balance",args.clone()).unwrap(),json!({"accountId":account["id"],"amounts":null}));
+    assert_eq!(balance_amount_fixture(g,args.clone()).unwrap(),json!({"accountId":account["id"],"amounts":null}));
     let mut unknown=args.clone();unknown["accountId"]=json!("00000000-0000-0000-0000-000000000000");
-    assert_eq!(call(g,"account_balance",unknown).unwrap_err(),"ACCOUNT_NOT_FOUND");
+    assert_eq!(balance_amount_fixture(g,unknown).unwrap_err(),"ACCOUNT_NOT_FOUND");
     assert_eq!(std::fs::read(&path).unwrap(),before);
     crate::wallet::storage_close(g).unwrap();
-    assert_eq!(call(g,"account_balance",args.clone()).unwrap_err(),"STALE_HANDLE");
+    assert_eq!(balance_amount_fixture(g,args.clone()).unwrap_err(),"STALE_HANDLE");
     let reopened=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
-    assert_eq!(call(reopened,"account_balance",args).unwrap()["amounts"],Value::Null);
+    assert_eq!(balance_amount_fixture(reopened,args).unwrap()["amounts"],Value::Null);
     crate::wallet::storage_close(reopened).unwrap();
 }
 #[test]
@@ -458,9 +571,9 @@ fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
                     "unsupportedLegacy":{"kind":"legacyOrchard","balance":bucket(b.orchard_balance())}}})
             });
             let bytes=std::fs::read(&path).unwrap();
-            assert_eq!(call(g,"account_balance",args.clone()).unwrap(),native);
+            assert_eq!(balance_amount_fixture(g,args.clone()).unwrap(),native);
             assert_eq!(std::fs::read(&path).unwrap(),bytes,"balance query cannot write");
-            queries.push(json!({"args":args,"expected":native}));
+            queries.push(json!({"args":args,"expected":native,"scan":native_scan_fixture()}));
         }
         crate::wallet::storage_close(g).unwrap();
         if reopen==1 {cases.push(json!({"viewOnly":policy,"database":hex::encode(std::fs::read(&path).unwrap()),"queries":queries}));}
@@ -776,14 +889,14 @@ fn account_balance_policy_admission_and_native_bucket_extremes() {
     for field in ["trusted","untrusted"] {
         for value in [json!(0),json!(-1),json!(4294967296u64),json!(1.5),json!("1"),json!(true),Value::Null] {
             let mut p=policy.clone();p[field]=value;
-            assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
+            assert_eq!(balance_amount_fixture(g,json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
         }
     }
     for p in [json!({}),json!({"trusted":2,"untrusted":1,"allowZeroConfirmationShielding":true}),json!({"trusted":1,"untrusted":1}),json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":"true"}),json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true,"secret":"private caller text"})] {
-        assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
+        assert_eq!(balance_amount_fixture(g,json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
     }
     let max=json!({"trusted":u32::MAX,"untrusted":u32::MAX,"allowZeroConfirmationShielding":false});
-    assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":max})).unwrap()["amounts"],Value::Null);
+    assert_eq!(balance_amount_fixture(g,json!({"accountId":a["id"],"confirmations":max})).unwrap()["amounts"],Value::Null);
     assert_eq!(std::fs::read(&path).unwrap(),before);
     crate::wallet::storage_close(g).unwrap();
 
@@ -834,7 +947,7 @@ fn locked_balance_case(source:&Value)->Value {
     query["expected"]["amounts"]["transparent"]["regular"]["spendable"]=json!("0");
     query["expected"]["amounts"]["transparent"]["regular"]["locked"]=json!("70000");
     let before=std::fs::read(&path).unwrap();
-    assert_eq!(call(g,"account_balance",query["args"].clone()).unwrap(),query["expected"],"locks remain included once in total");
+    assert_eq!(balance_amount_fixture(g,query["args"].clone()).unwrap(),query["expected"],"locks remain included once in total");
     assert_eq!(std::fs::read(&path).unwrap(),before);
     crate::wallet::storage_close(g).unwrap();
     json!({"database":hex::encode(std::fs::read(path).unwrap()),"queries":[query],"locked":true})
@@ -973,13 +1086,13 @@ fn balance_scanner_edge_cases()->Vec<Value> {
                     "unsupportedLegacy":if legacy.total()==zcash_protocol::value::Zatoshis::ZERO&&legacy.uneconomic_value()==zcash_protocol::value::Zatoshis::ZERO {Value::Null} else {json!({"kind":"legacyOrchard","balance":bucket(legacy)})}}})
             });
             let before=std::fs::read(&path).unwrap();
-            assert_eq!(call(g,"account_balance",args.clone()).unwrap(),expected,"{scenario}");
+            assert_eq!(balance_amount_fixture(g,args.clone()).unwrap(),expected,"{scenario}");
             assert_eq!(std::fs::read(&path).unwrap(),before);
-            queries.push(json!({"args":args,"expected":expected}));
+            queries.push(json!({"args":args,"expected":expected,"scan":native_scan_fixture()}));
         }
         crate::wallet::storage_close(g).unwrap();
         let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
-        for query in &queries {assert_eq!(call(g,"account_balance",query["args"].clone()).unwrap(),query["expected"],"{scenario} reopen");}
+        for query in &queries {assert_eq!(balance_amount_fixture(g,query["args"].clone()).unwrap(),query["expected"],"{scenario} reopen");}
         crate::wallet::storage_close(g).unwrap();
         cases.push(json!({"scenario":scenario,"database":hex::encode(std::fs::read(&path).unwrap()),"queries":queries}));
     }

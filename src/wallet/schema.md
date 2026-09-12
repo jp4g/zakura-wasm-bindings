@@ -1,5 +1,14 @@
 # Pinned host schema admission
 
+The host also admits the exact optional `ext_wallet_revision` singleton defined
+in `revision.rs`. Legacy wallets acquire it transactionally after migration.
+Every new owner persists a fresh random epoch with sequence zero; account and
+address mutations advance the checked sequence in their native transaction.
+Read-only balance queries return that revision and native scan metadata with
+amounts from one SQLite snapshot. This is query identity, not scan progress or
+an operations journal. Malformed existing revision schema or rows reject before
+writable initialization; integer exhaustion rejects and rolls back mutations.
+
 The contract is the schema produced by the existing host from an empty database,
 with its own version-1 binding marker and the locked `zakura-client-sqlite
 0.1.0-rc4` migrations, Orchard and transparent inputs enabled. Native SQLite is
