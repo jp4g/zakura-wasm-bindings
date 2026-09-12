@@ -38,11 +38,18 @@ fn wallet_sync_rewind_atomic_revision_fork_replay_and_reopen() {
         let mut input=batch.clone();input["target"]=target.clone();input["revision"]=revision;
         revision=scan(g,"scan_ingest_batch",input)["revision"].clone();
     }
-    let state=sync(g,"scan_state",json!({})).unwrap();assert_eq!(state["fullyScannedHeight"],100);
+    let mut state=sync(g,"scan_state",json!({})).unwrap();assert_eq!(state["fullyScannedHeight"],100);
     let known=sync(g,"scan_block_hash",json!({"height":99})).unwrap();
     let checkpoint=sync(g,"scan_block_hash",json!({"height":96})).unwrap();
     assert_eq!(known["revision"],revision);
     assert_eq!(known["point"],json!({"height":99,"hash":"07".repeat(32)}));
+    let historical=scan(g,"scan_plan",json!({"target":known["point"]}));
+    assert_eq!(sync(g,"scan_state",json!({})).unwrap()["tipHeight"],100);
+    let mut batch=fixture["batches"][6].clone();batch["blocks"].as_array_mut().unwrap().pop();
+    batch["revision"]=historical["revision"].clone();batch["target"]=known["point"].clone();
+    revision=scan(g,"scan_ingest_batch",batch)["revision"].clone();
+    state=sync(g,"scan_state",json!({})).unwrap();
+    assert_eq!(state["tipHeight"],100);assert_eq!(state["fullyScannedHeight"],100);
     let request=json!({"revision":revision,"requestedPoint":known["point"]});
     let mut bad=request.clone();bad["requestedPoint"]["hash"]=json!("ff".repeat(32));
     assert_eq!(sync(g,"scan_rewind",bad).unwrap_err(),"CHAIN_MISMATCH");
