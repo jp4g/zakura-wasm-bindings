@@ -79,3 +79,6 @@ pub fn consensus_branch(format: &str, bytes: &[u8], height: u32) -> Result<u32, 
 #[cfg(feature = "wallet-storage")]
 #[doc(hidden)]
 pub mod wallet;
+
+#[cfg(feature = "viewing")]
+pub mod viewing;
