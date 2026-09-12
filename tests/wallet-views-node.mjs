@@ -145,14 +145,14 @@ const phrase12='abandon '.repeat(11)+'about';
 const vectors=[...[[12,'about'],[15,'address'],[18,'agent'],[21,'admit'],[24,'art']].map(([n,last])=>['abandon '.repeat(n-1)+last,'TREZOR']),
   [phrase12,undefined],[phrase12,''],[phrase12,'é'],[phrase12,'e\u0301'],[phrase12,'㍍ガバヴァぱばぐゞちぢ十人十色'],[phrase12,'TREZOR '],[phrase12,'TREZOR\0'],
   [phrase12.replace(/[a-z]/g,c=>String.fromCharCode(c.charCodeAt(0)+0xfee0)),'TREZOR'],['\u2003'+phrase12.replaceAll(' ','\u2003\t')+'\n','TREZOR']];
-for(const [number,[phrase,pass]] of vectors.entries()) {
+async function checkMnemonic(number,[phrase,pass]) {
   const mnemonic=encoder.encode(phrase),passphrase=pass===undefined?undefined:encoder.encode(pass);
   const canonical=phrase.normalize('NFKD').split(/\s+/u).filter(Boolean).join(' ');
   const seed=new Uint8Array(pbkdf2Sync(canonical,'mnemonic'+(pass??'').normalize('NFKD'),2048,64,'sha512'));
   const mnemonicRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-mnemonic-`);
   const oracleRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-oracle-`);
   const input={birthday:fixture.import.birthday,accountIndex:3};
-  let saved,addresses,nextIndex;
+  let owner,saved,addresses,nextIndex;
   owner=start(true,mnemonicRoot);
   try {
     const opened=await owner.call('initialize');assert.equal(opened.ok,true);
@@ -221,4 +221,9 @@ for(const [number,[phrase,pass]] of vectors.entries()) {
     for(const secret of [Buffer.from(mnemonic),Buffer.from(phrase.normalize('NFKD')),Buffer.from(seed),Buffer.from(seed).toString('hex')])assert.equal(bytes.includes(secret),false,'synthetic authority absent from files');
   }
   console.log(JSON.stringify({pass:true,case:'mnemonic independent KDF/native authority/address/reopen',vector:number,root:mnemonicRoot}));
+}
+// Two isolated wallets at a time; settle both cases so destruction finishes on failure.
+for(let first=0;first<vectors.length;first+=2) {
+  const results=await Promise.allSettled(vectors.slice(first,first+2).map((vector,offset)=>checkMnemonic(first+offset,vector)));
+  for(const result of results)if(result.status==='rejected')throw result.reason;
 }
