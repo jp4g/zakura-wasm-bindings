@@ -1098,3 +1098,76 @@ fn balance_scanner_edge_cases()->Vec<Value> {
     }
     cases
 }
+
+#[test]
+fn persistent_scan_ingestion_plan_rollback_revision_and_reopen() {
+    let (path,g)=open();
+    let mut input=fixture(10);
+    input["birthday"].as_object_mut().unwrap().remove("recoverUntilExclusive");
+    let account=call(g,"account_import",input.clone()).unwrap();
+    let scan=|generation,op,input:Value| crate::wallet::scan::scan_call(generation,op,&input.to_string())
+        .map(|s|serde_json::from_str::<Value>(&s).unwrap());
+    let args=json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}});
+    let before=call(g,"account_balance",args.clone()).unwrap();
+    let target=json!({"height":100,"hash":"08".repeat(32)});
+    let plan=scan(g,"scan_plan",json!({"target":target})).unwrap();
+    assert_ne!(plan["revision"],before["scan"]["revision"]);
+    assert!(plan["ranges"].as_array().unwrap().iter().any(|r|r["start"]==100 && r["endExclusive"]==101));
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
+    let block=policy_block(&key);
+    let request=json!({"revision":plan["revision"],"target":target,"priorTreeState":input["birthday"]["priorTreeState"],"blocks":[hex::encode(block.encode_to_vec())]});
+    let planned=call(g,"account_balance",args.clone()).unwrap();
+    for corrupt in 0..9 {
+        let mut bad=request.clone();
+        match corrupt {
+            0=>bad["revision"]=before["scan"]["revision"].clone(),
+            1=>bad["target"]["hash"]=json!("09".repeat(32)),
+            2=>{let mut b=block.clone();b.prev_hash=vec![0;32];bad["blocks"]=json!([hex::encode(b.encode_to_vec())]);},
+            3=>{let mut b=block.clone();b.header=vec![0];bad["blocks"]=json!([hex::encode(b.encode_to_vec())]);},
+            4=>{let mut b=block.clone();b.vtx[0].outputs[0].cmu=vec![255;32];bad["blocks"]=json!([hex::encode(b.encode_to_vec())]);},
+            5=>{let mut b=block.clone();b.hash=vec![0;32];bad["blocks"]=json!([hex::encode(b.encode_to_vec())]);},
+            6=>bad["blocks"]=json!(vec![hex::encode(block.encode_to_vec());17]),
+            7=>bad["priorTreeState"]=json!("00"),
+            _=>{let mut b=block.clone();b.vtx[0].outputs=vec![b.vtx[0].outputs[0].clone();4097];bad["blocks"]=json!([hex::encode(b.encode_to_vec())]);},
+        }
+        assert!(scan(g,"scan_ingest_batch",bad).is_err(),"corrupt case {corrupt}");
+        assert_eq!(call(g,"account_balance",args.clone()).unwrap(),planned);
+    }
+    // Force the final revision write to fail after real native scan/put_blocks.
+    crate::wallet::DOMAIN.with(|domain| {
+        let mut domain=domain.borrow_mut();let active=domain.active.as_mut().unwrap();
+        active.wallet.transactionally_with_extension(|_,ext| -> Result<()> {
+            ext.execute("UPDATE ext_wallet_revision SET sequence=9223372036854775807",[])?;Ok(())
+        }).unwrap();
+        let epoch=plan["revision"].as_str().unwrap().split(':').next().unwrap();
+        active.scan_plan=Some((format!("{epoch}:9223372036854775807"),target.clone()));
+    });
+    let overflow=call(g,"account_balance",args.clone()).unwrap();
+    let bytes=std::fs::read(&path).unwrap();
+    let mut failed=request.clone();failed["revision"]=overflow["scan"]["revision"].clone();
+    assert_eq!(scan(g,"scan_ingest_batch",failed).unwrap_err(),"STORAGE_ERROR");
+    assert_eq!(std::fs::read(&path).unwrap(),bytes);
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap(),overflow);
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(scan(g,"scan_ingest_batch",request.clone()).unwrap_err(),"STALE_REVISION");
+    let plan=scan(g,"scan_plan",json!({"target":target})).unwrap();
+    let mut request=request;request["revision"]=plan["revision"].clone();
+    let committed=scan(g,"scan_ingest_batch",request.clone()).unwrap();
+    assert_eq!(committed["start"],100);assert_eq!(committed["endExclusive"],101);
+    let balance=call(g,"account_balance",args.clone()).unwrap();
+    assert_eq!(balance["scan"]["revision"],committed["revision"]);
+    assert_eq!(balance["scan"]["fullyScannedHeight"],100);
+    assert_eq!(balance["amounts"]["sapling"]["total"],"50000");
+    assert_eq!(balance["amounts"]["ironwood"]["total"],"60000");
+    assert_eq!(balance["amounts"]["unsupportedLegacy"]["balance"]["total"],"60000");
+    assert_eq!(scan(g,"scan_ingest_batch",request).unwrap_err(),"STALE_REVISION");
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let reopened=call(g,"account_balance",args).unwrap();
+    assert_eq!(reopened["amounts"],balance["amounts"]);
+    assert_eq!(reopened["scan"]["fullyScannedHeight"],100);
+    assert_ne!(reopened["scan"]["revision"],balance["scan"]["revision"]);
+    crate::wallet::storage_close(g).unwrap();
+}

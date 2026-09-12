@@ -51,7 +51,7 @@ pub(super) fn initialize(conn: &mut rusqlite::Connection) -> std::result::Result
     })().map_err(|_|"VIEWING_SCHEMA_REQUIRED".into())
 }
 #[derive(Debug)]
-struct Failure(String);
+pub(super) struct Failure(pub(super) String);
 impl From<rusqlite::Error> for Failure { fn from(_: rusqlite::Error) -> Self { Self("STORAGE_ERROR".into()) } }
 impl From<SqliteClientError> for Failure { fn from(e: SqliteClientError) -> Self { Self(match e {
     SqliteClientError::AccountCollision(..)=>"ACCOUNT_COLLISION",
@@ -62,10 +62,10 @@ impl From<SqliteClientError> for Failure { fn from(e: SqliteClientError) -> Self
     _=>"BACKEND_ERROR",
 }.into()) } }
 impl From<&str> for Failure { fn from(s: &str) -> Self { Self(s.into()) } }
-type Result<T> = std::result::Result<T, Failure>;
-fn string<'a>(v: &'a Value, name: &str) -> Result<&'a str> { v.get(name).and_then(Value::as_str).ok_or("INVALID_ARGUMENT".into()) }
-fn height(v: &Value, name: &str) -> Result<u32> { v.get(name).and_then(Value::as_u64).and_then(|n| n.try_into().ok()).ok_or("INVALID_ARGUMENT".into()) }
-fn fields(v: &Value, allowed: &[&str]) -> Result<()> {
+pub(super) type Result<T> = std::result::Result<T, Failure>;
+pub(super) fn string<'a>(v: &'a Value, name: &str) -> Result<&'a str> { v.get(name).and_then(Value::as_str).ok_or("INVALID_ARGUMENT".into()) }
+pub(super) fn height(v: &Value, name: &str) -> Result<u32> { v.get(name).and_then(Value::as_u64).and_then(|n| n.try_into().ok()).ok_or("INVALID_ARGUMENT".into()) }
+pub(super) fn fields(v: &Value, allowed: &[&str]) -> Result<()> {
     if !v.as_object().is_some_and(|m| m.keys().all(|k| allowed.contains(&k.as_str()))) { return Err("INVALID_ARGUMENT".into()); }
     Ok(())
 }
@@ -109,7 +109,7 @@ fn stored_record(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: &
     let mut result=record(account); result["name"]=metadata.get("name").cloned().unwrap_or(Value::Null);
     Ok(result)
 }
-fn birthday(v: &Value, parameters: &[u8], genesis: &[u8], p: &crate::Document) -> Result<AccountBirthday> {
+pub(super) fn birthday(v: &Value, parameters: &[u8], genesis: &[u8], p: &crate::Document) -> Result<AccountBirthday> {
     if v.as_str()==Some("fullScan") {
         let hash=zcash_primitives::block::BlockHash::try_from_slice(genesis).ok_or(Failure::from("NETWORK_MISMATCH"))?;
         return Ok(AccountBirthday::from_parts(zcash_client_backend::data_api::chain::ChainState::empty(0u32.into(),hash),None));
