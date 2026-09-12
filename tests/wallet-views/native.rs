@@ -271,7 +271,7 @@ fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
     let mut balance_cases=policy_scan_matrix(false);
     balance_cases.push(locked_balance_case(&balance_cases[0]));
     balance_cases.extend(balance_scanner_edge_cases());
-    let output=json!({"balanceCases":balance_cases,"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
+    let output=json!({"scan":full_scan_fixture(),"balanceCases":balance_cases,"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
         "policyImports":[explicit_false,explicit_true],
         "uivk":key.to_unified_incoming_viewing_key().encode(&p),"defaultAddress":address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()});
     std::fs::write(format!("{root}/views-fixture.json"),output.to_string()).unwrap();
@@ -1175,4 +1175,59 @@ fn persistent_scan_ingestion_plan_rollback_revision_and_reopen() {
     assert_eq!(reopened["scan"]["fullyScannedHeight"],100);
     assert_ne!(reopened["scan"]["revision"],balance["scan"]["revision"]);
     crate::wallet::storage_close(g).unwrap();
+}
+
+fn full_scan_fixture() -> Value {
+    use zcash_client_backend::proto::compact_formats::{CompactBlock,ChainMetadata};
+    let (path,g)=open();
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let mut input=fixture(10);input["birthday"]=json!("fullScan");
+    let account=call(g,"account_import",input.clone()).unwrap();
+    let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
+    let hash=|height:u32| -> Vec<u8> {
+        match height {0=>vec![3;32],99=>vec![7;32],100=>vec![8;32],_=>{
+            let mut h=vec![0x42;32];h[..4].copy_from_slice(&height.to_le_bytes());h
+        }}
+    };
+    let blocks=(1u32..=100).map(|h|if h==100 {policy_block(&key)} else {
+        CompactBlock {height:u64::from(h),hash:hash(h),prev_hash:hash(h-1),time:h+1,
+            chain_metadata:Some(ChainMetadata {sapling_commitment_tree_size:0,orchard_commitment_tree_size:0,ironwood_commitment_tree_size:0}),..Default::default()}
+    }).collect::<Vec<_>>();
+    let target=json!({"height":100,"hash":hex::encode(hash(100))});
+    let scan=|generation,op,input:Value| crate::wallet::scan::scan_call(generation,op,&input.to_string())
+        .map(|s|serde_json::from_str::<Value>(&s).unwrap()).unwrap();
+    let mut revision=scan(g,"scan_plan",json!({"target":target}))["revision"].clone();
+    let mut batches=Vec::new();
+    for batch in blocks.chunks(16) {
+        let height=batch[0].height-1;
+        let mut display_hash=hash(height as u32);display_hash.reverse();
+        let state=TreeState {network:"regtest".into(),height,hash:hex::encode(display_hash),time:height as u32+1,
+            sapling_tree:"000000".into(),orchard_tree:"000000".into(),ironwood_tree:"000000".into()};
+        let data=json!({"priorTreeState":hex::encode(state.encode_to_vec()),"blocks":batch.iter().map(|b|hex::encode(b.encode_to_vec())).collect::<Vec<_>>()});
+        let mut request=data.clone();request["target"]=target.clone();request["revision"]=revision;
+        revision=scan(g,"scan_ingest_batch",request)["revision"].clone();
+        batches.push(data);
+    }
+    let args=json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}});
+    let balance=call(g,"account_balance",args.clone()).unwrap();
+    assert_eq!(balance["scan"]["fullyScannedHeight"],100);
+    assert_eq!(balance["amounts"]["sapling"]["total"],"50000");
+    assert_eq!(balance["amounts"]["ironwood"]["total"],"60000");
+    assert_eq!(balance["amounts"]["unsupportedLegacy"]["balance"]["total"],"60000");
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let reopened=call(g,"account_balance",args).unwrap();
+    assert_eq!(reopened["amounts"],balance["amounts"]);
+    assert_eq!(reopened["scan"]["fullyScannedHeight"],100);
+    assert_ne!(reopened["scan"]["revision"],balance["scan"]["revision"]);
+    crate::wallet::storage_close(g).unwrap();
+    let mut state=balance["scan"].clone();state.as_object_mut().unwrap().remove("revision");
+    json!({"import":input,"target":target,"batches":batches,"expectedAmounts":balance["amounts"],"expectedScan":state})
+}
+
+#[test]
+fn persistent_full_scan_fixture_reopens_with_real_three_pool_balance() {
+    let scan=full_scan_fixture();
+    assert_eq!(scan["batches"].as_array().unwrap().len(),7);
+    std::fs::write(format!("{}/scan-fixture.json",std::env::var("WALLET_TEST_ROOT").unwrap()),scan.to_string()).unwrap();
 }
