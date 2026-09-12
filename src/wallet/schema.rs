@@ -92,6 +92,10 @@ pub(super) fn validate(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Resul
             expected.insert(format!("sqlite_autoindex_{table}_1"), ("index".into(), table.into(), None));
         }
     }
+    if actual.contains_key(super::revision::TABLE) {
+        expected.insert(super::revision::TABLE.into(), ("table".into(), super::revision::TABLE.into(), Some(super::revision::SQL.into())));
+        super::revision::validate(conn).map_err(|_| MISMATCH.to_string())?;
+    }
     // Exact producer text preserves literals and SQLite's indirect rewrites.
     // No view is prepared: legitimate intermediate views can be unselectable.
     if actual != expected { return Err(MISMATCH.into()); }
