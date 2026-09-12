@@ -5,8 +5,10 @@ import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
 const operations = new Set(['account_balance','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_list','account_get','address_current','address_next','address_list','address_at']);
-const scans = new Set(['scan_plan','scan_ingest_batch']);
-const writes = new Set(['scan_plan','scan_ingest_batch','account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
+const syncs = new Set(['scan_state','scan_block_hash','scan_rewind']);
+const enhancements = new Set(['enhancement_requests','enhancement_apply']);
+const scans = new Set(['scan_plan','scan_ingest_batch',...syncs,...enhancements]);
+const writes = new Set(['scan_plan','scan_ingest_batch','scan_rewind','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -37,8 +39,7 @@ function lower(value, name = '', depth = 0) {
   return result;
 }
 // Scan protobufs are copied and hex encoded only; Rust owns their interpretation.
-function lowerScan(args, operation) {
-  function fields(value, allowed) {
+function scanFields(value, allowed) {
     if (!value || Object.getPrototypeOf(value)!==Object.prototype) throw TypeError('INVALID_ARGUMENT');
     const result=Object.create(null);
     for (const key of Reflect.ownKeys(value)) {
@@ -47,12 +48,18 @@ function lowerScan(args, operation) {
       result[key]=property.value;
     }
     return result;
-  }
-  const input=fields(args,operation==='scan_plan'?['target','signal']:['target','revision','priorTreeState','blocks','signal']);
-  delete input.signal;
-  const target=fields(input.target,['height','hash']);
+}
+function scanHeight(value) {
+  if (!Number.isInteger(value)||value<0||value>0xffffffff) throw TypeError('INVALID_ARGUMENT');
+  return value;
+}
+function scanPoint(value) {
+  const target=scanFields(value,['height','hash']);
   if (!Number.isInteger(target.height)||target.height<0||target.height>=0xffffffff) throw TypeError('INVALID_ARGUMENT');
-  const hex=bytes=>{
+  if (typeof target.hash!=='string'||! /^[0-9a-f]{64}$/.test(target.hash)) throw TypeError('INVALID_ARGUMENT');
+  return target;
+}
+function scanHex(bytes) {
     const ascii=new Uint8Array(bytes.length*2);
     for(let i=0;i<bytes.length;i++) {
       const high=bytes[i]>>>4, low=bytes[i]&15;
@@ -60,12 +67,19 @@ function lowerScan(args, operation) {
       ascii[2*i+1]=low+(low<10?48:87);
     }
     return new TextDecoder().decode(ascii);
-  };
-  if (typeof target.hash!=='string'||! /^[0-9a-f]{64}$/.test(target.hash)) throw TypeError('INVALID_ARGUMENT');
-  input.target=target;
+}
+function lowerScan(args, operation) {
+  if (enhancements.has(operation)) return lowerEnhancement(args,operation);
+  const keys=operation==='scan_state'?[]:operation==='scan_block_hash'?['height']:operation==='scan_rewind'?['revision','requestedPoint']:
+    operation==='scan_plan'?['target']:['target','revision','priorTreeState','blocks'];
+  const input=scanFields(args,[...keys,'signal']);delete input.signal;
+  if (operation==='scan_state') return input;
+  if (operation==='scan_block_hash') {input.height=scanHeight(input.height);return input;}
+  if (operation!=='scan_plan'&&(typeof input.revision!=='string'||input.revision.length>128)) throw TypeError('INVALID_ARGUMENT');
+  if (operation==='scan_rewind') {input.requestedPoint=scanPoint(input.requestedPoint);return input;}
+  input.target=scanPoint(input.target);
   if (operation==='scan_ingest_batch') {
-    if (typeof input.revision!=='string'||input.revision.length>128) throw TypeError('INVALID_ARGUMENT');
-    input.priorTreeState=hex(copyBytes(input.priorTreeState,65536,'INVALID_ARGUMENT'));
+    input.priorTreeState=scanHex(copyBytes(input.priorTreeState,65536,'INVALID_ARGUMENT'));
     const blocks=input.blocks;
     if (!Array.isArray(blocks)||blocks.length<1||blocks.length>16) throw TypeError('RESOURCE_LIMIT');
     if (Reflect.ownKeys(blocks).length!==blocks.length+1) throw TypeError('INVALID_ARGUMENT');
@@ -76,9 +90,50 @@ function lowerScan(args, operation) {
       if (!property||!('value' in property)) throw TypeError('INVALID_ARGUMENT');
       const bytes=copyBytes(property.value,remaining,'RESOURCE_LIMIT');
       remaining-=bytes.length;
-      input.blocks.push(hex(bytes));
+      input.blocks.push(scanHex(bytes));
     }
   }
+  return input;
+}
+function lowerEnhancement(args, operation) {
+  const input=scanFields(args,operation==='enhancement_requests'?['signal']:['revision','request','result','signal']);delete input.signal;
+  if (operation==='enhancement_requests') return input;
+  if (typeof input.revision!=='string'||input.revision.length>128) throw TypeError('INVALID_ARGUMENT');
+  const request=scanFields(input.request,['kind','txid','address','start','endExclusive','requestAt','txStatus','outputStatus']);
+  if (request.kind==='address') {
+    scanFields(input.request,['kind','address','start','endExclusive','requestAt','txStatus','outputStatus']);
+    if (typeof request.address!=='string'||request.address.length>128||!request.address.length
+      || !['mined','mempool','all'].includes(request.txStatus)||!['unspent','all'].includes(request.outputStatus)) throw TypeError('INVALID_ARGUMENT');
+    scanHeight(request.start);if(request.endExclusive!==null)scanHeight(request.endExclusive);
+    if(request.requestAt!==null&&(!Number.isSafeInteger(request.requestAt)||request.requestAt<0))throw TypeError('INVALID_ARGUMENT');
+  } else {
+    scanFields(input.request,['kind','txid']);
+    if (!['enhancement','status'].includes(request.kind)||typeof request.txid!=='string'||! /^[0-9a-f]{64}$/.test(request.txid)) throw TypeError('INVALID_ARGUMENT');
+  }
+  input.request=request;
+  const result=scanFields(input.result,['transactions','asOfHeight','complete','status','height']);
+  if (Object.hasOwn(result,'status')) {
+    scanFields(input.result,['status','height']);
+    if (!['notRecognized','notInMainChain','mined'].includes(result.status)) throw TypeError('INVALID_ARGUMENT');
+    if(result.status==='mined')scanHeight(result.height);else if(Object.hasOwn(result,'height'))throw TypeError('INVALID_ARGUMENT');
+  } else {
+    scanFields(input.result,request.kind==='address'?['transactions','asOfHeight','complete']:['transactions']);
+    if(request.kind==='address'&&typeof result.complete!=='boolean')throw TypeError('INVALID_ARGUMENT');
+    if(Object.hasOwn(result,'asOfHeight'))scanHeight(result.asOfHeight);
+    const items=result.transactions;
+    if(!Array.isArray(items)||items.length>16||Reflect.ownKeys(items).length!==items.length+1)throw TypeError('RESOURCE_LIMIT');
+    let remaining=2*1024*1024;
+    result.transactions=[];
+    for(let i=0;i<items.length;i++) {
+      const property=Object.getOwnPropertyDescriptor(items,String(i));
+      if(!property||!('value'in property))throw TypeError('INVALID_ARGUMENT');
+      const item=scanFields(property.value,['bytes','minedHeight']);
+      if(item.minedHeight!==null)scanHeight(item.minedHeight);
+      const bytes=copyBytes(item.bytes,remaining,'RESOURCE_LIMIT');remaining-=bytes.length;
+      result.transactions.push({bytes:scanHex(bytes),minedHeight:item.minedHeight});
+    }
+  }
+  input.result=result;
   return input;
 }
 function lift(value) {
@@ -139,7 +194,8 @@ export function viewsForStorage(storage) {
           result=binding.views_seed_call(token,operation,input,ownedSeed);
         } else {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
-          result=scans.has(operation)?binding.scan_call(token,operation,input):binding.views_call(token,operation,input);
+          result=enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
+            scans.has(operation)?binding.scan_call(token,operation,input):binding.views_call(token,operation,input);
         }
       }
       catch(error) {
