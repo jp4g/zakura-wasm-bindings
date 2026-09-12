@@ -7,14 +7,14 @@ import { createHash } from 'node:crypto';
 import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dist/index.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const nativeReceipt = '1b550fd0c8b966da8d901670160e556660edf3bef291b413b18332f1ff009679';
-const overlayRevision = '72fd15d';
+const nativeReceipt = '57f268c0976cabc312b8337ab942c59272de0b146d18108d1dcbcab4acb6f346';
+const overlayRevision = '1b6b2fe';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
 // Version 2 adds required ScanState and its durable revision table. The native
 // storage marker stays version 1; the accepted Rust owner migrates legacy files.
 export const profile = {
   contractRevision: 'zakura-private-wallet/1', abiVersion: 'checked-bindgen-0.2.128/1',
-  schemas: { operations: { walletViews: '2', consensusContext: '1', decodeTransaction: '1' },
+  schemas: { operations: { walletViews: '2', walletScan: '1', consensusContext: '1', decodeTransaction: '1' },
     protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/2',
     hostServices: { nodeFilesystem: 'linux-flock/1', browserOpfs: 'sync-access-handle/1', storage: 'scalar-vfs/1' } },
 };
@@ -31,7 +31,7 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   const receiptBytes = readFileSync(resolve(nativeBuild, 'build.json'));
   requireThat(sha(receiptBytes) === nativeReceipt, 'accepted native receipt mismatch');
   const receipt = JSON.parse(receiptBytes);
-  requireThat(receipt.complete && receipt.revision === '7213f9014b49219af200a6aafedb72a87c75b1b3', 'native build identity');
+  requireThat(receipt.complete && receipt.revision === '022726c2dd626cf69099b35f9511d9e8570f377c', 'native build identity');
   const inputs = {};
   for (const [name, digest] of Object.entries(receipt.artifacts)) {
     const bytes = readFileSync(resolve(nativeBuild, 'bundle', name));
@@ -67,7 +67,7 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
     }
   }
   const metadata = Buffer.from(canonical({ format: 'zakura-private-wallet-build/1',
-    scope: 'Internal account/address/balance runtime packaging; full H1 runtime unfinished.',
+    scope: 'Internal account/address/balance/scan runtime packaging; full H1 runtime unfinished.',
     revision: git('rev-parse', 'HEAD').toString().trim(), overlayRevision: git('rev-parse', overlayRevision).toString().trim(),
     nativeBuildSha256: nativeReceipt, nativeRevision: receipt.revision, nativeTree: receipt.tree,
     sourceSha256: Object.fromEntries([...Object.entries(virtual), ['runtime/package.mjs', readFileSync(fileURLToPath(import.meta.url))]]
