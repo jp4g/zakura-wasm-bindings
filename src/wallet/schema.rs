@@ -95,9 +95,15 @@ pub(super) fn validate(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Resul
     if actual.contains_key(super::revision::TABLE) {
         expected.insert(super::revision::TABLE.into(), ("table".into(), super::revision::TABLE.into(), Some(super::revision::SQL.into())));
     }
+    if actual.contains_key(super::creation::TABLE) {
+        expected.insert(super::creation::TABLE.into(), ("table".into(), super::creation::TABLE.into(), Some(super::creation::SQL.into())));
+    }
     // Exact producer text preserves literals and SQLite's indirect rewrites.
     // No view is prepared: legitimate intermediate views can be unselectable.
     if actual != expected { return Err(MISMATCH.into()); }
+    if actual.contains_key(super::creation::TABLE) {
+        super::creation::validate(conn).map_err(|_|MISMATCH.to_string())?;
+    }
     if actual.contains_key(super::revision::TABLE) {
         super::revision::validate(conn).map_err(|_| MISMATCH.to_string())?;
     }

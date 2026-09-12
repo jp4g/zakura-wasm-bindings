@@ -23,11 +23,11 @@ assert.equal(api.runtimeIdentity.buildSha256, digest(readFileSync(join(options.o
 assert.equal(api.runtimeIdentity.dependencyGraphSha256, digest(readFileSync(join(options.output, 'dependency-graph.json'))));
 assert.equal(api.runtimeIdentity.contractRevision, profile.contractRevision);
 assert.deepEqual(api.runtimeIdentity.schemas, result.manifest.schemas);
-assert.equal(api.runtimeIdentity.schemas.operations.walletViews, '2');
+assert.equal(api.runtimeIdentity.schemas.operations.walletViews, '3');
 assert.equal(api.runtimeIdentity.schemas.operations.walletScan, '1');
-assert.equal(api.runtimeIdentity.schemas.operations.walletSync, '1');
+assert.equal(api.runtimeIdentity.schemas.operations.walletSync, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletEnhancement, '1');
-assert.equal(api.runtimeIdentity.schemas.database, 'wallet-storage/2');
+assert.equal(api.runtimeIdentity.schemas.database, 'wallet-storage/3');
 assert.deepEqual(api.runtimeIdentity.memory, { initialPages: 307, maximumPages: 4096, shared: false });
 assert.equal(result.manifestSha256, digest(readFileSync(join(options.output, 'manifest.json'))));
 await assert.rejects(buildWalletPackage(options), { code: 'EEXIST' });

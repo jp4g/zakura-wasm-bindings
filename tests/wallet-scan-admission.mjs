@@ -7,7 +7,7 @@ let calls=0, received, afterCall=()=>{};
 const context=vm.createContext({Object,Array,Number,Uint8Array,TextDecoder,AbortSignal,TypeError,Error,Set,Reflect,JSON,BigInt});
 const facade=new vm.SourceTextModule(fs.readFileSync(new URL('../views.mjs',import.meta.url),'utf8'),{context});
 await facade.link(async name=>{
-  const dispatch=route=>(token,operation,input)=>{calls++;received={token,operation,input:JSON.parse(input)};assert.equal(route,operation.startsWith('enhancement_')?'enhancement': ['scan_state','scan_block_hash','scan_rewind'].includes(operation)?'sync':'scan');afterCall();return '{"revision":"native:1"}';};
+  const dispatch=route=>(token,operation,input)=>{calls++;received={token,operation,input:JSON.parse(input)};assert.equal(route,operation.startsWith('enhancement_')?'enhancement': ['scan_state','scan_block_hash','scan_rewind','scan_complete'].includes(operation)?'sync':'scan');afterCall();return '{"revision":"native:1"}';};
   const exports=name==='./wallet.mjs'?{initializeStorage:()=>{throw Error('unused');}}:name==='./bytes.mjs'?{copyBytes}:{scan_call:dispatch('scan'),sync_call:dispatch('sync'),enhancement_call:dispatch('enhancement'),views_call:()=>{throw Error('wrong dispatch');}};
   return new vm.SyntheticModule(Object.keys(exports),function(){for(const [key,value] of Object.entries(exports))this.setExport(key,value);},{context});
 });
@@ -33,6 +33,8 @@ for(const blocks of [[],Array(17).fill(new Uint8Array(1)),Array(1),accessor,[sha
 for(const args of [{target:{...target,hash:new Uint8Array(31)}},{target:{...target,height:0xffffffff}},{target,blocks:[]},{get target(){throw Error('getter must not run');}}])assert.throws(()=>call('scan_plan',args),/INVALID_ARGUMENT/);
 assert.throws(()=>call('account_list',{target}),/INVALID_ARGUMENT/);
 const rewind={revision:'native:1',requestedPoint:target};
+const completion={revision:'native:1',target,treeState:new Uint8Array([0,255])};
+call('scan_complete',completion);assert.equal(received.input.treeState,'00ff');
 for(const [operation,input] of [['scan_state',{}],['scan_block_hash',{height:0xffffffff}],['scan_rewind',rewind],['enhancement_requests',{}]]) {
   call(operation,input);assert.deepEqual(received.input,input);
 }
@@ -56,7 +58,7 @@ afterCall=()=>{};
 assert.equal(call('scan_plan',{target}).revision,'native:1','native rejection leaves owner reusable');
 const before=calls, controller=new AbortController();controller.abort();
 assert.throws(()=>call('scan_plan',{target,signal:controller.signal}),e=>e.message==='ABORTED'&&e.commit==='none');assert.equal(calls,before);
-for(const [operation,input] of [['scan_plan',{target}],['scan_ingest_batch',batch],['scan_rewind',rewind],['enhancement_apply',enhancement]]) {
+for(const [operation,input] of [['scan_plan',{target}],['scan_ingest_batch',batch],['scan_rewind',rewind],['scan_complete',completion],['enhancement_apply',enhancement]]) {
   const controller=new AbortController();afterCall=()=>controller.abort();
   assert.throws(()=>call(operation,{...input,signal:controller.signal}),e=>e.message==='ABORTED'&&e.commit==='committed');
 }

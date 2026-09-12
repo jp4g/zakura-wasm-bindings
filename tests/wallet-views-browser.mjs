@@ -143,6 +143,11 @@ try {
   const busy = await contender.call(initialize(false));
   check(!busy.ok && busy.error === 'STORAGE_BUSY', `contention: ${JSON.stringify(busy)}`);
   await contender.destroy();
+  const creationTarget={height:99,hash:'07'.repeat(32)};
+  const creationPlan=await first.call({op:'scan_plan',generation:opened.generation,args:{target:creationTarget}});
+  check(creationPlan.ok,'explicit creation target');
+  const completed=await first.call({op:'scan_complete',generation:opened.generation,args:{revision:creationPlan.result.revision,target:creationTarget,treeState:input.birthday.priorTreeState}});
+  check(completed.ok,'explicit creation tree snapshot');
   check((await first.call({ op: 'close', generation: opened.generation })).ok, 'close');
   check(!(await first.call({ op: 'account_list', generation: opened.generation })).ok, 'stale operation');
   check((await first.call(balanceRequest)).error==='STALE_HANDLE','balance after close');
@@ -171,7 +176,7 @@ try {
   check(storedHd.ok&&encode(storedHd.result)===encode(hd.result),'HD UUID/index/name/birthday survives OPFS owner destruction');
   const storedHdAddresses=await reopened.call({op:'address_list',generation:again.generation,args:hdArgs});
   check(storedHdAddresses.ok&&encode(storedHdAddresses.result)===encode(hdRecords),'HD addresses survive OPFS reopen');
-  const hdNext=await reopened.call({op:'account_create_hd',generation:again.generation,args:{birthday:input.birthday},seed:hdSeed});
+  const hdNext=await reopened.call({op:'account_create_hd',generation:again.generation,args:{},seed:hdSeed});
   check(hdNext.ok&&hdNext.result.accountIndex===4&&!hdNext.result.signerAttached,'native HD next index after OPFS reopen');
   results.push({case:'private native HD OPFS import/address/destruction/reopen/next',accountId:hd.result.id,index:hd.result.accountIndex,seedLength:hdSeed.length});
   check(hdSeed.every(b=>b===40),'reopened caller seed unchanged');
@@ -179,7 +184,7 @@ try {
   for(const {request,account,args,records,seed} of mnemonicCases) {
     check(encode((await reopened.call({op:'account_get',generation:again.generation,args})).result)===encode(account),'mnemonic persistent account');
     check(encode((await reopened.call({op:'address_list',generation:again.generation,args})).result)===encode(records),'mnemonic persistent addresses');
-    const next=await reopened.call({op:'account_create_hd',generation:again.generation,args:{birthday:input.birthday},seed});
+    const next=await reopened.call({op:'account_create_hd',generation:again.generation,args:{},seed});
     check(next.ok&&next.result.accountIndex===4,'mnemonic native next index after OPFS reopen');
     const post=await reopened.call({...request,generation:again.generation,args:{...request.args,accountIndex:5},abort:'duringSync'});
     check(post.error==='ABORTED'&&post.commit==='committed','mnemonic committed abort');

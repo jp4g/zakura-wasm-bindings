@@ -5,10 +5,10 @@ import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
 const operations = new Set(['account_balance','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_list','account_get','address_current','address_next','address_list','address_at']);
-const syncs = new Set(['scan_state','scan_block_hash','scan_rewind']);
+const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const scans = new Set(['scan_plan','scan_ingest_batch',...syncs,...enhancements]);
-const writes = new Set(['scan_plan','scan_ingest_batch','scan_rewind','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
+const writes = new Set(['scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -70,6 +70,12 @@ function scanHex(bytes) {
 }
 function lowerScan(args, operation) {
   if (enhancements.has(operation)) return lowerEnhancement(args,operation);
+  if (operation==='scan_complete') {
+    const input=scanFields(args,['revision','target','treeState','signal']);delete input.signal;
+    if(typeof input.revision!=='string'||input.revision.length>128)throw TypeError('INVALID_ARGUMENT');
+    input.target=scanPoint(input.target);input.treeState=scanHex(copyBytes(input.treeState,65536,'RESOURCE_LIMIT'));
+    return input;
+  }
   const keys=operation==='scan_state'?[]:operation==='scan_block_hash'?['height']:operation==='scan_rewind'?['revision','requestedPoint']:
     operation==='scan_plan'?['target']:['target','revision','priorTreeState','blocks'];
   const input=scanFields(args,[...keys,'signal']);delete input.signal;
