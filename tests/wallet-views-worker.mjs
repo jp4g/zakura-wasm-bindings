@@ -15,8 +15,8 @@ if (node) {
 let owner, attempted=false, initializing=false, stopped=false, initializationDone, cancelInitialization;
 async function receive(request) {
   diagnose(`receive:${request.op}`);
-  let settled=false, finishInitialization;
-  const reply=value=>{if(!settled){settled=true;port.postMessage({id:request.id,...value});}};
+  let settled=false, finishInitialization,writes=0;
+  const reply=value=>{if(!settled){settled=true;port.postMessage({id:request.id,...value,writes});}};
   const ensureRunning=()=>{if(stopped)throw Error('ABORTED');};
   try {
     if (request.op==='initialize') {
@@ -57,16 +57,18 @@ async function receive(request) {
       const args=request.args??{}, controller=new AbortController();
       if(request.abort){args.signal=controller.signal;if(request.abort==='before')controller.abort();}
       const sync=backend.sync,write=backend.write;
+      backend.write=(...args)=>{writes++;return write(...args);};
       if(request.abort==='duringSync')backend.sync=(...a)=>{const result=sync(...a);controller.abort();return result;};
       if(request.fault==='commit'){let calls=0;backend.sync=(...a)=>{if(++calls===2)throw Object.assign(Error('synthetic commit sync fault'),{code:'EIO'});return sync(...a);};}
       const cryptoObject=globalThis.crypto,random=cryptoObject.getRandomValues;
       if(request.fault==='entropy')cryptoObject.getRandomValues=()=>{throw Error('synthetic entropy unavailable');};
       if(request.fault==='quota')backend.write=()=>{throw Object.assign(Error('synthetic quota fault'),{code:'ENOSPC'});};
-      try {const result=owner.call(request.generation,request.instance,request.op,args,request.seed);reply({ok:true,result});}
+      try {const result=owner.call(request.generation,request.instance,request.op,args,request.seed,request.mnemonic,request.passphrase);reply({ok:true,result});}
       finally {request.seed?.fill(0);backend.sync=sync;backend.write=write;cryptoObject.getRandomValues=random;}
     }
   } catch (e) { diagnose(`operation-error:${request.op}`,e); reply({ok:false,error:typeof e==='string'?e:e.code==='EBUSY'||e.name==='NoModificationAllowedError'?'STORAGE_BUSY':e.message,commit:e.commit}); }
   finally {
+    for(const secret of [request.mnemonic,request.passphrase])if(secret instanceof Uint8Array && secret.buffer instanceof ArrayBuffer)Uint8Array.prototype.fill.call(secret,0);
     if(finishInitialization){
       let cleanupError;
       if(stopped){try{if(owner)owner.close(owner.generation,owner.instance);else if(backend?.owned)backend.release();}catch(e){cleanupError=e;diagnose('startup-cleanup-error',e);}}
