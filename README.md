@@ -33,8 +33,19 @@ in `/home/jack/zakura-transaction-bindings-logs/cache-provenance.json`). Never w
 another worker's or global cache. All output/cache/log paths must be external.
 
 ```sh
-python3 build.py /home/jack/zakura-transaction-bindings-scratch /home/jack/zakura-transaction-bindings-scratch/packet-1
+REPRO=$(mktemp -d /home/jack/zakura-transaction-bindings-scratch/producer-repro.XXXXXX)
+git worktree add --detach "$REPRO/source" acaf7069e466c82ce1be2c45ebafb75a92b59ee9
+python3 "$REPRO/source/build.py" /home/jack/zakura-transaction-bindings-scratch "$REPRO/packet"
 ```
+
+These commands reproduce the selected producing revision from a detached checkout,
+with a new, nonexistent packet destination. Later documentation commits do not
+produce the selected binaries. Exact reproduction requires the recorded installed
+tools, locked inputs and same Cargo cache root
+`/home/jack/zakura-transaction-bindings-scratch/cargo`: dependency panic paths embed
+that location in WASM. Moving the cache can change WASM bytes even with identical
+sources and tools (independent review S1). The selected normal/`-OO` equality is
+for this same cache root. Reuse it only within its authorized ownership.
 
 The destination must be new. Scope, tool identity, and committed-script guards
 remain active under Python `-O` and `-OO`. Run the nonexecuting guard regression
@@ -101,15 +112,43 @@ unsupported; parsing V3/V4 fixture components is not Sprout wallet support.
 V5/V6 identities are effect digests, not hashes of every serialized byte.
 Input bounding is not a complete execution-time/memory or panic-recovery budget.
 
-Current producer: `70d1c0ec44b56333b84adf7d57e455b291cd85ff`; build metadata SHA256
-`d59dc6af3108dc68e70b5060e1e83b6a6dcbb7c35943724774593d53eb38fa9f`.
-The two fresh normal/optimized builds are byte-identical. For this pin, build a
-detached checkout of that exact revision; later documentation commits produce a
-different provenance revision. Native and real generated Node checks pass.
-Combined SDK Node consumption passes; new Firefox execution is pending parent
-loopback permission (`listen EPERM` in this worker). Browser support remains required.
-Reports/commands: `/home/jack/zakura-transaction-bindings-logs/REPORT.md`,
-`CLIresult.md`, and `checkpoint.md`. No push, merge, publication or deployment.
+Selected producing commit: `acaf7069e466c82ce1be2c45ebafb75a92b59ee9`;
+build metadata SHA256
+`09ae852de689eb47fba35dfefaae81397d280f5c2542bccdee9747954efad575`.
+The packets `/home/jack/zakura-transaction-bindings-scratch/packet-final` and
+`/home/jack/zakura-transaction-bindings-scratch/packet-final-OO` are byte-identical,
+including metadata. Native and actual generated Node checks pass.
+
+The selected consumer package is
+`/home/jack/zakura-transaction-bindings-scratch/coordinator-final-1`, produced from
+SDK runtime source `2c6c9c23b954662750d664aed323d48c19174213`, with SHA256SUMS digest
+`dbf2c6891e73f69ae256f1e3ce6f756b7d7a68bb67c47123fc79a5e01cd89e18`.
+SDK Node and actual parent Firefox execution passed: 196 network cases,
+13 transaction vectors, 208 baseline adapter calls and 1,472 truncated-prefix
+rejections. Firefox 155.0.1 also passed 28 network admissions and 23 pre-init
+transaction controls. Its nonisolated page did not expose SharedArrayBuffer;
+the six shared-store controls are Node evidence.
+
+Actual Firefox receipt:
+`/home/jack/zakura-transaction-bindings-logs/browser/firefox-1789157899032.json`;
+parent log: `/home/jack/zakura-transaction-bindings-logs/coordinator-browser-final.log`.
+Session deletion, driver-group disappearance and server closure are all recorded
+true, with no cleanup error and `acceptInsecureCerts: false`.
+The SDK consumer README's fresh `mktemp` verification/preparation commands select
+`packet-final`; parent verified them in `coordinator-doc-repro.log`.
+
+Final coordinator R1 documentation closure and command record:
+`/home/jack/zakura-transaction-bindings-logs/fixes/REPORT.md` and
+`/home/jack/zakura-transaction-bindings-logs/fixes/CLIresult.md`.
+The original worker `REPORT.md` and `checkpoint.md`, obsolete packets and failed
+browser attempt remain immutable historical evidence; its final `CLIresult.md`
+is absent and its exit status is unknown. No worker restart is inferred or needed.
+Independent review under `/home/jack/zakura-transaction-bindings-logs/review/`
+qualified the bounded runtime checks but held final acceptance for R1.
+This documentation fix still requires fresh independent review for R1 acceptance.
+No push, merge, publication or deployment.
+
+The private stateless lightwallet protobuf production codec is documented in [lightwire/README.md](lightwire/README.md).
 
 ## Private wallet storage lifecycle candidate
 
