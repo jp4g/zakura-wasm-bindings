@@ -152,7 +152,7 @@ for(const [number,[phrase,pass]] of vectors.entries()) {
   const mnemonicRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-mnemonic-`);
   const oracleRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-oracle-`);
   const input={birthday:fixture.import.birthday,accountIndex:3};
-  let saved,addresses;
+  let saved,addresses,nextIndex;
   owner=start(true,mnemonicRoot);
   try {
     const opened=await owner.call('initialize');assert.equal(opened.ok,true);
@@ -184,7 +184,7 @@ for(const [number,[phrase,pass]] of vectors.entries()) {
     assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase})).error,'ACCOUNT_COLLISION');
     const args={accountId:saved.id};
     assert.equal(typeof (await owner.call('address_current',args)).result,'string');
-    assert.equal((await owner.call('address_next',{...args,request:mnemonicAddressRequest})).ok,true);
+    const next=await owner.call('address_next',{...args,request:mnemonicAddressRequest});assert.equal(next.ok,true);nextIndex=next.result.index;
     assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
     addresses=(await owner.call('address_list',args)).result;
     assert.equal((await owner.call('close')).ok,true);
@@ -207,7 +207,8 @@ for(const [number,[phrase,pass]] of vectors.entries()) {
     const result=await owner.call('account_import_hd',input,{seed});assert.equal(result.ok,true);
     const {id:ignore,...expected}=result.result,{id:ignored,...actual}=saved;assert.deepEqual(actual,expected);
     const args={accountId:result.result.id};
-    assert.equal((await owner.call('address_next',{...args,request:mnemonicAddressRequest})).ok,true);
+    // Shielded next allocation uses wall time; compare authority at the same native index.
+    assert.equal((await owner.call('address_at',{...args,index:nextIndex,request:mnemonicAddressRequest})).ok,true);
     assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
     assert.deepEqual((await owner.call('address_list',args)).result,addresses);
     assert.equal((await owner.call('close')).ok,true);
