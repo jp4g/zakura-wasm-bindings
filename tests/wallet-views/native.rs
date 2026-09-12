@@ -1,5 +1,7 @@
 // Synthetic test authority derived from fixed bytes. NEVER use for production funds.
 use super::*;
+#[path = "sync.rs"]
+mod sync;
 use serde_json::{json, Value};
 use zcash_client_backend::proto::service::TreeState;
 use prost::Message;
