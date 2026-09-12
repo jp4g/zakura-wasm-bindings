@@ -270,26 +270,55 @@ fn policy_block(key: &UnifiedFullViewingKey) -> zcash_client_backend::proto::com
 }
 
 #[test]
-fn native_policy_real_scan_retention_selection_and_reopen() {
+fn native_policy_real_scan_retention_selection_and_reopen() { policy_scan_matrix(false); }
+
+#[test]
+fn native_policy_legacy_marks_migrate_on_open() { policy_scan_matrix(true); }
+
+// Read native rows verbatim for preservation/rollback assertions; never synthesize
+// serialized tree data. ORDER BY rowid makes repeat-open comparisons deterministic.
+fn policy_rows(conn: &rusqlite::Connection, tables: &[&str]) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    tables.iter().map(|table| {
+        let mut stmt=conn.prepare(&format!("SELECT * FROM {table} ORDER BY rowid")).unwrap();
+        let columns=stmt.column_count();
+        stmt.query_map([],|row| (0..columns).map(|i|row.get(i)).collect()).unwrap().collect::<std::result::Result<Vec<_>,_>>().unwrap()
+    }).collect()
+}
+
+fn policy_scan_matrix(legacy: bool) {
     use zcash_client_backend::{scanning::{scan_block,ScanningKeys,Nullifiers},data_api::{InputSource,WalletCommitmentTrees,BlockMetadata,locking::LockFilter}};
     use zcash_primitives::{block::BlockHash,transaction::TxId};
     use zcash_protocol::ShieldedPool;
     for policy in [None,Some(false),Some(true)] {
         let (path,g)=open();
         let mut input=fixture(10);
+        input["birthday"].as_object_mut().unwrap().remove("recoverUntilExclusive");
         if let Some(value)=policy {input["viewOnly"]=json!(value);}
         let account=call(g,"account_import",input.clone()).unwrap();
         let account_id=id(&json!({"accountId":account["id"]})).unwrap();
         let p=crate::Document::parse(PARAMS).unwrap();
         let key=UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap();
         let birthday=birthday(&input["birthday"],PARAMS,&[3;32],&p).unwrap();
-        let keys=ScanningKeys::from_account_ufvks([(account_id,key)]);
-        let cb=policy_block(&UnifiedFullViewingKey::decode(&p,input["viewingKey"].as_str().unwrap()).unwrap());
+        let mut other_input=fixture(12);
+        other_input["birthday"].as_object_mut().unwrap().remove("recoverUntilExclusive");
+        let other=call(g,"account_import",other_input.clone()).unwrap();
+        let other_id=id(&json!({"accountId":other["id"]})).unwrap();
+        let other_key=UnifiedFullViewingKey::decode(&p,other_input["viewingKey"].as_str().unwrap()).unwrap();
+        let mut cb=policy_block(&key);
+        let mut other_cb=policy_block(&other_key);
+        other_cb.vtx[0].txid=vec![11;32]; other_cb.vtx[0].index=2;
+        cb.vtx.extend(other_cb.vtx);
+        let metadata=cb.chain_metadata.as_mut().unwrap();
+        metadata.sapling_commitment_tree_size=2; metadata.orchard_commitment_tree_size=2; metadata.ironwood_commitment_tree_size=2;
+        let keys=ScanningKeys::from_account_ufvks([(account_id,key),(other_id,other_key)]);
         let prior=BlockMetadata::from_parts(99u32.into(),BlockHash([7;32]),Some(0),Some(0),Some(0));
         let scan=scan_block(&p,cb,&keys,&Nullifiers::empty(),Some(&prior)).unwrap();
         assert_eq!(scan.transactions()[0].sapling_outputs().len(),1);
         assert_eq!(scan.transactions()[0].orchard_outputs().len(),1);
         assert_eq!(scan.transactions()[0].ironwood_outputs().len(),1);
+        let sapling_commitments=scan.sapling().commitments().to_vec();
+        let orchard_commitments=scan.orchard().commitments().to_vec();
+        let ironwood_commitments=scan.ironwood().commitments().to_vec();
         crate::wallet::DOMAIN.with(|domain| {
             let mut domain=domain.borrow_mut();let db=&mut domain.active.as_mut().unwrap().wallet;
             db.update_chain_tip(100u32.into()).unwrap();
@@ -300,24 +329,77 @@ fn native_policy_real_scan_retention_selection_and_reopen() {
                 zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(70_000),address.script().into()),
                 Some(100u32.into()),Some(account_id),Some(TransparentKeyScope::EXTERNAL),None).unwrap();
             db.put_received_transparent_utxo(&output).unwrap();
+            if legacy {
+                // Genuine scanner commitments and original native retention flags, persisted
+                // through native insertion APIs, reproduce pre-policy per-note marks.
+                db.with_sapling_tree_mut(|tree| tree.batch_insert(0u64.into(),sapling_commitments.clone().into_iter())).unwrap();
+                db.with_orchard_tree_mut(|tree| tree.batch_insert(0u64.into(),orchard_commitments.clone().into_iter())).unwrap();
+                db.with_ironwood_tree_mut(|tree| tree.batch_insert(0u64.into(),ironwood_commitments.clone().into_iter())).unwrap();
+                // Deferred native removals retain marks until checkpoint pruning. The
+                // policy migration must clear only the view-only removal records too.
+                for position in [0u64,1] {
+                    db.with_sapling_tree_mut(|tree| tree.remove_mark(position.into(),Some(&100u32.into()))).unwrap();
+                    db.with_orchard_tree_mut(|tree| tree.remove_mark(position.into(),Some(&100u32.into()))).unwrap();
+                    db.with_ironwood_tree_mut(|tree| tree.remove_mark(position.into(),Some(&100u32.into()))).unwrap();
+                }
+                assert_eq!(db.with_sapling_tree_mut(|tree| tree.marked_positions()).unwrap().len(),2);
+                assert_eq!(db.with_orchard_tree_mut(|tree| tree.marked_positions()).unwrap().len(),2);
+                assert_eq!(db.with_ironwood_tree_mut(|tree| tree.marked_positions()).unwrap().unwrap().len(),2);
+            }
         });
         crate::wallet::storage_close(g).unwrap();
-        let conn=rusqlite::Connection::open(&path).unwrap();
+        let mut conn=rusqlite::Connection::open(&path).unwrap();
+        if legacy { conn.execute("UPDATE ext_viewing_version SET version=1",[]).unwrap(); }
         for pool in ["sapling","orchard","ironwood"] {
             let count:u32=conn.query_row(&format!("SELECT count(*) FROM {pool}_received_notes WHERE nf IS NOT NULL AND value>0 AND commitment_tree_position=0"),[],|r|r.get(0)).unwrap();
             assert_eq!(count,1,"viewing history and spentness retained: {pool}");
         }
         assert_eq!(conn.query_row("SELECT ufvk IS NOT NULL FROM accounts",[],|r|r.get::<_,bool>(0)).unwrap(),true);
+        let preserved_tables=["accounts","ext_viewing_accounts","ext_viewing_addresses","transactions","sapling_received_notes","orchard_received_notes","ironwood_received_notes","transparent_received_outputs","sapling_tree_checkpoints","orchard_tree_checkpoints","ironwood_tree_checkpoints"];
+        let preserved=policy_rows(&conn,&preserved_tables);
+        let tree_tables=["sapling_tree_shards","orchard_tree_shards","ironwood_tree_shards","sapling_tree_cap","orchard_tree_cap","ironwood_tree_cap","sapling_tree_checkpoint_marks_removed","orchard_tree_checkpoint_marks_removed","ironwood_tree_checkpoint_marks_removed","ext_viewing_version"];
+        let initial_trees=policy_rows(&conn,&tree_tables);
+        if legacy && policy==Some(true) {
+            let before=initial_trees.clone();
+            let reader=rusqlite::Connection::open(&path).unwrap();
+            reader.execute_batch("BEGIN; SELECT * FROM accounts;").unwrap();
+            conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+            let changes=conn.total_changes();
+            assert_eq!(super::initialize(&mut conn).unwrap_err(),"VIEWING_SCHEMA_REQUIRED");
+            assert!(conn.total_changes()>changes,"native migration wrote before blocked COMMIT");
+            assert_eq!(policy_rows(&conn,&tree_tables),before,"all pool writes and version roll back");
+            assert_eq!(policy_rows(&conn,&preserved_tables),preserved);
+            eprintln!("native migration COMMIT blocked: all tree/version writes rolled back");
+            assert!(crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).is_err(),"locked legacy opening must not publish an owner");
+            assert!(call(g,"account_list",json!({})).is_err());
+            assert_eq!(policy_rows(&conn,&tree_tables),before,"failed open cannot expose a partial migration");
+            reader.execute_batch("ROLLBACK").unwrap();
+        }
         conn.close().unwrap();
+        let mut migrated=None;
+        for reopen in 0..2 {
         let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
         assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
+        assert_eq!(call(g,"account_get",json!({"accountId":other["id"]})).unwrap(),other);
         crate::wallet::DOMAIN.with(|domain| {
             let mut domain=domain.borrow_mut();let db=&mut domain.active.as_mut().unwrap().wallet;
             let expected=usize::from(policy!=Some(true));
+            let summary=db.get_wallet_summary(zcash_client_backend::data_api::wallet::ConfirmationsPolicy::MIN).unwrap().unwrap();
+            let balance=&summary.account_balances()[&account_id];
+            eprintln!("legacy={legacy} policy={policy:?} native summary spendable: {:?}", [balance.sapling_balance().spendable_value(),balance.orchard_balance().spendable_value(),balance.ironwood_balance().spendable_value(),balance.unshielded_regular_balance().spendable_value()]);
+            for (pool, balance, value) in [("sapling",balance.sapling_balance(),50_000u64),("orchard",balance.orchard_balance(),60_000),("ironwood",balance.ironwood_balance(),60_000),("transparent",balance.unshielded_regular_balance(),70_000)] {
+                assert_eq!(u64::from(balance.total()),value,"viewing total: {pool}");
+                assert_eq!(u64::from(balance.spendable_value()),value*expected as u64,"summary purpose: {pool}");
+            }
+
             let sapling=db.with_sapling_tree_mut(|tree| tree.marked_positions()).unwrap();
             let orchard=db.with_orchard_tree_mut(|tree| tree.marked_positions()).unwrap();
             let ironwood=db.with_ironwood_tree_mut(|tree| tree.marked_positions()).unwrap().unwrap();
-            assert_eq!([sapling.len(),orchard.len(),ironwood.len()],[expected;3]);
+            assert_eq!([sapling.len(),orchard.len(),ironwood.len()],[expected+1;3],"legacy={legacy}, policy={policy:?}");
+            for marks in [&sapling,&orchard,&ironwood] { assert!(marks.contains(&1u64.into()),"spending mark preserved"); }
+            for (bal,value) in [(summary.account_balances()[&other_id].sapling_balance(),50_000u64),(summary.account_balances()[&other_id].orchard_balance(),60_000),(summary.account_balances()[&other_id].ironwood_balance(),60_000)] {
+                assert_eq!(u64::from(bal.spendable_value()),value,"mixed spending account unchanged");
+            }
             let selected = db.select_spendable_notes(account_id,
                 zcash_client_backend::data_api::TargetValue::AtLeast(zcash_protocol::value::Zatoshis::const_from_u64(10_000)),
                 &[ShieldedPool::Sapling,ShieldedPool::Orchard,ShieldedPool::Ironwood],101u32.into(),
@@ -334,5 +416,19 @@ fn native_policy_real_scan_retention_selection_and_reopen() {
             }
         });
         crate::wallet::storage_close(g).unwrap();
+        let conn=rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(policy_rows(&conn,&preserved_tables),preserved,"history/authority/checkpoints preserved on open {reopen}");
+        let after=policy_rows(&conn,&tree_tables);
+        if policy!=Some(true) {assert_eq!(after[..9],initial_trees[..9],"spending-purpose tree storage unchanged");}
+        if legacy {
+            for pool in ["sapling","orchard","ironwood"] {
+                let positions:Vec<u64>=conn.prepare(&format!("SELECT mark_removed_position FROM {pool}_tree_checkpoint_marks_removed ORDER BY mark_removed_position")).unwrap().query_map([],|r|r.get(0)).unwrap().collect::<std::result::Result<_,_>>().unwrap();
+                assert_eq!(positions,if policy==Some(true) {vec![1]} else {vec![0,1]},"only view-only deferred marks removed");
+            }
+        }
+        if let Some(before)=&migrated {assert_eq!(&after,before,"repeat-open idempotence");}
+        migrated=Some(after);
+        assert_eq!(conn.query_row("SELECT version FROM ext_viewing_version",[],|r|r.get::<_,u32>(0)).unwrap(),2);
+        }
     }
 }

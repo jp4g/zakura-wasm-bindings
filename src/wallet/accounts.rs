@@ -35,10 +35,15 @@ pub(super) fn initialize(conn: &mut rusqlite::Connection) -> std::result::Result
             if actual!=expected {return Err(rusqlite::Error::InvalidQuery);}
         }
         let objects:u32=tx.query_row("SELECT count(*) FROM sqlite_schema WHERE tbl_name GLOB 'ext_viewing_*' AND sql IS NOT NULL",[],|r|r.get(0))?;
-        let versions:u32=tx.query_row("SELECT count(*) FROM ext_viewing_version WHERE id=1 AND version=1",[],|r|r.get(0))?;
+        let versions:u32=tx.query_row("SELECT count(*) FROM ext_viewing_version WHERE id=1 AND version IN (1,2)",[],|r|r.get(0))?;
         let bad_accounts:u32=tx.query_row("SELECT count(*) FROM ext_viewing_accounts WHERE length(CAST(metadata AS BLOB))>160000 OR NOT json_valid(metadata) OR length(account_uuid)!=16",[],|r|r.get(0))?;
         let bad_addresses:u32=tx.query_row("SELECT count(*) FROM ext_viewing_addresses WHERE length(diversifier)>27 OR length(address)>1024 OR length(account_uuid)!=16",[],|r|r.get(0))?;
         if objects!=3 || versions!=1 || bad_accounts!=0 || bad_addresses!=0 {return Err(rusqlite::Error::InvalidQuery);}
+        let version:u32=tx.query_row("SELECT version FROM ext_viewing_version WHERE id=1",[],|r|r.get(0))?;
+        if version==1 {
+            zcash_client_sqlite::migrate_view_only_spend_support(&tx).map_err(|_|rusqlite::Error::InvalidQuery)?;
+            tx.execute("UPDATE ext_viewing_version SET version=2 WHERE id=1",[])?;
+        }
         tx.commit()
     })().map_err(|_|"VIEWING_SCHEMA_REQUIRED".into())
 }

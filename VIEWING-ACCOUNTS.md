@@ -30,11 +30,21 @@ stabilization honor purpose. Transparent selection and spend-oriented outpoint
 lookup exclude true view-only accounts; history rows remain stored. UFVK possession
 is not signer possession. No signer attachment or implicit upgrade is introduced.
 
-This policy applies to newly persisted scans. It is not an erasure migration for
-witness marks created by an older unpatched backend, nor a physical erasure promise.
-The original reviewed candidate had no note-bearing scans. Reusing other populated
-pre-policy databases needs an explicit migration/recovery decision in foreground;
-spend selection is nevertheless gated by native purpose.
+Native `get_wallet_summary` gates shielded spendability (including stabilized
+notes) and transparent balance classification on account purpose. True view-only
+value remains in the native non-spendable balance buckets, including the existing
+pending-spendability bucket; that name does not imply automatic future upgrade.
+Omitted/false classification is unchanged. No public summary API is added.
+
+Extension version 2 migrates populated pre-policy wallets on the same owned
+connection, before the wallet is exposed. One immediate transaction clears native
+view-only per-note marks, their deferred checkpoint-removal records and stabilized
+flags, then updates the version. Native shardtree removal preserves shared chain
+checkpoints, spending-account marks, values, nullifiers, positions, metadata and
+viewing authority. Failure rolls back the policy writes and version together;
+reopening retries version 1 and version 2 opens are idempotent. This is logical
+removal of per-note spend support, not physical media erasure or removal of shared
+commitment data. Later spending still requires explicit recovery/upgrade.
 
 ## Private interface
 
@@ -80,6 +90,6 @@ The producer source graph remains the base's Common 1.0.0 package family, `zakur
 Inherited Common advisories remain open. Existing delivery evidence reports `RUSTSEC-2023-0089` (`atomic-polyfill@1.0.3`) coalesced across six qualification records; this work performs no new advisory scan and makes no clean-security claim. Encryption at rest, real browser quota exhaustion/eviction, power loss, full H1 negotiation/error/recovery envelopes, verified public loader integration, and final storage/host acceptance remain separate gates. No publication, push or merge is performed.
 
 Fresh qualification and exact remaining limitations are recorded in the assigned
-`authorized-native-policy/REPORT.md` and raw command logs. Historical build04/05 and
+`native-policy-r2/REPORT.md` and raw command logs. Historical build04/05 and
 parent Firefox evidence are retained evidence, not fresh qualification of these
 changed bytes. No loader-provider review, bypass, push, merge or publication occurs.

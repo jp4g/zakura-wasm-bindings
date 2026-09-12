@@ -6,7 +6,7 @@ import hashlib, io, json, os
 from pathlib import Path
 import shutil, subprocess, sys, tarfile, tempfile, tomllib
 REPO=Path(__file__).resolve().parent
-SCRATCH=Path('/home/jack/zakura-viewing-accounts-scratch/authorized-native-policy')
+SCRATCH=Path('/home/jack/zakura-viewing-accounts-scratch/native-policy-r2')
 helper_path=REPO/'build-wallet.py'
 helper_bytes=helper_path.read_bytes()
 if helper_bytes!=subprocess.check_output(['git','-C',str(REPO),'show','HEAD:build-wallet.py']):
