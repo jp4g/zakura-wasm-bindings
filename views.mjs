@@ -51,6 +51,10 @@ function liftAmounts(value) {
 export async function initializeViews(wasm,backend,format,parameters,genesis) {
   // The sole storage owner stays private. It initializes the SAME binding module.
   const storage=await initializeStorage(wasm,backend,format,parameters,genesis);
+  return viewsForStorage(storage);
+}
+/** Bind account/query operations to the already opened worker-local storage. */
+export function viewsForStorage(storage) {
   const {generation,instance}=storage;
   let poisoned=false;
   return Object.freeze({

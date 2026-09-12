@@ -1,6 +1,7 @@
 // Private worker-local primitive. The future H1 owner supplies verified bytes and
 // a validated genesis/parameter registration. This is not a public WalletClient.
-import init, * as binding from './bindings.js';
+import { initSync } from './bindings.js';
+import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 import * as host from './wallet-host/storage-host.mjs';
 let attempted = false;
@@ -9,17 +10,41 @@ function uint(value) {
   return value;
 }
 export async function initializeStorage(wasm, backend, format, parameters, genesis) {
-  const code = copyBytes(wasm, 32 * 1024 * 1024, 'invalid wasm bytes');
+  // Preserve pre-initialization admission for existing worker-local consumers.
+  const { params, identity } = network(format, parameters, genesis);
+  return initializeWalletRuntime(wasm).open(backend, format, params, identity);
+}
+function network(format, parameters, genesis) {
   const params = copyBytes(parameters, 256, 'invalid parameters');
   const identity = copyBytes(genesis, 32, 'invalid genesis');
   if (identity.length !== 32 || format !== 'zcash-js-network/1') throw TypeError('INVALID_ARGUMENT');
+  return { params, identity };
+}
+
+/** Initialize only verified code and worker-local SQLite, without a storage lease.
+ * The host can finish compatibility negotiation before acquiring/opening a DB.
+ */
+export function initializeWalletRuntime(wasm) {
+  const code = copyBytes(wasm, 32 * 1024 * 1024, 'invalid wasm bytes');
   if (attempted) throw Error('DOMAIN_USED');
   attempted = true;
   const instance = crypto.randomUUID();
-  const exports = await init({ module_or_path: code });
-  host.attach(exports.memory, backend);
+  const exports = initSync({ module: code });
+  host.attachMemory(exports.memory);
   if (exports.wallet_pool_start() + exports.wallet_pool_size() > exports.__heap_base.value) throw Error('allocator overlap');
   if (exports.wallet_runtime_init() !== 0) throw Error('RUNTIME_UNAVAILABLE');
+  let opened = false;
+  return Object.freeze({
+    open(backend, format, parameters, genesis) {
+      const { params, identity } = network(format, parameters, genesis);
+      if (opened) throw Error('DOMAIN_USED');
+      opened = true;
+      host.attachBackend(backend);
+      return openStorage(backend, instance, format, params, identity);
+    },
+  });
+}
+function openStorage(backend, instance, format, params, identity) {
   const generation = binding.storage_initialize(format, params, identity);
   let closed = false, closeError;
   return {
