@@ -33,7 +33,7 @@ pub(super) fn initialize(conn: &mut Connection) -> std::result::Result<(),String
 }
 pub(super) fn pending(ext: &ExtensionTransaction<'_>, height:u32, hash:&[u8]) -> rusqlite::Result<()> {
     // A historical sync cannot replace a newer locally known creation target.
-    ext.execute("UPDATE ext_wallet_creation_snapshot SET height=?1,hash=?2,tree=NULL WHERE id=1 AND (height IS NULL OR height<=?1)",rusqlite::params![height,hash])?;
+    ext.execute("UPDATE ext_wallet_creation_snapshot SET height=?1,hash=?2,tree=NULL WHERE id=1 AND (height IS NULL OR height<?1 OR (height=?1 AND hash!=?2))",rusqlite::params![height,hash])?;
     Ok(())
 }
 pub(super) fn invalidate(ext: &ExtensionTransaction<'_>) -> rusqlite::Result<()> {

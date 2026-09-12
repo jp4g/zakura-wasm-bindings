@@ -26,11 +26,15 @@ fn creation_empty_completion_reopen_and_newer_target_freshness() {
     assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&bad.to_string()).unwrap_err(),"INVALID_BIRTHDAY");
     assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
     crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap();
+    complete(g,99); // An identical watch target preserves completed creation state.
     crate::wallet::storage_close(g).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     let created=hd(g,"account_create_hd",40,json!({})).unwrap();
     assert_eq!(created["accountIndex"],0);
     assert_eq!(created["birthdayHeight"],100);
+    complete_target(g,99,&"08".repeat(32));
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
+    ready(g);
     let newer=complete(g,100);
     assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
     let old=complete(g,99);

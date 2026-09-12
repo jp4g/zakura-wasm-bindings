@@ -143,6 +143,11 @@ try {
   const busy = await contender.call(initialize(false));
   check(!busy.ok && busy.error === 'STORAGE_BUSY', `contention: ${JSON.stringify(busy)}`);
   await contender.destroy();
+  const creationTarget={height:99,hash:'07'.repeat(32)};
+  const creationPlan=await first.call({op:'scan_plan',generation:opened.generation,args:{target:creationTarget}});
+  check(creationPlan.ok,'explicit creation target');
+  const completed=await first.call({op:'scan_complete',generation:opened.generation,args:{revision:creationPlan.result.revision,target:creationTarget,treeState:input.birthday.priorTreeState}});
+  check(completed.ok,'explicit creation tree snapshot');
   check((await first.call({ op: 'close', generation: opened.generation })).ok, 'close');
   check(!(await first.call({ op: 'account_list', generation: opened.generation })).ok, 'stale operation');
   check((await first.call(balanceRequest)).error==='STALE_HANDLE','balance after close');
@@ -166,11 +171,6 @@ try {
   const addresses=await reopened.call({op:'address_list',generation:again.generation,args});check(addresses.ok&&encode(addresses.result)===encode(records),'persistent verified address list');
   check((await reopened.call({op:'account_list',generation:again.generation,instance:opened.instance})).error==='WRONG_INSTANCE','cross-worker handle');
   results.push({case:'same DB account/address after observed destruction',accountId:account.id,addresses:addresses.result.length});
-  const creationTarget={height:99,hash:'07'.repeat(32)};
-  const creationPlan=await reopened.call({op:'scan_plan',generation:again.generation,args:{target:creationTarget}});
-  check(creationPlan.ok,'explicit creation target');
-  const completed=await reopened.call({op:'scan_complete',generation:again.generation,args:{revision:creationPlan.result.revision,target:creationTarget,treeState:input.birthday.priorTreeState}});
-  check(completed.ok,'explicit creation tree snapshot');
   for(const {hdSeed,hd,hdArgs,hdRecords} of hdCases) {
   const storedHd=await reopened.call({op:'account_get',generation:again.generation,args:hdArgs});
   check(storedHd.ok&&encode(storedHd.result)===encode(hd.result),'HD UUID/index/name/birthday survives OPFS owner destruction');
