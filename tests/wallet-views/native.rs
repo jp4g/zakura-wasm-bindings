@@ -110,6 +110,30 @@ fn revision_legacy_migration_and_corrupt_row_admission() {
         assert_eq!(std::fs::read(&path).unwrap(),before,"{sql}");
     }
 }
+
+#[test]
+fn revision_view_is_rejected_before_its_expression_is_prepared() {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let (path,g)=open();
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE ext_wallet_revision; CREATE VIEW ext_wallet_revision AS SELECT 1 AS id,randomblob(16) AS epoch,0 AS sequence").unwrap();
+    let expressions=Arc::new(AtomicUsize::new(0));
+    let observed=expressions.clone();
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+        if matches!(ctx.action,AuthAction::Function { function_name: "randomblob" }) {
+            observed.fetch_add(1,Ordering::SeqCst);
+        }
+        Authorization::Allow
+    }));
+    assert_eq!(crate::wallet::validate_schema(&conn,PARAMS,&[3;32]).unwrap_err(),"SCHEMA_MISMATCH");
+    assert_eq!(expressions.load(Ordering::SeqCst),0,"schema admission must not prepare an unadmitted view expression");
+    // The counterexample view has a valid-looking row; demonstrate the observer
+    // detects exactly the SELECT which pre-admission validation must avoid.
+    super::super::revision::validate(&conn).unwrap();
+    assert_eq!(expressions.load(Ordering::SeqCst),1);
+}
 #[test]
 fn account_balance_unavailable_is_not_unknown() {
     let (path,g)=open();
