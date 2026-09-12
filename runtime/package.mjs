@@ -8,7 +8,7 @@ import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dis
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const nativeReceipt = '57f268c0976cabc312b8337ab942c59272de0b146d18108d1dcbcab4acb6f346';
-const overlayRevision = '1b6b2fe';
+const overlayRevision = '6b8a3aa';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
 // Version 2 adds required ScanState and its durable revision table. The native
 // storage marker stays version 1; the accepted Rust owner migrates legacy files.
