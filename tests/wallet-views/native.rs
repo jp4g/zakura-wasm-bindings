@@ -1233,3 +1233,5 @@ fn persistent_full_scan_fixture_reopens_with_real_three_pool_balance() {
     assert_eq!(scan["batches"].as_array().unwrap().len(),7);
     std::fs::write(format!("{}/scan-fixture.json",std::env::var("WALLET_TEST_ROOT").unwrap()),scan.to_string()).unwrap();
 }
+
+mod enhancement;

@@ -170,3 +170,4 @@ mod accounts;
 
 mod scan;
 mod sync;
+mod enhancement;
