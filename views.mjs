@@ -52,7 +52,15 @@ function lowerScan(args, operation) {
   delete input.signal;
   const target=fields(input.target,['height','hash']);
   if (!Number.isInteger(target.height)||target.height<0||target.height>=0xffffffff) throw TypeError('INVALID_ARGUMENT');
-  const hex=bytes=>Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+  const hex=bytes=>{
+    const ascii=new Uint8Array(bytes.length*2);
+    for(let i=0;i<bytes.length;i++) {
+      const high=bytes[i]>>>4, low=bytes[i]&15;
+      ascii[2*i]=high+(high<10?48:87);
+      ascii[2*i+1]=low+(low<10?48:87);
+    }
+    return new TextDecoder().decode(ascii);
+  };
   if (typeof target.hash!=='string'||! /^[0-9a-f]{64}$/.test(target.hash)) throw TypeError('INVALID_ARGUMENT');
   input.target=target;
   if (operation==='scan_ingest_batch') {

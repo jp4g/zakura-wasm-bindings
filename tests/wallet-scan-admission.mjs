@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import fs from 'node:fs';
 import {copyBytes} from '../bytes.mjs';
 let calls=0, received, afterCall=()=>{};
-const context=vm.createContext({Object,Array,Number,Uint8Array,AbortSignal,TypeError,Error,Set,Reflect,JSON,BigInt});
+const context=vm.createContext({Object,Array,Number,Uint8Array,TextDecoder,AbortSignal,TypeError,Error,Set,Reflect,JSON,BigInt});
 const facade=new vm.SourceTextModule(fs.readFileSync(new URL('../views.mjs',import.meta.url),'utf8'),{context});
 await facade.link(async name=>{
   const exports=name==='./wallet.mjs'?{initializeStorage:()=>{throw Error('unused');}}:name==='./bytes.mjs'?{copyBytes}:{scan_call:(token,operation,input)=>{calls++;received={token,operation,input:JSON.parse(input)};afterCall();return '{"revision":"native:1"}';},views_call:()=>{throw Error('wrong dispatch');}};
@@ -20,6 +20,9 @@ assert.deepEqual(received,{token:1,operation:'scan_plan',input:{target:{height:7
 const batch={target,revision:'native:1',priorTreeState:new Uint8Array([0,255]),blocks:[new Uint8Array([1,2])]};
 call('scan_ingest_batch',batch);
 assert.deepEqual(received.input.blocks,['0102']);assert.equal(received.input.priorTreeState,'00ff');
+call('scan_ingest_batch',{...batch,blocks:[new Uint8Array(2*1024*1024).fill(0xaf)]});
+assert.equal(received.input.blocks[0].length,4*1024*1024);
+assert.equal(received.input.blocks[0],'af'.repeat(2*1024*1024));
 const shared=new Uint8Array(new SharedArrayBuffer(1));
 const detached=new Uint8Array(1);structuredClone(detached.buffer,{transfer:[detached.buffer]});
 const accessor=[];Object.defineProperty(accessor,'0',{get(){throw Error('getter must not run');}});
