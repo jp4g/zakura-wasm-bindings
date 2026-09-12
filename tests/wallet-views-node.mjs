@@ -266,5 +266,5 @@ for(const [index,test] of fixture.balanceCases.entries()) {
       oldToken=opened;
     }finally{await balanceOwner.destroy();}
   }
-  console.log(show({pass:true,case:'populated native balance truth through generated WASM; no writes; policy; abort; destruction/reopen',index,root:balanceRoot}));
+  console.log(show({pass:true,case:'native balance truth through generated WASM; no writes; policy; abort; destruction/reopen',index,scenario:test.scenario??(test.locked?'locked':'purpose'),queries:test.queries.length,root:balanceRoot}));
 }

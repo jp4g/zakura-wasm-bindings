@@ -184,6 +184,52 @@ try {
   results.push({case:'mnemonic all counts/NFKD/empty/rollback/abort/OPFS destruction/reopen',cases:mnemonicCases.length});
   check((await reopened.call({ op: 'close', generation: again.generation })).ok, 'reopened close');
   await reopened.destroy();
+  // Reuse native scanner databases and the original observed worker lifecycle.
+  const liftAmounts=v=>typeof v==='string'&&/^[0-9]+$/.test(v)?BigInt(v):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,liftAmounts(x)])):v;
+  const exactBalance=(actual,expected,label)=> {
+    if(expected&&typeof expected==='object') {
+      check(actual&&typeof actual==='object'&&Object.keys(actual).sort().join()===Object.keys(expected).sort().join(),label+' keys');
+      for(const key of Object.keys(expected))exactBalance(actual[key],expected[key],label+'.'+key);
+    } else check(actual===expected,label+' value/type');
+  };
+  check(fixture.balanceCases.length>=4,'populated native fixtures required');
+  for(const [index,test] of fixture.balanceCases.entries()) {
+    const balanceRoot=`${root}-balance-${index}`;
+    let oldToken, persisted;
+    for(let reopen=0;reopen<2;reopen++) {
+      const owner=start();
+      const opened=await owner.call({...initialize(reopen===0),root:balanceRoot,...(reopen===0?{database:Uint8Array.from(test.database.match(/../g),b=>parseInt(b,16))}:{})});
+      check(opened.ok&&opened.secure,'populated OPFS initialize');
+      const snapshot=await owner.call({op:'fixture_snapshot'});check(snapshot.ok,'fixture snapshot');
+      const before=snapshot.result;
+      if(persisted)check(before.length===persisted.length&&before.every((b,i)=>b===persisted[i]),'populated bytes survive destruction/reopen');
+      for(const {args,expected} of test.queries) {
+        const saved=structuredClone(args),request={op:'account_balance',generation:opened.generation,args};
+        const result=await owner.call(request);
+        check(result.ok&&result.writes===0,'populated balance read without writes');
+        exactBalance(result.result,{accountId:expected.accountId,amounts:liftAmounts(expected.amounts)},'native balance');
+        exactBalance(args,saved,'caller policy');
+        const pre=await owner.call({...request,abort:'before'});
+        check(pre.error==='ABORTED'&&pre.commit==='none'&&pre.reads===0&&pre.writes===0,'populated preabort no IO');
+        check((await owner.call({...request,instance:'wrong'})).error==='WRONG_INSTANCE','populated wrong owner');
+        check((await owner.call({...request,generation:opened.generation+1})).error==='STALE_HANDLE','populated stale generation');
+        if(oldToken)check((await owner.call({...request,instance:oldToken.instance})).error==='WRONG_INSTANCE','populated old owner');
+        for(const confirmations of [null,{}, {...args.confirmations,trusted:0},{...args.confirmations,untrusted:4294967296},{...args.confirmations,trusted:2,untrusted:1},{...args.confirmations,allowZeroConfirmationShielding:1}]) {
+          const rejected=await owner.call({...request,args:{accountId:args.accountId,confirmations}});
+          check(rejected.error==='INVALID_ARGUMENT'&&rejected.writes===0,'populated invalid policy');
+        }
+      }
+      const request={op:'account_balance',generation:opened.generation,args:test.queries[0].args};
+      check((await owner.call({...request,args:{...request.args,accountId:'00000000-0000-0000-0000-000000000000'}})).error==='ACCOUNT_NOT_FOUND','populated unknown account');
+      const after=await owner.call({op:'fixture_snapshot'});check(after.ok&&after.result.length===before.length&&after.result.every((b,i)=>b===before[i]),'balance queries preserve OPFS bytes');
+      persisted=before;
+      check((await owner.call({op:'close',generation:opened.generation})).ok,'populated close');
+      check((await owner.call(request)).error==='STALE_HANDLE','populated balance after close');
+      oldToken=opened;
+      await owner.destroy();
+    }
+    results.push({case:'native populated OPFS exact bigint/policy/purpose/abort/no mutation/destruction/reopen',index,queries:test.queries.length});
+  }
   outcome = { pass: true, root, results, userAgent: navigator.userAgent, actualQuotaExhaustion: false, uaEviction: false };
 } catch (e) { outcome = { pass: false, root, results, error: { name: e.name, message: e.message, stack: e.stack } }; }
 finally { for (const worker of active) worker.terminate(); }
