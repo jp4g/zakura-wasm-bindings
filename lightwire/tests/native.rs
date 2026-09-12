@@ -115,3 +115,20 @@ fn duplicated_nested_messages_cannot_amplify_without_a_bound() {
     let mut groups=vec![163,6].repeat(17);groups.extend([164,6].repeat(17));
     assert!(decode_response("GetLatestBlock",&groups).is_err());
 }
+
+#[test]
+fn tree_state_response_encoding_preserves_pinned_fields_and_bounds() {
+    use zakura_lightwire::{encode_tree_state, decode_response};
+    let vectors: serde_json::Value = serde_json::from_str(include_str!("golden.json")).unwrap();
+    let vector = vectors.as_array().unwrap().iter().find(|v| v["method"] == "GetTreeState" && v["direction"] == "response").unwrap();
+    let bytes = encode_tree_state(&vector["dto"].to_string()).unwrap();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(hex, vector["hex"].as_str().unwrap());
+    let decoded: serde_json::Value = serde_json::from_str(&decode_response("GetTreeState", &bytes).unwrap()).unwrap();
+    assert_eq!(decoded, vector["dto"]);
+    for text in [r#"{"height":"01"}"#, r#"{"height":1}"#, r#"{"time":4294967296}"#,
+        r#"{"orchard_tree":null}"#, r#"{"time":1,"time":2}"#, r#"{"unknown":0}"#, "[]"] {
+        assert!(encode_tree_state(text).is_err(), "{text}");
+    }
+    assert!(encode_tree_state(&format!("{{\"orchard_tree\":\"{}\"}}", "a".repeat(1024*1024+1))).is_err());
+}

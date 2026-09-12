@@ -55,3 +55,14 @@ test('ordinary-page-compatible runtime suite',async()=>{
  const malformed=JSON.parse(await readFile(new URL('./malformed.json',import.meta.url)));
  const receipt=runChecks(codec,vectors,malformed);assert.equal(receipt.ok,true);console.log(JSON.stringify(receipt));
 });
+
+test('TreeState encoder preserves the independent full-field vector and primitive boundary', async () => {
+ const vectors=JSON.parse(await readFile(new URL('./golden.json',import.meta.url)));
+ const vector=vectors.find(v=>v.method==='GetTreeState'&&v.direction==='response');
+ assert.deepEqual(codec.encodeTreeState(JSON.stringify(vector.dto)),Uint8Array.from(Buffer.from(vector.hex,'hex')));
+ let calls=0;
+ assert.throws(()=>codec.encodeTreeState({toJSON(){calls++;return vector.dto;}}));
+ assert.equal(calls,0);
+ assert.throws(()=>codec.encodeTreeState('\ud800'));
+ assert.throws(()=>codec.encodeTreeState(' '.repeat(8*1024*1024+1)));
+});
