@@ -34,7 +34,8 @@ fn creation_empty_completion_reopen_and_newer_target_freshness() {
     let newer=complete(g,100);
     assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
     let old=complete(g,99);
-    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&old.to_string()).unwrap_err(),"SYNC_REQUIRED");
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&old.to_string()).unwrap_err(),"SYNC_REQUIRED"); // No retained block in this empty-start fixture.
+    assert_eq!(hd(g,"account_create_hd",40,json!({})).unwrap_err(),"SYNC_REQUIRED");
     // The newer account's unscanned range prevents declaring an endpoint tree complete.
     let mut newer=newer;newer["revision"]=old["revision"].clone();
     assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&newer.to_string()).unwrap_err(),"SYNC_REQUIRED");
@@ -69,7 +70,17 @@ fn creation_scanned_frontiers_and_rewind_invalidation() {
     let mut raw=Vec::new();zcash_primitives::merkle_tree::write_commitment_tree(&orchard_tree,&mut raw).unwrap();tree.orchard_tree=hex::encode(raw);
     let mut raw=Vec::new();zcash_primitives::merkle_tree::write_commitment_tree(&ironwood_tree,&mut raw).unwrap();tree.ironwood_tree=hex::encode(raw);
     let mut populated=input.clone();populated["treeState"]=json!(hex::encode(tree.encode_to_vec()));
-    let completed:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_complete",&populated.to_string()).unwrap()).unwrap();
+    crate::wallet::sync::sync_call(g,"scan_complete",&populated.to_string()).unwrap();
+    let historical=complete(g,99); // 99 is retained as a block, but native rewind needs checkpoint96.
+    crate::wallet::sync::sync_call(g,"scan_complete",&historical.to_string()).unwrap();
+    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.as_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
+        let (height,tree)=ext.query_row("SELECT height,tree FROM ext_wallet_creation_snapshot WHERE id=1",[],|r|Ok((r.get::<_,u32>(0)?,r.get::<_,Vec<u8>>(1)?)))?;
+        assert_eq!(height,100);assert_eq!(hex::encode(tree),populated["treeState"].as_str().unwrap());Ok(())
+    })).unwrap();
+    complete(g,101); // A newly known pending target cannot be satisfied by historical completion.
+    let historical=complete(g,99);
+    let completed:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_complete",&historical.to_string()).unwrap()).unwrap();
+    assert_eq!(hd(g,"account_create_hd",41,json!({})).unwrap_err(),"SYNC_REQUIRED");
     let rewind=json!({"revision":completed["revision"],"requestedPoint":{"height":99,"hash":"07".repeat(32)}});
     let result:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_rewind",&rewind.to_string()).unwrap()).unwrap();
     assert_eq!(result["point"]["height"],96);

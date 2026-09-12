@@ -17,6 +17,8 @@ completed TreeState. Opening an older DB creates an empty row, never a completed
 snapshot. A newer target, scan ingestion or rewind invalidates completion;
 historical targets cannot supersede a newer known target. New-account creation
 returns `SYNC_REQUIRED` before allocation when state is unavailable or stale.
+Historical completion checks retained block identity and native coverage without
+requiring a pruned tree checkpoint, and never replaces the current creation row.
 
 Host integration must pin the source target before recording completion. No
 network operation occurs in the native creation path. Package schema/profile

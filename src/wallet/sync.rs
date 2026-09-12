@@ -23,14 +23,21 @@ fn execute(generation: u32, operation: &str, input: &Value) -> Result<Value> {
                 active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
                     if super::revision::read(ext)?!=string(input,"revision")? {return Err("STALE_REVISION".into());}
                     let pending=ext.query_row("SELECT height,hash FROM ext_wallet_creation_snapshot WHERE id=1",[],|r|Ok((r.get::<_,Option<u32>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?)))?;
-                    if pending!=(Some(target_height),Some(target_hash.clone())) || db.chain_height()?.map(u32::from)!=Some(target_height) {return Err("SYNC_REQUIRED".into());}
+                    let tip=db.chain_height()?.map(u32::from).ok_or(Failure::from("SYNC_REQUIRED"))?;
+                    if target_height>tip {return Err("SYNC_REQUIRED".into());}
+                    let current=target_height==tip;
+                    if current && pending!=(Some(target_height),Some(target_hash.clone())) {return Err("SYNC_REQUIRED".into());}
                     if db.suggest_scan_ranges()?.iter().any(|r|u32::from(r.block_range().start)<=target_height) {return Err("SYNC_REQUIRED".into());}
                     let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
                     let birthday=super::accounts::birthday(&json!({"parameters":hex::encode(&active.bytes),"genesis":hex::encode(&genesis),
                         "firstScanHeight":target_height+1,"priorTreeState":hex::encode(&tree),"source":"light-client"}),&active.bytes,&genesis,&p)?;
+                    let known=db.get_block_hash(target_height.into())?;
                     if birthday.prior_chain_state().block_hash().0.as_slice()!=target_hash
-                        || db.get_block_hash(target_height.into())?.is_some_and(|h|h.0.as_slice()!=target_hash) {return Err("CHAIN_MISMATCH".into());}
-                    if db.block_fully_scanned()?.is_some() {
+                        || known.is_some_and(|h|h.0.as_slice()!=target_hash) {return Err("CHAIN_MISMATCH".into());}
+                    if !current && known.is_none() {return Err("SYNC_REQUIRED".into());}
+                    // Historical coverage uses its retained block identity; pruned tree checkpoints
+                    // cannot prevent completing a target whose creation snapshot is not being stored.
+                    if current && db.block_fully_scanned()?.is_some() {
                         let height=target_height.into();
                         let state=birthday.prior_chain_state();
                         let sapling=db.with_sapling_tree_mut(|tree|tree.root_at_checkpoint_id(&height)).map_err(|_|Failure::from("SYNC_REQUIRED"))?;
@@ -42,7 +49,7 @@ fn execute(generation: u32, operation: &str, input: &Value) -> Result<Value> {
                             (p.is_nu_active(NetworkUpgrade::Nu6_3,height),ironwood.map(|r|r==state.final_ironwood_tree().root()))]
                             .into_iter().any(|(active,matches)|active&&matches!=Some(true)) {return Err("CHAIN_MISMATCH".into());}
                     }
-                    ext.execute("UPDATE ext_wallet_creation_snapshot SET tree=?1 WHERE id=1",[tree])?;
+                    if current {ext.execute("UPDATE ext_wallet_creation_snapshot SET tree=?1 WHERE id=1",[tree])?;}
                     super::revision::advance(ext)?;
                     Ok(json!({"revision":super::revision::read(ext)?}))
                 })
