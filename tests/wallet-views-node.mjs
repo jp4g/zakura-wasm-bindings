@@ -37,6 +37,8 @@ try {
   }
 
   const args={accountId:account.id};
+  const unavailable=await owner.call('account_balance',{...args,confirmations:{trusted:1,untrusted:1,allowZeroConfirmationShielding:true}});
+  assert.equal(unavailable.ok,true,show(unavailable));assert.deepEqual(unavailable.result,{accountId:account.id,amounts:null});assert.equal(unavailable.writes,0);
   const initial=await owner.call('address_list',args);assert.deepEqual(initial.result,[fixture.defaultAddress]);
   assert.equal((await owner.call('address_current',args)).result,fixture.defaultAddress.address);
   const next=await owner.call('address_next',args);assert.equal(next.ok,true,show(next));
@@ -226,4 +228,43 @@ async function checkMnemonic(number,[phrase,pass]) {
 for(let first=0;first<vectors.length;first+=2) {
   const results=await Promise.allSettled(vectors.slice(first,first+2).map((vector,offset)=>checkMnemonic(first+offset,vector)));
   for(const result of results)if(result.status==='rejected')throw result.reason;
+}
+
+// The native scanner emits populated databases plus getter truth into the existing fixture.
+for(const [index,test] of fixture.balanceCases.entries()) {
+  const balanceRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-balance-`);
+  fs.writeFileSync(`${balanceRoot}/wallet.db`,Buffer.from(test.database,'hex'),{mode:0o600});
+  let oldToken;
+  const liftAmounts=v=>typeof v==='string'&&/^[0-9]+$/.test(v)?BigInt(v):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,liftAmounts(x)])):v;
+  for(let reopen=0;reopen<2;reopen++) {
+    const balanceOwner=start(false,balanceRoot);
+    try {
+      const opened=await balanceOwner.call('initialize');assert.equal(opened.ok,true,show(opened));
+      const before=fs.readFileSync(`${balanceRoot}/wallet.db`);
+      for(const {args,expected} of test.queries) {
+        const saved=structuredClone(args);
+        const result=await balanceOwner.call('account_balance',args);
+        assert.equal(result.ok,true,show(result));assert.equal(result.writes,0);
+        assert.deepEqual(result.result,{accountId:expected.accountId,amounts:liftAmounts(expected.amounts)});
+        assert.deepEqual(args,saved,'caller policy unchanged');
+        const pre=await balanceOwner.call('account_balance',args,{abort:'before'});
+        assert.equal(pre.error,'ABORTED');assert.equal(pre.commit,'none');assert.equal(pre.writes,0);assert.equal(pre.reads,0);
+        assert.equal((await balanceOwner.call('account_balance',args,{instance:'wrong'})).error,'WRONG_INSTANCE');
+        assert.equal((await balanceOwner.call('account_balance',args,{generation:opened.generation+1})).error,'STALE_HANDLE');
+        if(oldToken)assert.equal((await balanceOwner.call('account_balance',args,{instance:oldToken.instance})).error,'WRONG_INSTANCE');
+        for(const confirmations of [undefined,null,{}, {...args.confirmations,trusted:0},{...args.confirmations,untrusted:4294967296},{...args.confirmations,trusted:2,untrusted:1},{...args.confirmations,allowZeroConfirmationShielding:1}]) {
+          const invalid={accountId:args.accountId,...(confirmations===undefined?{}:{confirmations})};
+          const rejected=await balanceOwner.call('account_balance',invalid);
+          assert.equal(rejected.error,'INVALID_ARGUMENT');assert.equal(rejected.writes,0);
+        }
+      }
+      const unknown=await balanceOwner.call('account_balance',{...test.queries[0].args,accountId:'00000000-0000-0000-0000-000000000000'});
+      assert.equal(unknown.error,'ACCOUNT_NOT_FOUND');assert.equal(unknown.writes,0);
+      assert.deepEqual(fs.readFileSync(`${balanceRoot}/wallet.db`),before);
+      assert.equal((await balanceOwner.call('close')).ok,true);
+      assert.equal((await balanceOwner.call('account_balance',test.queries[0].args)).error,'STALE_HANDLE');
+      oldToken=opened;
+    }finally{await balanceOwner.destroy();}
+  }
+  console.log(show({pass:true,case:'populated native balance truth through generated WASM; no writes; policy; abort; destruction/reopen',index,root:balanceRoot}));
 }

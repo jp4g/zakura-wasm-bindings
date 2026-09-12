@@ -15,8 +15,8 @@ if (node) {
 let owner, attempted=false, initializing=false, stopped=false, initializationDone, cancelInitialization;
 async function receive(request) {
   diagnose(`receive:${request.op}`);
-  let settled=false, finishInitialization,writes=0;
-  const reply=value=>{if(!settled){settled=true;port.postMessage({id:request.id,...value,writes});}};
+  let settled=false, finishInitialization,writes=0,reads=0;
+  const reply=value=>{if(!settled){settled=true;port.postMessage({id:request.id,...value,writes,reads});}};
   const ensureRunning=()=>{if(stopped)throw Error('ABORTED');};
   try {
     if (request.op==='initialize') {
@@ -56,7 +56,8 @@ async function receive(request) {
       if(!owner)throw Error('DOMAIN_NOT_READY');
       const args=request.args??{}, controller=new AbortController();
       if(request.abort){args.signal=controller.signal;if(request.abort==='before')controller.abort();}
-      const sync=backend.sync,write=backend.write;
+      const sync=backend.sync,write=backend.write,read=backend.read;
+      backend.read=(...args)=>{reads++;return read(...args);};
       backend.write=(...args)=>{writes++;return write(...args);};
       if(request.abort==='duringSync')backend.sync=(...a)=>{const result=sync(...a);controller.abort();return result;};
       if(request.fault==='commit'){let calls=0;backend.sync=(...a)=>{if(++calls===2)throw Object.assign(Error('synthetic commit sync fault'),{code:'EIO'});return sync(...a);};}
@@ -64,7 +65,7 @@ async function receive(request) {
       if(request.fault==='entropy')cryptoObject.getRandomValues=()=>{throw Error('synthetic entropy unavailable');};
       if(request.fault==='quota')backend.write=()=>{throw Object.assign(Error('synthetic quota fault'),{code:'ENOSPC'});};
       try {const result=owner.call(request.generation,request.instance,request.op,args,request.seed,request.mnemonic,request.passphrase);reply({ok:true,result});}
-      finally {request.seed?.fill(0);backend.sync=sync;backend.write=write;cryptoObject.getRandomValues=random;}
+      finally {request.seed?.fill(0);backend.sync=sync;backend.write=write;backend.read=read;cryptoObject.getRandomValues=random;}
     }
   } catch (e) { diagnose(`operation-error:${request.op}`,e); reply({ok:false,error:typeof e==='string'?e:e.code==='EBUSY'||e.name==='NoModificationAllowedError'?'STORAGE_BUSY':e.message,commit:e.commit}); }
   finally {

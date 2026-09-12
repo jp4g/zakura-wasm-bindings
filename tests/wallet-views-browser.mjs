@@ -63,6 +63,16 @@ try {
   for(const k of ['parameters','genesis','priorTreeState'])input.birthday[k]=Uint8Array.from(input.birthday[k].match(/../g),b=>parseInt(b,16));
   const imported=await first.call({op:'account_import',generation:opened.generation,args:input});check(imported.ok,JSON.stringify(imported));
   const account=imported.result, args={accountId:account.id};
+  const balanceArgs={...args,confirmations:{trusted:1,untrusted:1,allowZeroConfirmationShielding:true}};
+  const balanceRequest={op:'account_balance',generation:opened.generation,args:balanceArgs};
+  const balance=await first.call(balanceRequest);
+  check(balance.ok&&balance.result.accountId===account.id&&balance.result.amounts===null&&balance.writes===0,'unavailable native balance is null without writes');
+  check(Object.keys(balance.result).sort().join() === 'accountId,amounts','private balance has no scan/revision');
+  const balanceAbort=await first.call({...balanceRequest,abort:'before'});
+  check(balanceAbort.error==='ABORTED'&&balanceAbort.commit==='none'&&balanceAbort.writes===0,'balance preabort no writes');
+  check((await first.call({...balanceRequest,instance:'wrong'})).error==='WRONG_INSTANCE','balance wrong instance');
+  check((await first.call({...balanceRequest,generation:opened.generation+1})).error==='STALE_HANDLE','balance stale generation');
+  check((await first.call({...balanceRequest,args:{...balanceArgs,accountId:'00000000-0000-0000-0000-000000000000'}})).error==='ACCOUNT_NOT_FOUND','balance unknown account');
   const policyAccounts=[];
   for(const input of fixture.policyImports) {
     for(const k of ['parameters','genesis','priorTreeState'])input.birthday[k]=Uint8Array.from(input.birthday[k].match(/../g),b=>parseInt(b,16));
@@ -133,6 +143,7 @@ try {
   await contender.destroy();
   check((await first.call({ op: 'close', generation: opened.generation })).ok, 'close');
   check(!(await first.call({ op: 'account_list', generation: opened.generation })).ok, 'stale operation');
+  check((await first.call(balanceRequest)).error==='STALE_HANDLE','balance after close');
   await first.destroy();
   // No replacement until the server observed the original BiDi realm destroyed.
   const wrong = start(), wrongRequest = initialize(false); wrongRequest.genesis[0] = 4;
@@ -140,6 +151,10 @@ try {
   await wrong.destroy();
   const reopened = start();
   const again = await reopened.call(initialize(false)); check(again.ok, JSON.stringify(again));
+  const balanceAgain=await reopened.call({...balanceRequest,generation:again.generation});
+  check(balanceAgain.ok&&balanceAgain.result.accountId===account.id&&balanceAgain.result.amounts===null&&balanceAgain.writes===0,'balance survives OPFS destruction/reopen');
+  check((await reopened.call({...balanceRequest,generation:again.generation,instance:opened.instance})).error==='WRONG_INSTANCE','balance old owner after reopen');
+  results.push({case:'private native balance OPFS read/preabort/close/destruction/reopen',accountId:account.id});
   const stored=await reopened.call({op:'account_get',generation:again.generation,args:{accountId:account.id}});check(stored.ok&&encode(stored.result)===encode(account),'persistent UUID/account');
   for(const a of policyAccounts) {
     const result=await reopened.call({op:'account_get',generation:again.generation,args:{accountId:a.id}});

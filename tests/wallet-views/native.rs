@@ -22,6 +22,22 @@ fn call(g: u32, op: &str, input: Value) -> std::result::Result<Value,String> {
     views_call(g,op,&input.to_string()).map(|s| serde_json::from_str(&s).unwrap())
 }
 #[test]
+fn account_balance_unavailable_is_not_unknown() {
+    let (path,g)=open();
+    let account=call(g,"account_import",fixture(10)).unwrap();
+    let args=json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}});
+    let before=std::fs::read(&path).unwrap();
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap(),json!({"accountId":account["id"],"amounts":null}));
+    let mut unknown=args.clone();unknown["accountId"]=json!("00000000-0000-0000-0000-000000000000");
+    assert_eq!(call(g,"account_balance",unknown).unwrap_err(),"ACCOUNT_NOT_FOUND");
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    crate::wallet::storage_close(g).unwrap();
+    assert_eq!(call(g,"account_balance",args.clone()).unwrap_err(),"STALE_HANDLE");
+    let reopened=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(reopened,"account_balance",args).unwrap()["amounts"],Value::Null);
+    crate::wallet::storage_close(reopened).unwrap();
+}
+#[test]
 fn ufvk_import_retains_native_uuid_and_tracking_after_reopen() {
     let (path,g) = open();
     let account = call(g,"account_import",fixture(10)).unwrap();
@@ -139,7 +155,9 @@ fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
     let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
     let mut explicit_false=fixture(12);explicit_false["viewOnly"]=json!(false);
     let mut explicit_true=fixture(14);explicit_true["viewOnly"]=json!(true);
-    let output=json!({"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
+    let mut balance_cases=policy_scan_matrix(false);
+    balance_cases.push(locked_balance_case(&balance_cases[0]));
+    let output=json!({"balanceCases":balance_cases,"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
         "policyImports":[explicit_false,explicit_true],
         "uivk":key.to_unified_incoming_viewing_key().encode(&p),"defaultAddress":address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()});
     std::fs::write(format!("{root}/views-fixture.json"),output.to_string()).unwrap();
@@ -285,7 +303,8 @@ fn policy_rows(conn: &rusqlite::Connection, tables: &[&str]) -> Vec<Vec<Vec<rusq
     }).collect()
 }
 
-fn policy_scan_matrix(legacy: bool) {
+fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
+    let mut cases=Vec::new();
     use zcash_client_backend::{scanning::{scan_block,ScanningKeys,Nullifiers},data_api::{InputSource,WalletCommitmentTrees,BlockMetadata,locking::LockFilter}};
     use zcash_primitives::{block::BlockHash,transaction::TxId};
     use zcash_protocol::ShieldedPool;
@@ -415,7 +434,32 @@ fn policy_scan_matrix(legacy: bool) {
                 assert_eq!(db.get_spendable_note(&TxId::from_bytes([9;32]),pool,0,101u32.into(),LockFilter::Unfiltered).unwrap().is_some(),expected==1,"{pool:?}");
             }
         });
+        let mut queries=Vec::new();
+        for (trusted,untrusted,zero) in [(1,1,true),(2,10,false)] {
+            let confirmations=json!({"trusted":trusted,"untrusted":untrusted,"allowZeroConfirmationShielding":zero});
+            let args=json!({"accountId":account["id"],"confirmations":confirmations});
+            let native=crate::wallet::DOMAIN.with(|domain| {
+                let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+                let policy=zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new(
+                    std::num::NonZeroU32::new(trusted).unwrap(),std::num::NonZeroU32::new(untrusted).unwrap(),zero).unwrap();
+                let summary=db.get_wallet_summary(policy).unwrap().unwrap();
+                let b=&summary.account_balances()[&account_id];
+                let bucket=|b:&zcash_client_backend::data_api::Balance| json!({
+                    "total":u64::from(b.total()).to_string(),"spendable":u64::from(b.spendable_value()).to_string(),
+                    "locked":u64::from(b.locked_value()).to_string(),"changePendingConfirmation":u64::from(b.change_pending_confirmation()).to_string(),
+                    "pendingSpendability":u64::from(b.value_pending_spendability()).to_string(),"uneconomic":u64::from(b.uneconomic_value()).to_string()});
+                json!({"accountId":account["id"],"amounts":{"total":"240000","uneconomic":"0","observedTotal":"240000",
+                    "transparent":{"regular":bucket(b.unshielded_regular_balance()),"coinbase":bucket(b.unshielded_coinbase_balance())},
+                    "sapling":bucket(b.sapling_balance()),"ironwood":bucket(b.ironwood_balance()),
+                    "unsupportedLegacy":{"kind":"legacyOrchard","balance":bucket(b.orchard_balance())}}})
+            });
+            let bytes=std::fs::read(&path).unwrap();
+            assert_eq!(call(g,"account_balance",args.clone()).unwrap(),native);
+            assert_eq!(std::fs::read(&path).unwrap(),bytes,"balance query cannot write");
+            queries.push(json!({"args":args,"expected":native}));
+        }
         crate::wallet::storage_close(g).unwrap();
+        if reopen==1 {cases.push(json!({"viewOnly":policy,"database":hex::encode(std::fs::read(&path).unwrap()),"queries":queries}));}
         let conn=rusqlite::Connection::open(&path).unwrap();
         assert_eq!(policy_rows(&conn,&preserved_tables),preserved,"history/authority/checkpoints preserved on open {reopen}");
         let after=policy_rows(&conn,&tree_tables);
@@ -431,6 +475,7 @@ fn policy_scan_matrix(legacy: bool) {
         assert_eq!(conn.query_row("SELECT version FROM ext_viewing_version",[],|r|r.get::<_,u32>(0)).unwrap(),2);
         }
     }
+    cases
 }
 
 #[test]
@@ -714,4 +759,79 @@ fn mnemonic_passphrase_normalized_limit_and_nonpersistence() {
         if let Ok(bytes)=std::fs::read(candidate) {for secret in &secrets {assert!(!bytes.windows(secret.len()).any(|w|w==secret),"synthetic authority persisted");}}
     }
     let result=account.to_string();for secret in &secrets {assert!(!result.as_bytes().windows(secret.len()).any(|w|w==secret),"synthetic authority in result");}
+}
+
+#[test]
+fn account_balance_policy_admission_and_native_bucket_extremes() {
+    use zcash_client_backend::data_api::{AccountBalance,Balance};
+    use zcash_protocol::value::{Zatoshis,BalanceError,MAX_MONEY};
+    let (path,g)=open();
+    let a=call(g,"account_import",fixture(10)).unwrap();
+    let policy=json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true});
+    let before=std::fs::read(&path).unwrap();
+    for field in ["trusted","untrusted"] {
+        for value in [json!(0),json!(-1),json!(4294967296u64),json!(1.5),json!("1"),json!(true),Value::Null] {
+            let mut p=policy.clone();p[field]=value;
+            assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
+        }
+    }
+    for p in [json!({}),json!({"trusted":2,"untrusted":1,"allowZeroConfirmationShielding":true}),json!({"trusted":1,"untrusted":1}),json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":"true"}),json!({"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true,"secret":"private caller text"})] {
+        assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":p})).unwrap_err(),"INVALID_ARGUMENT");
+    }
+    let max=json!({"trusted":u32::MAX,"untrusted":u32::MAX,"allowZeroConfirmationShielding":false});
+    assert_eq!(call(g,"account_balance",json!({"accountId":a["id"],"confirmations":max})).unwrap()["amounts"],Value::Null);
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    crate::wallet::storage_close(g).unwrap();
+
+    let mut native=AccountBalance::ZERO;
+    for (i,mutate) in [AccountBalance::with_sapling_balance_mut::<_,BalanceError>,AccountBalance::with_orchard_balance_mut::<_,BalanceError>,AccountBalance::with_ironwood_balance_mut::<_,BalanceError>,AccountBalance::with_unshielded_regular_balance_mut::<_,BalanceError>,AccountBalance::with_unshielded_coinbase_balance_mut::<_,BalanceError>].into_iter().enumerate() {
+        let n=(i as u64+1)*10_000;
+        mutate(&mut native,move |b:&mut Balance| {
+            b.add_spendable_value(Zatoshis::const_from_u64(n+1))?;
+            b.add_locked_value(Zatoshis::const_from_u64(n+2))?;
+            b.add_pending_change_value(Zatoshis::const_from_u64(n+3))?;
+            b.add_pending_spendable_value(Zatoshis::const_from_u64(n+4))?;
+            b.add_uneconomic_value(Zatoshis::const_from_u64(n+5))
+        }).unwrap();
+    }
+    let amounts=balance_amounts(&native).unwrap();
+    for (i,b) in [&amounts["sapling"],&amounts["unsupportedLegacy"]["balance"],&amounts["ironwood"],&amounts["transparent"]["regular"],&amounts["transparent"]["coinbase"]].into_iter().enumerate() {
+        let n=(i as u64+1)*10_000;
+        assert_eq!(*b,json!({"total":(4*n+10).to_string(),"spendable":(n+1).to_string(),"locked":(n+2).to_string(),"changePendingConfirmation":(n+3).to_string(),"pendingSpendability":(n+4).to_string(),"uneconomic":(n+5).to_string()}));
+    }
+    assert_eq!(amounts["total"],"600050");assert_eq!(amounts["uneconomic"],"150025");assert_eq!(amounts["observedTotal"],"750075");
+    let empty=balance_amounts(&AccountBalance::ZERO).unwrap();assert_eq!(empty["unsupportedLegacy"],Value::Null);
+    assert_eq!(empty["observedTotal"],"0");assert_eq!(empty["sapling"],balance_bucket(&Balance::ZERO));
+    let mut large=AccountBalance::ZERO;
+    large.with_sapling_balance_mut::<_,BalanceError>(|b|b.add_spendable_value(Zatoshis::const_from_u64(MAX_MONEY))).unwrap();
+    assert_eq!(balance_amounts(&large).unwrap()["observedTotal"],MAX_MONEY.to_string());
+    large.with_orchard_balance_mut::<_,BalanceError>(|b|b.add_uneconomic_value(Zatoshis::const_from_u64(1))).unwrap();
+    assert_eq!(balance_amounts(&large).unwrap_err().0,"BALANCE_OVERFLOW");
+}
+
+fn locked_balance_case(source:&Value)->Value {
+    use zcash_client_backend::{data_api::locking::{OutputLockStore,LockOwner},wallet::OutputRef};
+    use zcash_primitives::transaction::TxId;
+    use zcash_protocol::{PoolType,ShieldedPool};
+    let root=std::env::var("WALLET_TEST_ROOT").unwrap();
+    let path=format!("{root}/balance-locked-{}.db",uuid::Uuid::new_v4());
+    std::fs::write(&path,hex::decode(source["database"].as_str().unwrap()).unwrap()).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    crate::wallet::DOMAIN.with(|domain| {
+        let mut d=domain.borrow_mut();let db=&mut d.active.as_mut().unwrap().wallet;
+        db.lock_outputs(&[
+            OutputRef::new(TxId::from_bytes([9;32]),PoolType::Shielded(ShieldedPool::Sapling),0),
+            OutputRef::new(TxId::from_bytes([10;32]),PoolType::Transparent,0),
+        ],LockOwner::new([55;32]),200u32.into()).unwrap();
+    });
+    let mut query=source["queries"][0].clone();
+    query["expected"]["amounts"]["sapling"]["spendable"]=json!("0");
+    query["expected"]["amounts"]["sapling"]["locked"]=json!("50000");
+    query["expected"]["amounts"]["transparent"]["regular"]["spendable"]=json!("0");
+    query["expected"]["amounts"]["transparent"]["regular"]["locked"]=json!("70000");
+    let before=std::fs::read(&path).unwrap();
+    assert_eq!(call(g,"account_balance",query["args"].clone()).unwrap(),query["expected"],"locks remain included once in total");
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    crate::wallet::storage_close(g).unwrap();
+    json!({"database":hex::encode(std::fs::read(path).unwrap()),"queries":[query],"locked":true})
 }

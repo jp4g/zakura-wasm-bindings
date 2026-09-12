@@ -4,7 +4,7 @@ import { initializeStorage } from './wallet.mjs';
 import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
-const operations = new Set(['account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_list','account_get','address_current','address_next','address_list','address_at']);
+const operations = new Set(['account_balance','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_list','account_get','address_current','address_next','address_list','address_at']);
 const writes = new Set(['account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
@@ -24,7 +24,7 @@ function lower(value, name = '', depth = 0) {
   if (typeof value==='number'&&Number.isSafeInteger(value)) return value;
   if (Array.isArray(value)) {if(name!=='enabledPools'||value.length<1||value.length>3)throw TypeError('INVALID_ARGUMENT');return value.map(v=>lower(v,'',depth+1));}
   if (!value||Object.getPrototypeOf(value)!==Object.prototype) throw TypeError('INVALID_ARGUMENT');
-  const allowed=depth===0?['accountIndex','accountId','viewingKey','birthday','name','viewOnly','enabledPools','request','index','signal']:name==='birthday'?['parameters','genesis','firstScanHeight','priorTreeState','recoverUntilExclusive','source']:name==='request'?['format','transparent','sapling','ironwood']:[];
+  const allowed=depth===0?['confirmations','accountIndex','accountId','viewingKey','birthday','name','viewOnly','enabledPools','request','index','signal']:name==='confirmations'?['trusted','untrusted','allowZeroConfirmationShielding']:name==='birthday'?['parameters','genesis','firstScanHeight','priorTreeState','recoverUntilExclusive','source']:name==='request'?['format','transparent','sapling','ironwood']:[];
   const result=Object.create(null);
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key!=='string'||!allowed.includes(key))throw TypeError('INVALID_ARGUMENT');
@@ -38,6 +38,14 @@ function lower(value, name = '', depth = 0) {
 function lift(value) {
   if (Array.isArray(value)) return value.map(lift);
   if (value&&typeof value==='object'&&typeof value.index==='string') value.index=BigInt(value.index);
+  return value;
+}
+function liftAmounts(value) {
+  if (value===null) return null;
+  for (const [key,amount] of Object.entries(value)) {
+    if (['total','spendable','locked','changePendingConfirmation','pendingSpendability','uneconomic','observedTotal'].includes(key)) value[key]=BigInt(amount);
+    else if (amount&&typeof amount==='object') liftAmounts(amount);
+  }
   return value;
 }
 export async function initializeViews(wasm,backend,format,parameters,genesis) {
@@ -85,7 +93,9 @@ export async function initializeViews(wasm,backend,format,parameters,genesis) {
       }
       finally {ownedSeed?.fill(0);ownedMnemonic?.fill(0);ownedPassphrase?.fill(0);}
       abort(signal,writes.has(operation)?'committed':'none');
-      return lift(JSON.parse(result));
+      const value=lift(JSON.parse(result));
+      if(operation==='account_balance')value.amounts=liftAmounts(value.amounts);
+      return value;
     },
     close(token,owner) {
       if(poisoned)throw Error('DOMAIN_INVALID');
