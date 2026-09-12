@@ -31,9 +31,9 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
         if target_hash.len()!=32 || hex::encode(&target_hash)!=string(target,"hash")? {return Err("INVALID_ARGUMENT".into());}
         if operation=="scan_plan" {
             let result=active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
-                if db.chain_height()?.is_some_and(|h|u32::from(h)>target_height)
-                    || db.get_block_hash(target_height.into())?.is_some_and(|h|target_hash!=h.0) {return Err("CHAIN_MISMATCH".into());}
-                db.update_chain_tip(target_height.into())?;
+                if db.get_block_hash(target_height.into())?.is_some_and(|h|target_hash!=h.0) {return Err("CHAIN_MISMATCH".into());}
+                // A finite historical target does not rewind the wallet's independently known tip.
+                if db.chain_height()?.is_none_or(|h|u32::from(h)<=target_height) {db.update_chain_tip(target_height.into())?;}
                 let ranges=db.suggest_scan_ranges()?;
                 if ranges.len()>1024 {return Err("RESOURCE_LIMIT".into());}
                 let ranges=ranges.iter().map(|r| -> Result<Value> {
@@ -82,8 +82,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
             let state=prior.prior_chain_state();
             if blocks[0].prev_hash!=state.block_hash().0
                 || db.get_block_hash(state.block_height())?.is_some_and(|h|h!=state.block_hash())
-                || db.get_block_hash(target_height.into())?.is_some_and(|h|target_hash!=h.0)
-                || db.chain_height()?.is_some_and(|h|u32::from(h)>target_height) {return Err("CHAIN_MISMATCH".into());}
+                || db.get_block_hash(target_height.into())?.is_some_and(|h|target_hash!=h.0) {return Err("CHAIN_MISMATCH".into());}
             let keys=ScanningKeys::from_account_ufvks(db.get_unified_full_viewing_keys()?);
             let mut metadata=db.block_metadata(state.block_height())?;
             let mut nullifiers=Nullifiers::unspent(db)?;

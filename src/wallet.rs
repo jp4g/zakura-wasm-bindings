@@ -169,3 +169,5 @@ mod schema_prefix;
 mod accounts;
 
 mod scan;
+mod sync;
+mod enhancement;

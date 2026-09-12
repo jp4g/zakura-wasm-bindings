@@ -1,5 +1,7 @@
 // Synthetic test authority derived from fixed bytes. NEVER use for production funds.
 use super::*;
+#[path = "sync.rs"]
+mod sync;
 use serde_json::{json, Value};
 use zcash_client_backend::proto::service::TreeState;
 use prost::Message;
@@ -271,7 +273,7 @@ fn emit_synthetic_upstream_fixture_for_real_wasm_tests() {
     let mut balance_cases=policy_scan_matrix(false);
     balance_cases.push(locked_balance_case(&balance_cases[0]));
     balance_cases.extend(balance_scanner_edge_cases());
-    let output=json!({"scan":full_scan_fixture(),"balanceCases":balance_cases,"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
+    let output=json!({"enhancement":enhancement::enhancement_fixture(),"scan":full_scan_fixture(),"balanceCases":balance_cases,"warning":"SYNTHETIC TEST AUTHORITY ONLY. NEVER USE FOR PRODUCTION FUNDS.","import":input,
         "policyImports":[explicit_false,explicit_true],
         "uivk":key.to_unified_incoming_viewing_key().encode(&p),"defaultAddress":address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()});
     std::fs::write(format!("{root}/views-fixture.json"),output.to_string()).unwrap();
@@ -1231,3 +1233,5 @@ fn persistent_full_scan_fixture_reopens_with_real_three_pool_balance() {
     assert_eq!(scan["batches"].as_array().unwrap().len(),7);
     std::fs::write(format!("{}/scan-fixture.json",std::env::var("WALLET_TEST_ROOT").unwrap()),scan.to_string()).unwrap();
 }
+
+mod enhancement;
