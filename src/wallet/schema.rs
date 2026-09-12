@@ -83,6 +83,15 @@ pub(super) fn validate(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Resul
             } else { expected.remove(effect.name); }
         }
     }
+    // Admit only this exact owned extension, including its automatic PK indexes.
+    if actual.contains_key("ext_viewing_version") {
+        for (name, sql) in super::accounts::DEFINITIONS {
+            expected.insert(name.into(), ("table".into(), name.into(), Some(sql.into())));
+        }
+        for table in ["ext_viewing_accounts", "ext_viewing_addresses"] {
+            expected.insert(format!("sqlite_autoindex_{table}_1"), ("index".into(), table.into(), None));
+        }
+    }
     // Exact producer text preserves literals and SQLite's indirect rewrites.
     // No view is prepared: legitimate intermediate views can be unselectable.
     if actual != expected { return Err(MISMATCH.into()); }

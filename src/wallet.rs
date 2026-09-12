@@ -106,6 +106,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
                 WalletMigrator::new().init_or_migrate(&mut migrating).map_err(|_| "MIGRATION_REQUIRED")?;
             }
             // Bounded real schema read; never enumerate the wallet's accounts.
+            accounts::initialize(conn)?;
             conn.query_row("SELECT EXISTS(SELECT 1 FROM accounts LIMIT 1)", [], |r| r.get::<_, bool>(0)).map_err(|_| "SCHEMA_MISMATCH")?;
             Ok(())
         })();
@@ -161,3 +162,5 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
 #[cfg(test)]
 #[path = "../tests/wallet-schema/prefix.rs"]
 mod schema_prefix;
+
+mod accounts;
