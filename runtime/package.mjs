@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dist/index.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const nativeReceipt = 'e3f09aee91703b5185d81b46bf0b29a33c2dab397bcc695a33902e5184821a7d';
+const nativeReceipt = 'bd2849b16e87ef9896a1368b2d73b9a3fa947c5593cd2733056afb0997bf895f';
 const overlayRevision = '60747de';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
 // Version 3 adds the durable creation snapshot and local-only account creation.
@@ -31,7 +31,7 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   const receiptBytes = readFileSync(resolve(nativeBuild, 'build.json'));
   requireThat(sha(receiptBytes) === nativeReceipt, 'accepted native receipt mismatch');
   const receipt = JSON.parse(receiptBytes);
-  requireThat(receipt.complete && receipt.revision === '60747def8ef36d9ca046edf2e1f9f6e20aba5000', 'native build identity');
+  requireThat(receipt.complete && receipt.revision === 'a283b74b89c570031928011c6169d9becdbfe22f', 'native build identity');
   const inputs = {};
   for (const [name, digest] of Object.entries(receipt.artifacts)) {
     const bytes = readFileSync(resolve(nativeBuild, 'bundle', name));
