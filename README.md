@@ -147,3 +147,5 @@ Independent review under `/home/jack/zakura-transaction-bindings-logs/review/`
 qualified the bounded runtime checks but held final acceptance for R1.
 This documentation fix still requires fresh independent review for R1 acceptance.
 No push, merge, publication or deployment.
+
+The private stateless lightwallet protobuf production codec is documented in [lightwire/README.md](lightwire/README.md).
