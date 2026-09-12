@@ -49,33 +49,10 @@ struct Domain { active: Option<Active>, generation: u32, failed: Option<Rc<RefCe
 // ponytail: one active database per worker; no registry until multiple DBs are required.
 thread_local! { static DOMAIN: RefCell<Domain> = RefCell::new(Domain::default()); }
 
+mod schema;
+
 fn validate_schema(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Result<bool, String> {
-    let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
-    if version != 0 && version != 8 { return Err("SCHEMA_MISMATCH".into()); }
-    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ext_wallet_storage' AND type='table')", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
-    if exists {
-        let stored: (u32, Vec<u8>, Vec<u8>) = conn.query_row("SELECT version, parameters, genesis FROM ext_wallet_storage WHERE id=1 AND length(parameters)<=256 AND length(genesis)=32", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|_| "SCHEMA_MISMATCH")?;
-        if stored.0 != 1 { return Err("SCHEMA_MISMATCH".into()); }
-        if stored.1 != bytes || stored.2 != genesis { return Err("NETWORK_MISMATCH".into()); }
-        let migration_table: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='schemer_migrations' AND type='table')", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
-        if migration_table {
-            // Schemerz does not reject unknown applied IDs itself. Pin the exact
-            // published RC4 inventory, including resumable migration prefixes.
-            let mut statement = conn.prepare("SELECT CASE WHEN length(id)=16 THEN id ELSE NULL END FROM schemer_migrations LIMIT 67").map_err(|_| "SCHEMA_MISMATCH")?;
-            let rows = statement.query_map([], |r| r.get::<_, Vec<u8>>(0)).map_err(|_| "SCHEMA_MISMATCH")?;
-            for (count, row) in rows.enumerate() {
-                let id = row.map_err(|_| "SCHEMA_MISMATCH")?;
-                let id = uuid::Uuid::from_slice(&id).map_err(|_| "SCHEMA_MISMATCH")?.simple().to_string();
-                if count >= 66 || !include_str!("../wallet-host/migrations.txt").lines().any(|known| known == id) {
-                    return Err("SCHEMA_MISMATCH".into());
-                }
-            }
-        }
-    } else {
-        let objects: u32 = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0)).map_err(|_| "SCHEMA_MISMATCH")?;
-        if objects != 0 { return Err("SCHEMA_MISMATCH".into()); }
-    }
-    Ok(exists)
+    schema::validate(conn, bytes, genesis)
 }
 
 fn bind_network(conn: &mut Connection, bytes: &[u8], genesis: &[u8]) -> Result<(), String> {
@@ -181,4 +158,6 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
     })
 }
 
-mod accounts;
+#[cfg(test)]
+#[path = "../tests/wallet-schema/prefix.rs"]
+mod schema_prefix;
