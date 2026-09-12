@@ -98,6 +98,32 @@ try {
   check(hdSeed.every(b=>b===40),'accepted caller seed unchanged');
   hdCases.push({hdSeed,hd,hdArgs,hdRecords});
   }
+  const mnemonicCases=[];
+  const phrase12='abandon '.repeat(11)+'about',encoder=new TextEncoder();
+  const mnemonicVectors=[...[[12,'about'],[15,'address'],[18,'agent'],[21,'admit'],[24,'art']].map(([n,last])=>['abandon '.repeat(n-1)+last,'TREZOR']),[phrase12,''],[phrase12,'é'],[phrase12,'㍍ガバヴァぱばぐゞちぢ十人十色']];
+  for(const [phrase,pass] of mnemonicVectors) {
+    const mnemonic=encoder.encode(phrase),passphrase=encoder.encode(pass);
+    const request={op:'account_import_mnemonic',generation:opened.generation,args:{birthday:input.birthday,accountIndex:3},mnemonic,passphrase};
+    const before=(await first.call({op:'account_list',generation:opened.generation})).result;
+    const pre=await first.call({...request,abort:'before'});check(pre.error==='ABORTED'&&pre.commit==='none','mnemonic preabort');
+    check(encode((await first.call({op:'account_list',generation:opened.generation})).result)===encode(before),'mnemonic preabort no write');
+    check((await first.call({...request,instance:'wrong'})).error==='WRONG_INSTANCE','mnemonic instance');
+    check((await first.call({...request,generation:opened.generation+1})).error==='STALE_HANDLE','mnemonic generation');
+    const failed=await first.call({...request,fault:'commit'});check(!failed.ok,'mnemonic commit failure');
+    check(encode((await first.call({op:'account_list',generation:opened.generation})).result)===encode(before),'mnemonic rollback');
+    const recovered=await first.call(request);check(recovered.ok&&recovered.result.accountIndex===3&&!recovered.result.signerAttached,'mnemonic recovery');
+    const args={accountId:recovered.result.id};
+    check((await first.call({...request})).error==='ACCOUNT_COLLISION','mnemonic duplicate');
+    if(pass==='')check((await first.call({...request,passphrase:undefined})).error==='ACCOUNT_COLLISION','omitted equals empty');
+    if(pass==='é')check((await first.call({...request,passphrase:encoder.encode('e\u0301')})).error==='ACCOUNT_COLLISION','NFKD passphrase');
+    if(phrase===phrase12&&pass==='TREZOR')check((await first.call({...request,mnemonic:encoder.encode(phrase.replace(/[a-z]/g,c=>String.fromCharCode(c.charCodeAt(0)+0xfee0)))})).error==='ACCOUNT_COLLISION','NFKD mnemonic');
+    check(typeof (await first.call({op:'address_current',generation:opened.generation,args})).result==='string','mnemonic current');
+    check((await first.call({op:'address_next',generation:opened.generation,args})).ok,'mnemonic next');
+    check((await first.call({op:'address_at',generation:opened.generation,args:{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}}})).ok,'mnemonic at');
+    const records=(await first.call({op:'address_list',generation:opened.generation,args})).result;
+    check(mnemonic.every((b,i)=>b===encoder.encode(phrase)[i])&&passphrase.every((b,i)=>b===encoder.encode(pass)[i]),'mnemonic caller bytes');
+    mnemonicCases.push({request,account:recovered.result,args,records});
+  }
   const contender = start();
   const busy = await contender.call(initialize(false));
   check(!busy.ok && busy.error === 'STORAGE_BUSY', `contention: ${JSON.stringify(busy)}`);
@@ -129,6 +155,13 @@ try {
   results.push({case:'private native HD OPFS import/address/destruction/reopen/next',accountId:hd.result.id,index:hd.result.accountIndex,seedLength:hdSeed.length});
   check(hdSeed.every(b=>b===40),'reopened caller seed unchanged');
   }
+  for(const {request,account,args,records} of mnemonicCases) {
+    check(encode((await reopened.call({op:'account_get',generation:again.generation,args})).result)===encode(account),'mnemonic persistent account');
+    check(encode((await reopened.call({op:'address_list',generation:again.generation,args})).result)===encode(records),'mnemonic persistent addresses');
+    const post=await reopened.call({...request,generation:again.generation,args:{...request.args,accountIndex:4},abort:'duringSync'});
+    check(post.error==='ABORTED'&&post.commit==='committed','mnemonic committed abort');
+  }
+  results.push({case:'mnemonic all counts/NFKD/empty/rollback/abort/OPFS destruction/reopen',cases:mnemonicCases.length});
   check((await reopened.call({ op: 'close', generation: again.generation })).ok, 'reopened close');
   await reopened.destroy();
   outcome = { pass: true, root, results, userAgent: navigator.userAgent, actualQuotaExhaustion: false, uaEviction: false };

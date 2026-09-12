@@ -4,8 +4,8 @@ import { initializeStorage } from './wallet.mjs';
 import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
-const operations = new Set(['account_import','account_import_hd','account_create_hd','account_list','account_get','address_current','address_next','address_list','address_at']);
-const writes = new Set(['account_import','account_import_hd','account_create_hd','address_next','address_at']);
+const operations = new Set(['account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_list','account_get','address_current','address_next','address_list','address_at']);
+const writes = new Set(['account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -47,7 +47,7 @@ export async function initializeViews(wasm,backend,format,parameters,genesis) {
   let poisoned=false;
   return Object.freeze({
     generation,instance,
-    call(token,owner,operation,args={},seed) {
+    call(token,owner,operation,args={},seed,mnemonic,passphrase) {
       if(poisoned)throw Error('DOMAIN_INVALID');
       storage.binding(token,owner); // actual Rust generation + owned JS instance
       if(!operations.has(operation))throw TypeError('INVALID_ARGUMENT');
@@ -58,9 +58,18 @@ export async function initializeViews(wasm,backend,format,parameters,genesis) {
       const input=JSON.stringify(lower(args));
       abort(signal,'none');
       let result;
-      let ownedSeed;
+      let ownedSeed,ownedMnemonic,ownedPassphrase;
       try {
-        if(operation==='account_import_hd'||operation==='account_create_hd') {
+        if(operation==='account_import_mnemonic') {
+          if(seed!==undefined)throw 'INVALID_ARGUMENT';
+          try {
+            ownedMnemonic=copyBytes(mnemonic,4096,'INVALID_ARGUMENT');
+            ownedPassphrase=passphrase===undefined?new Uint8Array():copyBytes(passphrase,65536,'INVALID_ARGUMENT',0);
+          }catch {throw 'INVALID_ARGUMENT';}
+          result=binding.views_mnemonic_call(token,input,ownedMnemonic,ownedPassphrase);
+        } else if(mnemonic!==undefined||passphrase!==undefined) {
+          throw 'INVALID_ARGUMENT';
+        } else if(operation==='account_import_hd'||operation==='account_create_hd') {
           try {ownedSeed=copyBytes(seed,64,'INVALID_ARGUMENT');}catch {throw 'INVALID_ARGUMENT';}
           if(ownedSeed.length!==32&&ownedSeed.length!==64)throw 'INVALID_ARGUMENT';
           result=binding.views_seed_call(token,operation,input,ownedSeed);
@@ -74,7 +83,7 @@ export async function initializeViews(wasm,backend,format,parameters,genesis) {
         if(typeof error!=='string'){poisoned=true;throw Error('DOMAIN_INVALID');}
         throw Error(error);
       }
-      finally {ownedSeed?.fill(0);}
+      finally {ownedSeed?.fill(0);ownedMnemonic?.fill(0);ownedPassphrase?.fill(0);}
       abort(signal,writes.has(operation)?'committed':'none');
       return lift(JSON.parse(result));
     },

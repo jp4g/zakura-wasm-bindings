@@ -4,10 +4,10 @@ const buffer = Object.getOwnPropertyDescriptor(typedArray, 'buffer').get;
 const tag = Object.getOwnPropertyDescriptor(typedArray, Symbol.toStringTag).get;
 const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
 
-export function copyBytes(value, limit, message) {
+export function copyBytes(value, limit, message, minimum = 1) {
   if (!(value instanceof Uint8Array) || !ArrayBuffer.isView(value) ||
       tag.call(value) !== 'Uint8Array' || !(buffer.call(value) instanceof ArrayBuffer) ||
-      byteLength.call(value) === 0 || byteLength.call(value) > limit) {
+      byteLength.call(value) < minimum || byteLength.call(value) > limit) {
     throw new TypeError(message);
   }
   try {

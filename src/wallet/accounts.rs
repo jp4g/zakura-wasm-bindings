@@ -1,6 +1,8 @@
 //! Private UFVK and durable address operations on the existing storage owner.
 use wasm_bindgen::prelude::*;
-use secrecy::{SecretVec, ExposeSecret};
+use secrecy::{Secret, SecretString, SecretVec, ExposeSecret};
+use bip39::{Language, Mnemonic};
+use std::borrow::Cow;
 use prost::Message;
 use serde_json::{json, Value};
 use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, AddressSource, WalletRead, WalletWrite}, proto::service::TreeState};
@@ -334,6 +336,28 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
 pub fn views_seed_call(generation: u32, operation: &str, input: &str, seed: Vec<u8>) -> std::result::Result<String,String> {
     let seed=SecretVec::new(seed);
     execute_seed(generation,operation,input,&seed).map(|v|v.to_string()).map_err(|e|e.0)
+}
+fn normalized_secret(bytes: &SecretVec<u8>, limit: usize) -> Result<SecretString> {
+    if bytes.expose_secret().len()>limit {return Err("INVALID_ARGUMENT".into());}
+    let text=std::str::from_utf8(bytes.expose_secret()).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+    let mut text=Cow::Borrowed(text);
+    Mnemonic::normalize_utf8_cow(&mut text);
+    let text=SecretString::new(text.into_owned());
+    if text.expose_secret().len()>limit {return Err("INVALID_ARGUMENT".into());}
+    Ok(text)
+}
+#[wasm_bindgen]
+pub fn views_mnemonic_call(generation: u32, input: &str, mnemonic: Vec<u8>, passphrase: Vec<u8>) -> std::result::Result<String,String> {
+    let mnemonic=SecretVec::new(mnemonic);
+    let passphrase=SecretVec::new(passphrase);
+    (|| -> Result<Value> {
+        let mnemonic=normalized_secret(&mnemonic,4096)?;
+        let passphrase=normalized_secret(&passphrase,65536)?;
+        let mnemonic=Mnemonic::parse_in_normalized(Language::English,mnemonic.expose_secret()).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+        let seed=Secret::new(mnemonic.to_seed_normalized(passphrase.expose_secret()));
+        let seed=SecretVec::new(seed.expose_secret().to_vec());
+        execute_seed(generation,"account_import_hd",input,&seed)
+    })().map(|v|v.to_string()).map_err(|e|e.0)
 }
 fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<u8>) -> Result<Value> {
     if input.len()>160000 || !matches!(seed.expose_secret().len(),32|64) {return Err("INVALID_ARGUMENT".into());}

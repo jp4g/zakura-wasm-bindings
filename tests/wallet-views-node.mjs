@@ -133,3 +133,87 @@ for(const file of fs.readdirSync(hdRoot,{recursive:true})) {
 }
 console.log(JSON.stringify({pass:true,case:'private HD explicit/gap/native next; commit rollback; abort semantics; all addresses; destroyed owner reopen; seed byte absence',root:hdRoot,seedLength}));
 }
+
+// Independent standard-library KDF oracle; synthetic inputs stay out of diagnostics.
+const {pbkdf2Sync}=await import('node:crypto');
+const {copyBytes}=await import('../bytes.mjs');
+assert.equal(copyBytes(new Uint8Array(),65536,'INVALID_ARGUMENT',0).length,0);
+assert.throws(()=>copyBytes(new Uint8Array(),65536,'INVALID_ARGUMENT'));
+const encoder=new TextEncoder();
+const phrase12='abandon '.repeat(11)+'about';
+const vectors=[...[[12,'about'],[15,'address'],[18,'agent'],[21,'admit'],[24,'art']].map(([n,last])=>['abandon '.repeat(n-1)+last,'TREZOR']),
+  [phrase12,undefined],[phrase12,''],[phrase12,'é'],[phrase12,'e\u0301'],[phrase12,'㍍ガバヴァぱばぐゞちぢ十人十色'],[phrase12,'TREZOR '],[phrase12,'TREZOR\0'],
+  [phrase12.replace(/[a-z]/g,c=>String.fromCharCode(c.charCodeAt(0)+0xfee0)),'TREZOR']];
+for(const [number,[phrase,pass]] of vectors.entries()) {
+  const mnemonic=encoder.encode(phrase),passphrase=pass===undefined?undefined:encoder.encode(pass);
+  const canonical=phrase.normalize('NFKD').split(/\s+/u).filter(Boolean).join(' ');
+  const seed=new Uint8Array(pbkdf2Sync(canonical,'mnemonic'+(pass??'').normalize('NFKD'),2048,64,'sha512'));
+  const mnemonicRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-mnemonic-`);
+  const oracleRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-oracle-`);
+  const input={birthday:fixture.import.birthday,accountIndex:3};
+  let saved,addresses;
+  owner=start(true,mnemonicRoot);
+  try {
+    const opened=await owner.call('initialize');assert.equal(opened.ok,true);
+    const before=(await owner.call('account_list')).result;
+    assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase,abort:'before'})).commit,'none');
+    assert.deepEqual((await owner.call('account_list')).result,before);
+    if(number===0) {
+      for(const bad of [null,'',new Uint16Array(12),new DataView(new ArrayBuffer(12)),new Uint8Array(new SharedArrayBuffer(12)),new Uint8Array(),new Uint8Array([255]),encoder.encode('abandon '.repeat(12)),encoder.encode('abandon '.repeat(11)),encoder.encode('abandon '.repeat(13)),encoder.encode('abandon '.repeat(25)),encoder.encode('unknown '.repeat(12)),encoder.encode(phrase12.toUpperCase()),encoder.encode(phrase12.replaceAll('abandon','aban')),encoder.encode('あいこくしん '.repeat(12)),encoder.encode('a'.repeat(4097)),encoder.encode('㍍'.repeat(1000))]) {
+        const rejected=await owner.call('account_import_mnemonic',input,{mnemonic:bad,passphrase});assert.equal(rejected.error,'INVALID_ARGUMENT');assert.equal(rejected.writes,0);
+        assert.deepEqual((await owner.call('account_list')).result,before);
+      }
+      for(const bad of [null,'',new Uint16Array(),new Uint8Array([255]),new Uint8Array(65537),encoder.encode('㍍'.repeat(15000))]) {
+        const rejected=await owner.call('account_import_mnemonic',input,{mnemonic,passphrase:bad});assert.equal(rejected.error,'INVALID_ARGUMENT');assert.equal(rejected.writes,0);
+        assert.deepEqual((await owner.call('account_list')).result,before);
+      }
+      assert.equal((await owner.call('account_list',{}, {mnemonic})).error,'INVALID_ARGUMENT');
+      assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase,seed})).error,'INVALID_ARGUMENT');
+      assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase,instance:'wrong'})).error,'WRONG_INSTANCE');
+      assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase,generation:opened.generation+1})).error,'STALE_HANDLE');
+      assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase,fault:'commit'})).ok,false);
+      assert.deepEqual((await owner.call('account_list')).result,before);
+    }
+    const result=await owner.call('account_import_mnemonic',input,{mnemonic,passphrase});assert.equal(result.ok,true,show(result));saved=result.result;
+    assert.equal(saved.accountIndex,3);assert.equal(saved.signerAttached,false);
+    assert.equal((await owner.call('account_import_hd',input,{seed})).error,'ACCOUNT_COLLISION');
+    assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase})).error,'ACCOUNT_COLLISION');
+    const args={accountId:saved.id};
+    assert.equal(typeof (await owner.call('address_current',args)).result,'string');
+    assert.equal((await owner.call('address_next',args)).ok,true);
+    assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
+    addresses=(await owner.call('address_list',args)).result;
+    assert.equal((await owner.call('close')).ok,true);
+    assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase})).error,'STALE_HANDLE');
+  }finally{await owner.destroy();}
+  owner=start(false,mnemonicRoot);
+  try {
+    assert.equal((await owner.call('initialize')).ok,true);
+    assert.deepEqual((await owner.call('account_get',{accountId:saved.id})).result,saved);
+    assert.deepEqual((await owner.call('address_list',{accountId:saved.id})).result,addresses);
+    assert.equal((await owner.call('account_create_hd',{birthday:input.birthday},{seed})).result.accountIndex,4);
+    const post=await owner.call('account_import_mnemonic',{...input,accountIndex:5},{mnemonic,passphrase,abort:'duringSync'});
+    assert.equal(post.error,'ABORTED');assert.equal(post.commit,'committed');
+    assert.equal((await owner.call('account_list')).result.some(a=>a.accountIndex===5),true);
+    assert.equal((await owner.call('close')).ok,true);
+  }finally{await owner.destroy();}
+  owner=start(true,oracleRoot);
+  try {
+    assert.equal((await owner.call('initialize')).ok,true);
+    const result=await owner.call('account_import_hd',input,{seed});assert.equal(result.ok,true);
+    const {id:ignore,...expected}=result.result,{id:ignored,...actual}=saved;assert.deepEqual(actual,expected);
+    const args={accountId:result.result.id};
+    assert.equal((await owner.call('address_next',args)).ok,true);
+    assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
+    assert.deepEqual((await owner.call('address_list',args)).result,addresses);
+    assert.equal((await owner.call('close')).ok,true);
+  }finally{await owner.destroy();}
+  assert.ok(Buffer.from(mnemonic).equals(Buffer.from(encoder.encode(phrase))),'caller mnemonic preserved');
+  if(passphrase)assert.ok(Buffer.from(passphrase).equals(Buffer.from(encoder.encode(pass))),'caller passphrase preserved');
+  for(const file of fs.readdirSync(mnemonicRoot,{recursive:true})) {
+    const path=`${mnemonicRoot}/${file}`;if(!fs.statSync(path).isFile())continue;
+    const bytes=fs.readFileSync(path);
+    for(const secret of [Buffer.from(mnemonic),Buffer.from(phrase.normalize('NFKD')),Buffer.from(seed),Buffer.from(seed).toString('hex')])assert.equal(bytes.includes(secret),false,'synthetic authority absent from files');
+  }
+  console.log(JSON.stringify({pass:true,case:'mnemonic independent KDF/native authority/address/reopen',vector:number,root:mnemonicRoot}));
+}

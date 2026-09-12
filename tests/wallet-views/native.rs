@@ -585,3 +585,98 @@ fn hd_metadata_and_commit_failures_roll_back_and_reopen() {
         }
     }
 }
+
+// Synthetic BIP39 fixtures; assertion diagnostics never print secret material.
+const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+fn mnemonic(g:u32,input:Value,phrase:&[u8],pass:&[u8])->std::result::Result<Value,String> {
+    views_mnemonic_call(g,&input.to_string(),phrase.to_vec(),pass.to_vec()).map(|s|serde_json::from_str(&s).unwrap())
+}
+#[test]
+fn mnemonic_vectors_normalization_and_rejection() {
+    for (bytes,last) in [(16,"about"),(20,"address"),(24,"agent"),(28,"admit"),(32,"art")] {
+        let phrase=format!("{}{last}","abandon ".repeat(bytes*3/4-1));
+        let canonical=bip39::Mnemonic::from_entropy_in(bip39::Language::English,&vec![0;bytes]).unwrap();
+        assert!(canonical.to_string()==phrase,"canonical zero entropy words");
+        let (path,g)=open();
+        let a=mnemonic(g,hd_input(0),phrase.as_bytes(),b"TREZOR").unwrap();
+        assert_eq!(a["accountIndex"],0);
+        let expected=match bytes {
+            16=>Some("c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"),
+            24=>Some("035895f2f481b1b0f01fcf8c289c794660b289981a78f8106447707fdd9666ca06da5a9a565181599b79f53b844d8a71dd9f439c52a3d7b3e8a79c906ac845fa"),
+            32=>Some("bda85446c68413707090a52022edd26a1c9462295029f2e60cd7c4f2bbd3097170af7a4d73245cafa9c3cca8d561a7c3de6f5d4a10be8ed2a5e608d68f92fcc8"),
+            _=>None,
+        };
+        if let Some(expected)=expected {
+            let seed=hex::decode(expected).unwrap();
+            assert_eq!(views_seed_call(g,"account_import_hd",&hd_input(0).to_string(),seed).unwrap_err(),"ACCOUNT_COLLISION");
+        }
+        crate::wallet::storage_close(g).unwrap();
+        assert!(std::fs::read(path).unwrap().windows(phrase.len()).all(|w|w!=phrase.as_bytes()),"mnemonic not persisted");
+    }
+    let (path,g)=open();let before=std::fs::read(&path).unwrap();
+    for phrase in ["abandon ".repeat(12),"unknown ".repeat(12),"abandon ".repeat(11),"abandon ".repeat(13),"abandon ".repeat(25),MNEMONIC.to_uppercase(),MNEMONIC.replace("abandon","aban"),"あいこくしん ".repeat(12),"a".repeat(4097),"㍍".repeat(1000)] {
+        assert_eq!(mnemonic(g,hd_input(0),phrase.as_bytes(),b"").unwrap_err(),"INVALID_ARGUMENT");
+    }
+    for (phrase,pass) in [(vec![0xff],vec![]),(MNEMONIC.as_bytes().to_vec(),vec![0xff]),(MNEMONIC.as_bytes().to_vec(),vec![b'a';65537]),(MNEMONIC.as_bytes().to_vec(),"㍍".repeat(15000).into_bytes())] {
+        assert_eq!(mnemonic(g,hd_input(0),&phrase,&pass).unwrap_err(),"INVALID_ARGUMENT");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(),before);
+    let a=mnemonic(g,hd_input(0),MNEMONIC.as_bytes(),"é".as_bytes()).unwrap();
+    let fullwidth:String=MNEMONIC.chars().map(|c|if c==' ' {'\u{3000}'}else{char::from_u32(c as u32+0xfee0).unwrap()}).collect();
+    assert_eq!(mnemonic(g,hd_input(0),fullwidth.as_bytes(),"e\u{301}".as_bytes()).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(a["signerAttached"],false);
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn mnemonic_native_provenance_boundaries_and_transaction_rollback() {
+    let seed=bip39::Mnemonic::parse_in_normalized(bip39::Language::English,MNEMONIC).unwrap().to_seed_normalized("");
+    for commit_failure in [false,true] {
+        let (path,g)=open();let conn=rusqlite::Connection::open(&path).unwrap();
+        let tables=["accounts","addresses","ext_viewing_accounts","ext_viewing_addresses"];
+        let before=policy_rows(&conn,&tables);
+        if commit_failure {conn.execute_batch("BEGIN; SELECT * FROM accounts;").unwrap();}
+        else {conn.execute_batch("CREATE TRIGGER mnemonic_fail BEFORE INSERT ON ext_viewing_accounts WHEN (SELECT count(*) FROM accounts)>0 AND (SELECT count(*) FROM addresses)>0 BEGIN SELECT RAISE(ABORT,'synthetic metadata failure'); END").unwrap();}
+        assert_eq!(mnemonic(g,hd_input(3),MNEMONIC.as_bytes(),b"").unwrap_err(),"STORAGE_ERROR");
+        if commit_failure {conn.execute_batch("ROLLBACK").unwrap();}else{conn.execute_batch("DROP TRIGGER mnemonic_fail").unwrap();}
+        assert_eq!(policy_rows(&conn,&tables),before);
+        let mut records=Vec::new();
+        for index in [0,3] {
+            let a=mnemonic(g,hd_input(index),MNEMONIC.as_bytes(),b"").unwrap();
+            super::super::DOMAIN.with(|domain| {
+                let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+                let native=db.get_account(id(&json!({"accountId":a["id"]})).unwrap()).unwrap().unwrap();
+                assert!(matches!(native.source(),zcash_client_backend::data_api::AccountSource::Derived{..}));
+                assert_eq!(native.source().key_derivation().unwrap().seed_fingerprint(),&zip32::fingerprint::SeedFingerprint::from_seed(&seed).unwrap());
+                assert_eq!(native.source().key_source(),None);
+                let expected=UnifiedSpendingKey::from_seed(db.params(),&seed,zip32::AccountId::try_from(index).unwrap()).unwrap().to_unified_full_viewing_key();
+                assert!(native.ufvk().unwrap().encode(db.params())==expected.encode(db.params()),"independent native authority");
+            });
+            assert_eq!(mnemonic(g,hd_input(index),MNEMONIC.as_bytes(),b"").unwrap_err(),"ACCOUNT_COLLISION");
+            records.push(a);
+        }
+        crate::wallet::storage_close(g).unwrap();
+        let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        for a in records {assert_eq!(call(g,"account_get",json!({"accountId":a["id"]})).unwrap(),a);}
+        let next:Value=serde_json::from_str(&views_seed_call(g,"account_create_hd",&json!({"birthday":fixture(40)["birthday"]}).to_string(),seed.to_vec()).unwrap()).unwrap();assert_eq!(next["accountIndex"],4);
+        crate::wallet::storage_close(g).unwrap();
+        let metadata:String=conn.query_row("SELECT metadata FROM ext_viewing_accounts LIMIT 1",[],|r|r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&metadata).unwrap().as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(),vec!["birthday","enabledPools","name"]);
+        let backup=format!("{path}.backup");conn.execute("VACUUM INTO ?1",[&backup]).unwrap();
+        for candidate in [&path,&format!("{path}-journal"),&backup] {
+            if let Ok(bytes)=std::fs::read(candidate) {
+                let usk=UnifiedSpendingKey::from_seed(&crate::Document::parse(PARAMS).unwrap(),&seed,zip32::AccountId::ZERO).unwrap();
+                for secret in [MNEMONIC.as_bytes().to_vec(),seed.to_vec(),hex::encode(seed).into_bytes(),usk.sapling().to_bytes().to_vec(),usk.orchard().to_bytes().to_vec(),usk.transparent().to_bytes()] {assert!(!bytes.windows(secret.len()).any(|w|w==secret),"synthetic secret persisted");}
+            }
+        }
+    }
+    let (_path,g)=open();
+    for index in [json!(-1),json!(2147483648u64),json!(1.5),json!("0"),Value::Null] {let mut input=hd_input(0);input["accountIndex"]=index;assert_eq!(mnemonic(g,input,MNEMONIC.as_bytes(),b"").unwrap_err(),"INVALID_ARGUMENT");}
+    let mut input=hd_input(0);input["enabledPools"]=json!(["sapling"]);assert_eq!(mnemonic(g,input,MNEMONIC.as_bytes(),b"").unwrap_err(),"UNSUPPORTED_HD_POOLS");
+    let mut input=hd_input(0);input["birthday"]["priorTreeState"]=json!("00");assert_eq!(mnemonic(g,input,MNEMONIC.as_bytes(),b"").unwrap_err(),"INVALID_BIRTHDAY");
+    let mut input=hd_input(0);input["birthday"]=json!("fullScan");assert_eq!(mnemonic(g,input,MNEMONIC.as_bytes(),b"").unwrap()["accountIndex"],0);
+    // Exact raw and normalized limits accepted; one more byte rejects before writes.
+    let padded=format!("{}{}",MNEMONIC," ".repeat(4096-MNEMONIC.len()));
+    assert!(mnemonic(g,hd_input(1),padded.as_bytes(),&vec![b'x';65536]).is_ok());
+    assert_eq!(mnemonic(g,hd_input(2),format!("{padded} ").as_bytes(),b"").unwrap_err(),"INVALID_ARGUMENT");
+    crate::wallet::storage_close(g).unwrap();
+}
