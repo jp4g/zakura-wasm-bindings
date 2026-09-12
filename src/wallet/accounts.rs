@@ -3,9 +3,8 @@ use wasm_bindgen::prelude::*;
 use secrecy::{Secret, SecretString, SecretVec, ExposeSecret};
 use bip39::{Language, Mnemonic};
 use std::borrow::Cow;
-use prost::Message;
 use serde_json::{json, Value};
-use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, AddressSource, WalletRead, WalletWrite}, proto::service::TreeState};
+use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, AddressSource, WalletRead, WalletWrite}};
 use zcash_client_backend::data_api::ll::LowLevelWalletRead;
 use zcash_keys::keys::transparent::gap_limits::{AddressStore, GapLimits};
 use zcash_client_sqlite::{AccountUuid, error::SqliteClientError};
@@ -15,7 +14,7 @@ use zcash_transparent::{address::TransparentAddress, keys::{IncomingViewingKey, 
 use zcash_client_backend::wallet::Exposure;
 use zcash_keys::address::{Address, UnifiedAddress};
 use zip32::DiversifierIndex;
-use zcash_protocol::consensus::{Parameters, NetworkType, NetworkUpgrade};
+use zcash_protocol::consensus::{Parameters, NetworkUpgrade};
 
 pub(super) const DEFINITIONS: [(&str, &str); 3] = [
     ("ext_viewing_version","CREATE TABLE ext_viewing_version(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)"),
@@ -63,12 +62,9 @@ impl From<SqliteClientError> for Failure { fn from(e: SqliteClientError) -> Self
 }.into()) } }
 impl From<&str> for Failure { fn from(s: &str) -> Self { Self(s.into()) } }
 pub(super) type Result<T> = std::result::Result<T, Failure>;
-pub(super) fn string<'a>(v: &'a Value, name: &str) -> Result<&'a str> { v.get(name).and_then(Value::as_str).ok_or("INVALID_ARGUMENT".into()) }
-pub(super) fn height(v: &Value, name: &str) -> Result<u32> { v.get(name).and_then(Value::as_u64).and_then(|n| n.try_into().ok()).ok_or("INVALID_ARGUMENT".into()) }
-pub(super) fn fields(v: &Value, allowed: &[&str]) -> Result<()> {
-    if !v.as_object().is_some_and(|m| m.keys().all(|k| allowed.contains(&k.as_str()))) { return Err("INVALID_ARGUMENT".into()); }
-    Ok(())
-}
+pub(super) fn string<'a>(v:&'a Value,name:&str)->Result<&'a str> {crate::birthday::string(v,name).map_err(Failure)}
+pub(super) fn height(v:&Value,name:&str)->Result<u32> {crate::birthday::height(v,name).map_err(Failure)}
+pub(super) fn fields(v:&Value,allowed:&[&str])->Result<()> {crate::birthday::fields(v,allowed).map_err(Failure)}
 fn id(v: &Value) -> Result<AccountUuid> {
     let text = string(v,"accountId")?;
     let uuid = uuid::Uuid::parse_str(text).map_err(|_| Failure::from("INVALID_ARGUMENT"))?;
@@ -110,42 +106,7 @@ fn stored_record(ext: &zcash_client_sqlite::ExtensionTransaction<'_>, account: &
     Ok(result)
 }
 pub(super) fn birthday(v: &Value, parameters: &[u8], genesis: &[u8], p: &crate::Document) -> Result<AccountBirthday> {
-    if v.as_str()==Some("fullScan") {
-        let hash=zcash_primitives::block::BlockHash::try_from_slice(genesis).ok_or(Failure::from("NETWORK_MISMATCH"))?;
-        return Ok(AccountBirthday::from_parts(zcash_client_backend::data_api::chain::ChainState::empty(0u32.into(),hash),None));
-    }
-    fields(v,&["parameters","genesis","firstScanHeight","priorTreeState","recoverUntilExclusive","source"])?;
-    if string(v,"parameters")? != hex::encode(parameters) || string(v,"genesis")? != hex::encode(genesis) { return Err("NETWORK_MISMATCH".into()); }
-    if !matches!(string(v,"source")?,"checkpoint"|"light-client") { return Err("INVALID_BIRTHDAY".into()); }
-    let first = height(v,"firstScanHeight")?;
-    if first == 0 { return Err("INVALID_BIRTHDAY".into()); }
-    let recover = if v.get("recoverUntilExclusive").is_some() { Some(height(v,"recoverUntilExclusive")?) } else { None };
-    if recover.is_some_and(|h| h < first) { return Err("INVALID_BIRTHDAY".into()); }
-    let raw = hex::decode(string(v,"priorTreeState")?).map_err(|_| Failure::from("INVALID_BIRTHDAY"))?;
-    if raw.is_empty() || raw.len()>65536 { return Err("INVALID_BIRTHDAY".into()); }
-    let state = TreeState::decode(raw.as_slice()).map_err(|_| Failure::from("INVALID_BIRTHDAY"))?;
-    // This private encoding accepts the pinned prost canonical form only: unknown,
-    // duplicate and otherwise unconsumed fields cannot silently disappear.
-    if state.encode_to_vec() != raw { return Err("INVALID_BIRTHDAY".into()); }
-    let trees = [
-        (state.sapling_tree.as_str(), NetworkUpgrade::Sapling),
-        (state.orchard_tree.as_str(), NetworkUpgrade::Nu5),
-        (state.ironwood_tree.as_str(), NetworkUpgrade::Nu6_3),
-    ];
-    for (i,(encoded,upgrade)) in trees.into_iter().enumerate() {
-        let mut canonical = Vec::new();
-        let empty = match i {
-            0 => { let tree = state.sapling_tree().map_err(|_| Failure::from("INVALID_BIRTHDAY"))?; zcash_primitives::merkle_tree::write_commitment_tree(&tree,&mut canonical).map_err(|_| Failure::from("INVALID_BIRTHDAY"))?; tree.size()==0 },
-            _ => { let tree = if i==1 { state.orchard_tree() } else { state.ironwood_tree() }.map_err(|_| Failure::from("INVALID_BIRTHDAY"))?; zcash_primitives::merkle_tree::write_commitment_tree(&tree,&mut canonical).map_err(|_| Failure::from("INVALID_BIRTHDAY"))?; tree.size()==0 },
-        };
-        let active = p.is_nu_active(upgrade,(first-1).into());
-        if (!encoded.is_empty() && encoded != hex::encode(canonical)) || (active && encoded.is_empty()) || (!active && !empty) { return Err("INVALID_BIRTHDAY".into()); }
-    }
-    let network = match p.network_type() { NetworkType::Main=>"main",NetworkType::Test=>"test",NetworkType::Regtest=>"regtest" };
-    if state.network != network || state.height != u64::from(first-1) { return Err("INVALID_BIRTHDAY".into()); }
-    let decoded = AccountBirthday::from_treestate(state,recover.map(Into::into)).map_err(|_| Failure::from("INVALID_BIRTHDAY"))?;
-    if first==1 && decoded.prior_chain_state().block_hash().0.as_slice() != genesis { return Err("NETWORK_MISMATCH".into()); }
-    Ok(decoded)
+    crate::birthday::validate(v,parameters,genesis,p).map_err(Failure)
 }
 fn birthday_from_metadata(v:&Value, parameters:&[u8], genesis:&[u8], p:&crate::Document)->Result<AccountBirthday> {
     birthday(v.get("birthday").ok_or(Failure::from("INVALID_ACCOUNT_METADATA"))?,parameters,genesis,p)

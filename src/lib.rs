@@ -82,3 +82,6 @@ pub mod wallet;
 
 #[cfg(feature = "viewing")]
 pub mod viewing;
+
+#[cfg(any(feature = "birthday", feature = "wallet-storage"))]
+pub mod birthday;
