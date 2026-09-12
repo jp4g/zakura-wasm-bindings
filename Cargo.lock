@@ -2226,6 +2226,7 @@ dependencies = [
  "prost",
  "rand_core 0.10.1",
  "rusqlite",
+ "secrecy",
  "serde_json",
  "uuid",
  "wasm-bindgen",

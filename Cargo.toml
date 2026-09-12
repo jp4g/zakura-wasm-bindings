@@ -9,13 +9,14 @@ build = "wallet-host/build.rs"
 crate-type = ["rlib", "cdylib"]
 
 [features]
-wallet-storage = ["dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt", "dep:zcash_client_backend", "dep:zcash_keys", "dep:prost", "dep:zip32", "dep:serde_json", "dep:hex", "dep:zcash_address", "dep:zcash_transparent"]
+wallet-storage = ["dep:secrecy", "dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt", "dep:zcash_client_backend", "dep:zcash_keys", "dep:prost", "dep:zip32", "dep:serde_json", "dep:hex", "dep:zcash_address", "dep:zcash_transparent"]
 
 [[test]]
 name = "wallet_native"
 required-features = ["wallet-storage"]
 
 [dependencies]
+secrecy = { version = "=0.8.0", optional = true }
 zcash_transparent = { version = "=0.10.0", default-features = false, optional = true }
 zcash_address = { version = "=0.13.0", optional = true }
 zcash_client_backend = { package = "zakura-client-backend", version = "=0.1.0-rc4", default-features = false, optional = true }

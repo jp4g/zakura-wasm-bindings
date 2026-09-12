@@ -77,6 +77,12 @@ try {
   const records=(await first.call({op:'address_list',generation:opened.generation,args})).result;
   const encode=v=>JSON.stringify(v,(_,x)=>typeof x==='bigint'?x.toString():x);
   results.push({case:'account import and unified/transparent address allocation',accountId:account.id,addresses:records.length});
+  const hdSeed=new Uint8Array(32).fill(40);
+  const hd=await first.call({op:'account_import_hd',generation:opened.generation,args:{birthday:input.birthday,accountIndex:3,name:'private HD'},seed:hdSeed});
+  check(hd.ok&&hd.result.accountIndex===3&&!hd.result.signerAttached,'native HD explicit provenance');
+  const hdArgs={accountId:hd.result.id};
+  const hdAddress=await first.call({op:'address_next',generation:opened.generation,args:hdArgs});check(hdAddress.ok,'HD address exposure');
+  const hdRecords=(await first.call({op:'address_list',generation:opened.generation,args:hdArgs})).result;
   const contender = start();
   const busy = await contender.call(initialize(false));
   check(!busy.ok && busy.error === 'STORAGE_BUSY', `contention: ${JSON.stringify(busy)}`);
@@ -98,6 +104,13 @@ try {
   const addresses=await reopened.call({op:'address_list',generation:again.generation,args});check(addresses.ok&&encode(addresses.result)===encode(records),'persistent verified address list');
   check((await reopened.call({op:'account_list',generation:again.generation,instance:opened.instance})).error==='WRONG_INSTANCE','cross-worker handle');
   results.push({case:'same DB account/address after observed destruction',accountId:account.id,addresses:addresses.result.length});
+  const storedHd=await reopened.call({op:'account_get',generation:again.generation,args:hdArgs});
+  check(storedHd.ok&&encode(storedHd.result)===encode(hd.result),'HD UUID/index/name/birthday survives OPFS owner destruction');
+  const storedHdAddresses=await reopened.call({op:'address_list',generation:again.generation,args:hdArgs});
+  check(storedHdAddresses.ok&&encode(storedHdAddresses.result)===encode(hdRecords),'HD addresses survive OPFS reopen');
+  const hdNext=await reopened.call({op:'account_create_hd',generation:again.generation,args:{birthday:input.birthday},seed:hdSeed});
+  check(hdNext.ok&&hdNext.result.accountIndex===4&&!hdNext.result.signerAttached,'native HD next index after OPFS reopen');
+  results.push({case:'private native HD OPFS import/address/destruction/reopen/next',accountId:hd.result.id,index:hd.result.accountIndex});
   check((await reopened.call({ op: 'close', generation: again.generation })).ok, 'reopened close');
   await reopened.destroy();
   outcome = { pass: true, root, results, userAgent: navigator.userAgent, actualQuotaExhaustion: false, uaEviction: false };
