@@ -67,7 +67,9 @@ try {
   const balanceRequest={op:'account_balance',generation:opened.generation,args:balanceArgs};
   const balance=await first.call(balanceRequest);
   check(balance.ok&&balance.result.accountId===account.id&&balance.result.amounts===null&&balance.writes===0,'unavailable native balance is null without writes');
-  check(Object.keys(balance.result).sort().join() === 'accountId,amounts','private balance has no scan/revision');
+  check(Object.keys(balance.result).sort().join() === 'accountId,amounts,scan','native balance includes scan snapshot');
+  check(/^[0-9a-f]{32}:[0-9]+$/.test(balance.result.scan.revision),'native revision shape');
+  check(balance.result.scan.tipHeight===99&&balance.result.scan.fullyScannedHeight===null&&balance.result.scan.maxScannedHeight===null&&balance.result.scan.scanComplete===null,'native checkpoint tip and unknown scan coverage');
   const balanceAbort=await first.call({...balanceRequest,abort:'before'});
   check(balanceAbort.error==='ABORTED'&&balanceAbort.commit==='none'&&balanceAbort.writes===0,'balance preabort no writes');
   check((await first.call({...balanceRequest,instance:'wrong'})).error==='WRONG_INSTANCE','balance wrong instance');
@@ -153,6 +155,7 @@ try {
   const again = await reopened.call(initialize(false)); check(again.ok, JSON.stringify(again));
   const balanceAgain=await reopened.call({...balanceRequest,generation:again.generation});
   check(balanceAgain.ok&&balanceAgain.result.accountId===account.id&&balanceAgain.result.amounts===null&&balanceAgain.writes===0,'balance survives OPFS destruction/reopen');
+  check(/^[0-9a-f]{32}:0$/.test(balanceAgain.result.scan.revision)&&balanceAgain.result.scan.revision.split(':')[0]!==balance.result.scan.revision.split(':')[0],'reopen persists fresh native epoch');
   check((await reopened.call({...balanceRequest,generation:again.generation,instance:opened.instance})).error==='WRONG_INSTANCE','balance old owner after reopen');
   results.push({case:'private native balance OPFS read/preabort/close/destruction/reopen',accountId:account.id});
   const stored=await reopened.call({op:'account_get',generation:again.generation,args:{accountId:account.id}});check(stored.ok&&encode(stored.result)===encode(account),'persistent UUID/account');
@@ -197,19 +200,23 @@ try {
     check(fixture.balanceCases.some(test=>test.scenario===scenario),'scanned maturity fixture required: '+scenario);
   for(const [index,test] of fixture.balanceCases.entries()) {
     const balanceRoot=`${root}-balance-${index}`;
-    let oldToken, persisted;
+    let oldToken, previousRevision;
     for(let reopen=0;reopen<2;reopen++) {
       const owner=start();
       const opened=await owner.call({...initialize(reopen===0),root:balanceRoot,...(reopen===0?{database:Uint8Array.from(test.database.match(/../g),b=>parseInt(b,16))}:{})});
       check(opened.ok&&opened.secure,'populated OPFS initialize');
       const snapshot=await owner.call({op:'fixture_snapshot'});check(snapshot.ok,'fixture snapshot');
       const before=snapshot.result;
-      if(persisted)check(before.length===persisted.length&&before.every((b,i)=>b===persisted[i]),'populated bytes survive destruction/reopen');
-      for(const {args,expected} of test.queries) {
+      // Opening writes a fresh epoch; query reads must still preserve all bytes below.
+      let revision;
+      for(const {args,expected,scan} of test.queries) {
         const saved=structuredClone(args),request={op:'account_balance',generation:opened.generation,args};
         const result=await owner.call(request);
         check(result.ok&&result.writes===0,'populated balance read without writes');
-        exactBalance(result.result,{accountId:expected.accountId,amounts:liftAmounts(expected.amounts)},'native balance');
+        check(/^[0-9a-f]{32}:0$/.test(result.result.scan.revision),'populated native revision shape');
+        if(revision)check(result.result.scan.revision===revision,'reads retain one native revision');
+        revision=result.result.scan.revision;
+        exactBalance(result.result,{accountId:expected.accountId,amounts:liftAmounts(expected.amounts),scan:{...scan,revision}},'native balance and scan');
         exactBalance(args,saved,'caller policy');
         const pre=await owner.call({...request,abort:'before'});
         check(pre.error==='ABORTED'&&pre.commit==='none'&&pre.reads===0&&pre.writes===0,'populated preabort no IO');
@@ -224,7 +231,8 @@ try {
       const request={op:'account_balance',generation:opened.generation,args:test.queries[0].args};
       check((await owner.call({...request,args:{...request.args,accountId:'00000000-0000-0000-0000-000000000000'}})).error==='ACCOUNT_NOT_FOUND','populated unknown account');
       const after=await owner.call({op:'fixture_snapshot'});check(after.ok&&after.result.length===before.length&&after.result.every((b,i)=>b===before[i]),'balance queries preserve OPFS bytes');
-      persisted=before;
+      if(previousRevision)check(revision.split(':')[0]!==previousRevision.split(':')[0],'new owner persists fresh epoch');
+      previousRevision=revision;
       check((await owner.call({op:'close',generation:opened.generation})).ok,'populated close');
       check((await owner.call(request)).error==='STALE_HANDLE','populated balance after close');
       oldToken=opened;

@@ -50,6 +50,7 @@ struct Domain { active: Option<Active>, generation: u32, failed: Option<Rc<RefCe
 thread_local! { static DOMAIN: RefCell<Domain> = RefCell::new(Domain::default()); }
 
 mod schema;
+mod revision;
 
 fn validate_schema(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Result<bool, String> {
     schema::validate(conn, bytes, genesis)
@@ -69,7 +70,8 @@ fn bind_network(conn: &mut Connection, bytes: &[u8], genesis: &[u8]) -> Result<(
 fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<u32, String> {
     if format != "zcash-js-network/1" || genesis.len() != 32 { return Err("INVALID_ARGUMENT".into()); }
     let document = super::Document::parse(bytes).map_err(|_| "INVALID_ARGUMENT")?;
-    getrandom::fill(&mut [0; 32]).map_err(|_| "ENTROPY_UNAVAILABLE")?;
+    let mut epoch = [0; 16];
+    getrandom::fill(&mut epoch).map_err(|_| "ENTROPY_UNAVAILABLE")?;
     DOMAIN.with(|domain| {
         let mut domain = domain.try_borrow_mut().map_err(|_| "STORAGE_BUSY")?;
         if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
@@ -108,6 +110,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
             // Bounded real schema read; never enumerate the wallet's accounts.
             accounts::initialize(conn)?;
             conn.query_row("SELECT EXISTS(SELECT 1 FROM accounts LIMIT 1)", [], |r| r.get::<_, bool>(0)).map_err(|_| "SCHEMA_MISMATCH")?;
+            revision::initialize(conn, &epoch)?;
             Ok(())
         })();
         if let Err(error) = prepared {

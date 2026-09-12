@@ -24,7 +24,7 @@ function start(create=false,ownedRoot=root) {
     async destroy(){let timer;try{await Promise.race([worker.terminate(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('destruction deadline')),5000);})]);}finally{clearTimeout(timer);}assert.ok(stopped,'worker exit observed');},
   };
 }
-let owner=start(true), account,list,token;
+let owner=start(true), account,list,token,initialRevision;
 const policyAccounts=[];
 try {
   token=await owner.call('initialize');assert.equal(token.ok,true,show(token));
@@ -38,7 +38,9 @@ try {
 
   const args={accountId:account.id};
   const unavailable=await owner.call('account_balance',{...args,confirmations:{trusted:1,untrusted:1,allowZeroConfirmationShielding:true}});
-  assert.equal(unavailable.ok,true,show(unavailable));assert.deepEqual(unavailable.result,{accountId:account.id,amounts:null});assert.equal(unavailable.writes,0);
+  assert.equal(unavailable.ok,true,show(unavailable));assert.equal(unavailable.result.accountId,account.id);assert.equal(unavailable.result.amounts,null);assert.equal(unavailable.writes,0);
+  initialRevision=unavailable.result.scan.revision;assert.match(initialRevision,/^[0-9a-f]{32}:[0-9]+$/);
+  assert.deepEqual(unavailable.result.scan,{revision:initialRevision,tipHeight:99,fullyScannedHeight:null,maxScannedHeight:null,scanComplete:null});
   const initial=await owner.call('address_list',args);assert.deepEqual(initial.result,[fixture.defaultAddress]);
   assert.equal((await owner.call('address_current',args)).result,fixture.defaultAddress.address);
   const next=await owner.call('address_next',args);assert.equal(next.ok,true,show(next));
@@ -67,6 +69,10 @@ try {
   assert.deepEqual((await owner.call('account_list')).result.map(a=>a.id).sort(),[account,...policyAccounts].map(a=>a.id).sort());
   for(const a of policyAccounts)assert.deepEqual((await owner.call('account_get',{accountId:a.id})).result,a);
   assert.deepEqual((await owner.call('address_list',{accountId:account.id})).result,list);
+  const reopenedBalance=await owner.call('account_balance',{accountId:account.id,confirmations:{trusted:1,untrusted:1,allowZeroConfirmationShielding:true}});
+  assert.equal(reopenedBalance.ok,true,show(reopenedBalance));assert.equal(reopenedBalance.result.amounts,null);
+  assert.match(reopenedBalance.result.scan.revision,/^[0-9a-f]{32}:0$/);
+  assert.notEqual(reopenedBalance.result.scan.revision.split(':')[0],initialRevision.split(':')[0]);
   assert.equal((await owner.call('account_list',{}, {instance:token.instance})).error,'WRONG_INSTANCE');
   assert.equal((await owner.call('close')).ok,true);
 }finally{await owner.destroy();}
@@ -236,18 +242,22 @@ for(const scenario of ['coinbase-before-maturity','coinbase-at-maturity'])
 for(const [index,test] of fixture.balanceCases.entries()) {
   const balanceRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-balance-`);
   fs.writeFileSync(`${balanceRoot}/wallet.db`,Buffer.from(test.database,'hex'),{mode:0o600});
-  let oldToken;
+  let oldToken,previousRevision;
   const liftAmounts=v=>typeof v==='string'&&/^[0-9]+$/.test(v)?BigInt(v):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,liftAmounts(x)])):v;
   for(let reopen=0;reopen<2;reopen++) {
     const balanceOwner=start(false,balanceRoot);
     try {
       const opened=await balanceOwner.call('initialize');assert.equal(opened.ok,true,show(opened));
       const before=fs.readFileSync(`${balanceRoot}/wallet.db`);
-      for(const {args,expected} of test.queries) {
+      let revision;
+      for(const {args,expected,scan} of test.queries) {
         const saved=structuredClone(args);
         const result=await balanceOwner.call('account_balance',args);
         assert.equal(result.ok,true,show(result));assert.equal(result.writes,0);
-        assert.deepEqual(result.result,{accountId:expected.accountId,amounts:liftAmounts(expected.amounts)});
+        assert.match(result.result.scan.revision,/^[0-9a-f]{32}:0$/);
+        if(revision)assert.equal(result.result.scan.revision,revision,'reads retain one revision');
+        revision=result.result.scan.revision;
+        assert.deepEqual(result.result,{accountId:expected.accountId,amounts:liftAmounts(expected.amounts),scan:{...scan,revision}});
         assert.deepEqual(args,saved,'caller policy unchanged');
         const pre=await balanceOwner.call('account_balance',args,{abort:'before'});
         assert.equal(pre.error,'ABORTED');assert.equal(pre.commit,'none');assert.equal(pre.writes,0);assert.equal(pre.reads,0);
@@ -263,6 +273,8 @@ for(const [index,test] of fixture.balanceCases.entries()) {
       const unknown=await balanceOwner.call('account_balance',{...test.queries[0].args,accountId:'00000000-0000-0000-0000-000000000000'});
       assert.equal(unknown.error,'ACCOUNT_NOT_FOUND');assert.equal(unknown.writes,0);
       assert.deepEqual(fs.readFileSync(`${balanceRoot}/wallet.db`),before);
+      if(previousRevision)assert.notEqual(revision.split(':')[0],previousRevision.split(':')[0],'new owner persists fresh epoch');
+      previousRevision=revision;
       assert.equal((await balanceOwner.call('close')).ok,true);
       assert.equal((await balanceOwner.call('account_balance',test.queries[0].args)).error,'STALE_HANDLE');
       oldToken=opened;
