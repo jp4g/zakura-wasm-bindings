@@ -23,7 +23,7 @@ fn execute(generation: u32, operation: &str, input: &Value) -> Result<Value> {
                 active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
                     if super::revision::read(ext)?!=string(input,"revision")? {return Err("STALE_REVISION".into());}
                     let pending=ext.query_row("SELECT height,hash FROM ext_wallet_creation_snapshot WHERE id=1",[],|r|Ok((r.get::<_,Option<u32>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?)))?;
-                    let tip=db.chain_height()?.map(u32::from).ok_or(Failure::from("SYNC_REQUIRED"))?;
+                    let tip=super::creation::tip_for_target(db.chain_height()?.map(u32::from),target_height,&p)?;
                     if target_height>tip {return Err("SYNC_REQUIRED".into());}
                     let current=target_height==tip;
                     if current && pending!=(Some(target_height),Some(target_hash.clone())) {return Err("SYNC_REQUIRED".into());}

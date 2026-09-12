@@ -436,7 +436,7 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
             } else {
                 let value=super::creation::birthday_value(ext,&active.bytes,&genesis)?;
                 let target=height(&value,"firstScanHeight")?-1;
-                if db.chain_height()?.map(u32::from)!=Some(target)
+                if super::creation::tip_for_target(db.chain_height()?.map(u32::from),target,&p)?!=target
                     || db.suggest_scan_ranges()?.iter().any(|r|u32::from(r.block_range().start)<=target) {return Err("SYNC_REQUIRED".into());}
                 value
             };

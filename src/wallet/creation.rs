@@ -47,3 +47,12 @@ pub(super) fn birthday_value(ext:&ExtensionTransaction<'_>, parameters:&[u8], ge
     Ok(json!({"parameters":hex::encode(parameters),"genesis":hex::encode(genesis),"firstScanHeight":height+1,
         "priorTreeState":hex::encode(tree),"source":"light-client"}))
 }
+
+// SQLite intentionally leaves its scan queue empty for pre-Sapling tips.
+// Only that case may use the separately validated creation target as its tip.
+pub(super) fn tip_for_target(tip:Option<u32>, target:u32, p:&crate::Document) -> Result<u32> {
+    use zcash_protocol::consensus::{Parameters,NetworkUpgrade};
+    tip.or_else(||p.activation_height(NetworkUpgrade::Sapling)
+        .filter(|activation|target<u32::from(*activation)).map(|_|target))
+        .ok_or(Failure::from("SYNC_REQUIRED"))
+}
