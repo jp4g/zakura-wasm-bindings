@@ -143,7 +143,7 @@ const encoder=new TextEncoder();
 const phrase12='abandon '.repeat(11)+'about';
 const vectors=[...[[12,'about'],[15,'address'],[18,'agent'],[21,'admit'],[24,'art']].map(([n,last])=>['abandon '.repeat(n-1)+last,'TREZOR']),
   [phrase12,undefined],[phrase12,''],[phrase12,'é'],[phrase12,'e\u0301'],[phrase12,'㍍ガバヴァぱばぐゞちぢ十人十色'],[phrase12,'TREZOR '],[phrase12,'TREZOR\0'],
-  [phrase12.replace(/[a-z]/g,c=>String.fromCharCode(c.charCodeAt(0)+0xfee0)),'TREZOR']];
+  [phrase12.replace(/[a-z]/g,c=>String.fromCharCode(c.charCodeAt(0)+0xfee0)),'TREZOR'],['\u2003'+phrase12.replaceAll(' ','\u2003\t')+'\n','TREZOR']];
 for(const [number,[phrase,pass]] of vectors.entries()) {
   const mnemonic=encoder.encode(phrase),passphrase=pass===undefined?undefined:encoder.encode(pass);
   const canonical=phrase.normalize('NFKD').split(/\s+/u).filter(Boolean).join(' ');
@@ -160,7 +160,10 @@ for(const [number,[phrase,pass]] of vectors.entries()) {
     assert.deepEqual((await owner.call('account_list')).result,before);
     if(number===0) {
       for(const bad of [null,'',new Uint16Array(12),new DataView(new ArrayBuffer(12)),new Uint8Array(new SharedArrayBuffer(12)),new Uint8Array(),new Uint8Array([255]),encoder.encode('abandon '.repeat(12)),encoder.encode('abandon '.repeat(11)),encoder.encode('abandon '.repeat(13)),encoder.encode('abandon '.repeat(25)),encoder.encode('unknown '.repeat(12)),encoder.encode(phrase12.toUpperCase()),encoder.encode(phrase12.replaceAll('abandon','aban')),encoder.encode('あいこくしん '.repeat(12)),encoder.encode('a'.repeat(4097)),encoder.encode('㍍'.repeat(1000))]) {
+        if(bad instanceof Uint8Array && bad.buffer instanceof SharedArrayBuffer)bad.fill(77);
+        const savedBad=bad instanceof Uint8Array?bad.slice():undefined;
         const rejected=await owner.call('account_import_mnemonic',input,{mnemonic:bad,passphrase});assert.equal(rejected.error,'INVALID_ARGUMENT');assert.equal(rejected.writes,0);
+        if(savedBad)assert.ok(Buffer.from(bad).equals(Buffer.from(savedBad)),'rejected caller bytes preserved');
         assert.deepEqual((await owner.call('account_list')).result,before);
       }
       for(const bad of [null,'',new Uint16Array(),new Uint8Array([255]),new Uint8Array(65537),encoder.encode('㍍'.repeat(15000))]) {

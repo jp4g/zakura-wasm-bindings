@@ -68,7 +68,7 @@ async function receive(request) {
     }
   } catch (e) { diagnose(`operation-error:${request.op}`,e); reply({ok:false,error:typeof e==='string'?e:e.code==='EBUSY'||e.name==='NoModificationAllowedError'?'STORAGE_BUSY':e.message,commit:e.commit}); }
   finally {
-    for(const secret of [request.mnemonic,request.passphrase])if(secret instanceof Uint8Array)Uint8Array.prototype.fill.call(secret,0);
+    for(const secret of [request.mnemonic,request.passphrase])if(secret instanceof Uint8Array && secret.buffer instanceof ArrayBuffer)Uint8Array.prototype.fill.call(secret,0);
     if(finishInitialization){
       let cleanupError;
       if(stopped){try{if(owner)owner.close(owner.generation,owner.instance);else if(backend?.owned)backend.release();}catch(e){cleanupError=e;diagnose('startup-cleanup-error',e);}}

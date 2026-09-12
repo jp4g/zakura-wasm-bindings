@@ -680,3 +680,38 @@ fn mnemonic_native_provenance_boundaries_and_transaction_rollback() {
     assert_eq!(mnemonic(g,hd_input(2),format!("{padded} ").as_bytes(),b"").unwrap_err(),"INVALID_ARGUMENT");
     crate::wallet::storage_close(g).unwrap();
 }
+#[test]
+fn mnemonic_passphrase_normalized_limit_and_nonpersistence() {
+    let (path,g)=open();
+    let pass="㍍ガバヴァぱばぐゞちぢ十人十色";
+    let mut normalized=Cow::Borrowed(pass);Mnemonic::normalize_utf8_cow(&mut normalized);
+    let seed=Mnemonic::parse_in_normalized(Language::English,MNEMONIC).unwrap().to_seed_normalized(&normalized);
+    let account=mnemonic(g,hd_input(0),MNEMONIC.as_bytes(),pass.as_bytes()).unwrap();
+    assert_eq!(mnemonic(g,hd_input(0),MNEMONIC.as_bytes(),normalized.as_bytes()).unwrap_err(),"ACCOUNT_COLLISION");
+    let mut fingerprints=std::collections::BTreeSet::new();
+    for pass in ["", "TREZOR", "TREZOR ", "TREZOR\0"] {
+        let a=mnemonic(g,hd_input(0),MNEMONIC.as_bytes(),pass.as_bytes()).unwrap();
+        super::super::DOMAIN.with(|domain| {
+            let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+            let native=db.get_account(id(&json!({"accountId":a["id"]})).unwrap()).unwrap().unwrap();
+            assert!(fingerprints.insert(format!("{:?}",native.source().key_derivation().unwrap().seed_fingerprint())),"distinct passphrase authority");
+        });
+    }
+    let boundary=format!("{}x","é".repeat(21845)); // NFKD is exactly 65536 bytes.
+    assert!(mnemonic(g,hd_input(0),MNEMONIC.as_bytes(),boundary.as_bytes()).is_ok());
+    let before=call(g,"account_list",json!({})).unwrap();
+    assert_eq!(mnemonic(g,hd_input(0),MNEMONIC.as_bytes(),format!("{boundary}x").as_bytes()).unwrap_err(),"INVALID_ARGUMENT");
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),before);
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
+    crate::wallet::storage_close(g).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();let backup=format!("{path}.backup");conn.execute("VACUUM INTO ?1",[&backup]).unwrap();
+    let usk=UnifiedSpendingKey::from_seed(&crate::Document::parse(PARAMS).unwrap(),&seed,zip32::AccountId::ZERO).unwrap();
+    let mut secrets=vec![MNEMONIC.as_bytes().to_vec(),pass.as_bytes().to_vec(),normalized.as_bytes().to_vec(),seed.to_vec(),usk.sapling().to_bytes().to_vec(),usk.orchard().to_bytes().to_vec(),usk.transparent().to_bytes()];
+    secrets.extend(secrets.clone().iter().map(|s|hex::encode(s).into_bytes()));
+    for candidate in [&path,&format!("{path}-journal"),&backup] {
+        if let Ok(bytes)=std::fs::read(candidate) {for secret in &secrets {assert!(!bytes.windows(secret.len()).any(|w|w==secret),"synthetic authority persisted");}}
+    }
+    let result=account.to_string();for secret in &secrets {assert!(!result.as_bytes().windows(secret.len()).any(|w|w==secret),"synthetic authority in result");}
+}

@@ -103,6 +103,8 @@ try {
   const mnemonicVectors=[...[[12,'about'],[15,'address'],[18,'agent'],[21,'admit'],[24,'art']].map(([n,last])=>['abandon '.repeat(n-1)+last,'TREZOR']),[phrase12,''],[phrase12,'é'],[phrase12,'㍍ガバヴァぱばぐゞちぢ十人十色']];
   for(const [phrase,pass] of mnemonicVectors) {
     const mnemonic=encoder.encode(phrase),passphrase=encoder.encode(pass);
+    const material=await crypto.subtle.importKey('raw',encoder.encode(phrase.normalize('NFKD')),'PBKDF2',false,['deriveBits']);
+    const seed=new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-512',iterations:2048,salt:encoder.encode('mnemonic'+pass.normalize('NFKD'))},material,512));
     const request={op:'account_import_mnemonic',generation:opened.generation,args:{birthday:input.birthday,accountIndex:3},mnemonic,passphrase};
     const before=(await first.call({op:'account_list',generation:opened.generation})).result;
     const pre=await first.call({...request,abort:'before'});check(pre.error==='ABORTED'&&pre.commit==='none','mnemonic preabort');
@@ -112,6 +114,7 @@ try {
     const failed=await first.call({...request,fault:'commit'});check(!failed.ok,'mnemonic commit failure');
     check(encode((await first.call({op:'account_list',generation:opened.generation})).result)===encode(before),'mnemonic rollback');
     const recovered=await first.call(request);check(recovered.ok&&recovered.result.accountIndex===3&&!recovered.result.signerAttached,'mnemonic recovery');
+    check((await first.call({op:'account_import_hd',generation:opened.generation,args:request.args,seed})).error==='ACCOUNT_COLLISION','browser independent KDF authority');
     const args={accountId:recovered.result.id};
     check((await first.call({...request})).error==='ACCOUNT_COLLISION','mnemonic duplicate');
     if(pass==='')check((await first.call({...request,passphrase:undefined})).error==='ACCOUNT_COLLISION','omitted equals empty');
@@ -122,7 +125,7 @@ try {
     check((await first.call({op:'address_at',generation:opened.generation,args:{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}}})).ok,'mnemonic at');
     const records=(await first.call({op:'address_list',generation:opened.generation,args})).result;
     check(mnemonic.every((b,i)=>b===encoder.encode(phrase)[i])&&passphrase.every((b,i)=>b===encoder.encode(pass)[i]),'mnemonic caller bytes');
-    mnemonicCases.push({request,account:recovered.result,args,records});
+    mnemonicCases.push({request,account:recovered.result,args,records,seed});
   }
   const contender = start();
   const busy = await contender.call(initialize(false));
@@ -155,10 +158,12 @@ try {
   results.push({case:'private native HD OPFS import/address/destruction/reopen/next',accountId:hd.result.id,index:hd.result.accountIndex,seedLength:hdSeed.length});
   check(hdSeed.every(b=>b===40),'reopened caller seed unchanged');
   }
-  for(const {request,account,args,records} of mnemonicCases) {
+  for(const {request,account,args,records,seed} of mnemonicCases) {
     check(encode((await reopened.call({op:'account_get',generation:again.generation,args})).result)===encode(account),'mnemonic persistent account');
     check(encode((await reopened.call({op:'address_list',generation:again.generation,args})).result)===encode(records),'mnemonic persistent addresses');
-    const post=await reopened.call({...request,generation:again.generation,args:{...request.args,accountIndex:4},abort:'duringSync'});
+    const next=await reopened.call({op:'account_create_hd',generation:again.generation,args:{birthday:input.birthday},seed});
+    check(next.ok&&next.result.accountIndex===4,'mnemonic native next index after OPFS reopen');
+    const post=await reopened.call({...request,generation:again.generation,args:{...request.args,accountIndex:5},abort:'duringSync'});
     check(post.error==='ABORTED'&&post.commit==='committed','mnemonic committed abort');
   }
   results.push({case:'mnemonic all counts/NFKD/empty/rollback/abort/OPFS destruction/reopen',cases:mnemonicCases.length});
