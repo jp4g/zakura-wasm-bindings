@@ -55,7 +55,22 @@ fn creation_scanned_frontiers_and_rewind_invalidation() {
     }
     let input=complete_target(g,100,target["hash"].as_str().unwrap()); // Empty frontiers disagree with the real encrypted three-pool scan.
     assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&input.to_string()).unwrap_err(),"CHAIN_MISMATCH");
-    let rewind=json!({"revision":input["revision"],"requestedPoint":{"height":99,"hash":"07".repeat(32)}});
+    let block=zcash_client_backend::proto::compact_formats::CompactBlock::decode(hex::decode(fixture["batches"][6]["blocks"][3].as_str().unwrap()).unwrap().as_slice()).unwrap();
+    let mut tree=TreeState::decode(hex::decode(input["treeState"].as_str().unwrap()).unwrap().as_slice()).unwrap();
+    let mut sapling_tree=tree.sapling_tree().unwrap();
+    let mut orchard_tree=tree.orchard_tree().unwrap();
+    let mut ironwood_tree=tree.ironwood_tree().unwrap();
+    for tx in block.vtx {
+        for output in tx.outputs {sapling_tree.append(sapling::Node::from_bytes(output.cmu.as_slice().try_into().unwrap()).unwrap()).unwrap();}
+        for action in tx.actions {orchard_tree.append(orchard::tree::MerkleHashOrchard::from_bytes(&action.cmx.as_slice().try_into().unwrap()).unwrap()).unwrap();}
+        for action in tx.ironwood_actions {ironwood_tree.append(orchard::tree::MerkleHashOrchard::from_bytes(&action.cmx.as_slice().try_into().unwrap()).unwrap()).unwrap();}
+    }
+    let mut raw=Vec::new();zcash_primitives::merkle_tree::write_commitment_tree(&sapling_tree,&mut raw).unwrap();tree.sapling_tree=hex::encode(raw);
+    let mut raw=Vec::new();zcash_primitives::merkle_tree::write_commitment_tree(&orchard_tree,&mut raw).unwrap();tree.orchard_tree=hex::encode(raw);
+    let mut raw=Vec::new();zcash_primitives::merkle_tree::write_commitment_tree(&ironwood_tree,&mut raw).unwrap();tree.ironwood_tree=hex::encode(raw);
+    let mut populated=input.clone();populated["treeState"]=json!(hex::encode(tree.encode_to_vec()));
+    let completed:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_complete",&populated.to_string()).unwrap()).unwrap();
+    let rewind=json!({"revision":completed["revision"],"requestedPoint":{"height":99,"hash":"07".repeat(32)}});
     let result:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_rewind",&rewind.to_string()).unwrap()).unwrap();
     assert_eq!(result["point"]["height"],96);
     let input=complete_target(g,96,result["point"]["hash"].as_str().unwrap());
