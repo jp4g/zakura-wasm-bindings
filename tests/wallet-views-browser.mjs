@@ -193,6 +193,8 @@ try {
     } else check(actual===expected,label+' value/type');
   };
   check(fixture.balanceCases.length>=4,'populated native fixtures required');
+  for(const scenario of ['coinbase-before-maturity','coinbase-at-maturity'])
+    check(fixture.balanceCases.some(test=>test.scenario===scenario),'scanned maturity fixture required: '+scenario);
   for(const [index,test] of fixture.balanceCases.entries()) {
     const balanceRoot=`${root}-balance-${index}`;
     let oldToken, persisted;
@@ -228,7 +230,7 @@ try {
       oldToken=opened;
       await owner.destroy();
     }
-    results.push({case:'native populated OPFS exact bigint/policy/purpose/abort/no mutation/destruction/reopen',index,queries:test.queries.length});
+    results.push({case:'native populated OPFS exact bigint/policy/purpose/abort/no mutation/destruction/reopen',index,scenario:test.scenario??(test.locked?'locked':'purpose'),queries:test.queries.length});
   }
   outcome = { pass: true, root, results, userAgent: navigator.userAgent, actualQuotaExhaustion: false, uaEviction: false };
 } catch (e) { outcome = { pass: false, root, results, error: { name: e.name, message: e.message, stack: e.stack } }; }

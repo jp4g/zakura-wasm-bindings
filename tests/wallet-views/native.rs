@@ -843,12 +843,30 @@ fn locked_balance_case(source:&Value)->Value {
 #[test]
 fn account_balance_scanner_empty_uneconomic_coinbase_change() { balance_scanner_edge_cases(); }
 
+#[test]
+fn account_balance_scanned_coinbase_maturity_transition() {
+    let cases=balance_scanner_edge_cases();
+    for (scenario,spendable,pending) in [("coinbase-before-maturity","0","70000"),("coinbase-at-maturity","70000","0")] {
+        let case=cases.iter().find(|case|case["scenario"]==scenario).expect("scanned maturity boundary fixture required");
+        assert_eq!(case["queries"].as_array().unwrap().len(),2);
+        for query in case["queries"].as_array().unwrap() {
+            assert_eq!(query["expected"]["amounts"]["transparent"]["coinbase"],json!({
+                "total":"70000","spendable":spendable,"locked":"0",
+                "changePendingConfirmation":"0","pendingSpendability":pending,"uneconomic":"0"
+            }));
+        }
+    }
+}
+
 fn balance_scanner_edge_cases()->Vec<Value> {
     use zcash_client_backend::{scanning::{scan_block,ScanningKeys,Nullifiers},data_api::{BlockMetadata,Balance}};
     use zcash_client_backend::proto::compact_formats::CompactSaplingSpend;
     use zcash_primitives::block::BlockHash;
     let mut cases=Vec::new();
-    for scenario in ["empty","uneconomic","coinbase","change"] {
+    for scenario in ["empty","uneconomic","coinbase","change","coinbase-before-maturity","coinbase-at-maturity"] {
+        // Pinned SQLite uses target = tip + 1 and target - mined >= 100.
+        let tip=match scenario {"change"=>101u32,"coinbase-before-maturity"=>198,"coinbase-at-maturity"=>199,_=>100};
+        let coinbase=scenario.starts_with("coinbase");
         let (path,g)=open();
         let mut input=fixture(10);
         input["birthday"].as_object_mut().unwrap().remove("recoverUntilExclusive");
@@ -864,7 +882,7 @@ fn balance_scanner_edge_cases()->Vec<Value> {
             let m=cb.chain_metadata.as_mut().unwrap();
             m.sapling_commitment_tree_size=0;m.orchard_commitment_tree_size=0;m.ironwood_commitment_tree_size=0;
         }
-        if scenario=="coinbase" {cb.vtx[0].index=0;}
+        if coinbase {cb.vtx[0].index=0;}
         let prior=BlockMetadata::from_parts(99u32.into(),BlockHash([7;32]),Some(0),Some(0),Some(0));
         let scan=scan_block(&p,cb,&keys,&Nullifiers::empty(),Some(&prior)).unwrap();
         let mut scans=Vec::new();
@@ -880,11 +898,24 @@ fn balance_scanner_edge_cases()->Vec<Value> {
             assert!(next.transactions()[0].sapling_outputs()[0].is_change(),"scanner identifies change from actual prior note spend");
             scans.push(scan);scans.push(next);
         } else {scans.push(scan);}
+        if coinbase {
+            // Advance actual scanned chain state, retaining the original transaction at 100.
+            for height in 101..=tip {
+                let prior=scans.last().unwrap().to_block_metadata();
+                let next=zcash_client_backend::proto::compact_formats::CompactBlock {
+                    height:height.into(),hash:vec![height as u8;32],prev_hash:prior.block_hash().0.to_vec(),time:height,
+                    chain_metadata:Some(zcash_client_backend::proto::compact_formats::ChainMetadata {
+                        sapling_commitment_tree_size:1,orchard_commitment_tree_size:1,ironwood_commitment_tree_size:1
+                    }),..Default::default()
+                };
+                scans.push(scan_block(&p,next,&keys,&Nullifiers::empty(),Some(&prior)).unwrap());
+            }
+        }
         crate::wallet::DOMAIN.with(|domain| {
             let mut d=domain.borrow_mut();let db=&mut d.active.as_mut().unwrap().wallet;
-            db.update_chain_tip(if scenario=="change" {101u32} else {100u32}.into()).unwrap();
+            db.update_chain_tip(tip.into()).unwrap();
             db.put_blocks(birthday.prior_chain_state(),scans).unwrap();
-            if scenario=="coinbase" {
+            if coinbase {
                 // Same transaction scanned at index zero supplies native coinbase identity.
                 let address=*db.get_last_generated_address_matching(account_id,UnifiedAddressRequest::AllAvailableKeys).unwrap().unwrap().transparent().unwrap();
                 let output=zcash_client_backend::wallet::WalletTransparentOutput::from_parts(
@@ -915,6 +946,14 @@ fn balance_scanner_edge_cases()->Vec<Value> {
                         assert_eq!(u64::from(b.unshielded_regular_balance().total()),0);
                         assert_eq!(u64::from(b.unshielded_coinbase_balance().total()),70_000);
                         assert_eq!(u64::from(b.unshielded_coinbase_balance().value_pending_spendability()),70_000);
+                    },
+                    "coinbase-before-maturity"|"coinbase-at-maturity"=>{
+                        assert_eq!(*b.unshielded_regular_balance(),Balance::ZERO);
+                        let cb=b.unshielded_coinbase_balance();
+                        assert_eq!([
+                            u64::from(cb.total()),u64::from(cb.spendable_value()),u64::from(cb.locked_value()),
+                            u64::from(cb.change_pending_confirmation()),u64::from(cb.value_pending_spendability()),u64::from(cb.uneconomic_value())
+                        ],if tip==199 {[70_000,70_000,0,0,0,0]} else {[70_000,0,0,0,70_000,0]});
                     },
                     "change"=>{
                         assert_eq!(u64::from(b.sapling_balance().total()),40_000,"spent note excluded");

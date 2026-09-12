@@ -231,6 +231,8 @@ for(let first=0;first<vectors.length;first+=2) {
 }
 
 // The native scanner emits populated databases plus getter truth into the existing fixture.
+for(const scenario of ['coinbase-before-maturity','coinbase-at-maturity'])
+  assert.ok(fixture.balanceCases.some(test=>test.scenario===scenario),'scanned maturity fixture required: '+scenario);
 for(const [index,test] of fixture.balanceCases.entries()) {
   const balanceRoot=fs.mkdtempSync(`${process.env.WALLET_TEST_ROOT}/views-balance-`);
   fs.writeFileSync(`${balanceRoot}/wallet.db`,Buffer.from(test.database,'hex'),{mode:0o600});
