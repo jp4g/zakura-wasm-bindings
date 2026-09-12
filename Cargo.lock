@@ -2038,8 +2038,6 @@ dependencies = [
 [[package]]
 name = "zakura-client-backend"
 version = "0.1.0-rc4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a70f61bb142b29dfd260561cccb21a657acdf86c2e901189817acdf3e25d5d6"
 dependencies = [
  "base64 0.22.1",
  "bech32",
@@ -2086,8 +2084,6 @@ dependencies = [
 [[package]]
 name = "zakura-client-sqlite"
 version = "0.1.0-rc4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b1a4276239587ef4090c28320246c76fb25a6a76b788020d0082e128153c53b"
 dependencies = [
  "bip32",
  "bitflags 2.13.2",
@@ -2227,15 +2223,24 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "hex",
+ "prost",
  "rand_core 0.10.1",
  "rusqlite",
  "serde_json",
  "uuid",
  "wasm-bindgen",
+ "zakura-client-backend",
  "zakura-client-sqlite",
+ "zakura-keys",
+ "zakura-orchard",
  "zakura-pczt",
  "zakura-primitives",
+ "zakura-sapling-crypto",
+ "zcash_address",
+ "zcash_note_encryption",
  "zcash_protocol",
+ "zcash_transparent",
+ "zip32",
 ]
 
 [[package]]
