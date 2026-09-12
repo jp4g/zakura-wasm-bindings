@@ -140,6 +140,7 @@ const {copyBytes}=await import('../bytes.mjs');
 assert.equal(copyBytes(new Uint8Array(),65536,'INVALID_ARGUMENT',0).length,0);
 assert.throws(()=>copyBytes(new Uint8Array(),65536,'INVALID_ARGUMENT'));
 const encoder=new TextEncoder();
+const mnemonicAddressRequest={format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'};
 const phrase12='abandon '.repeat(11)+'about';
 const vectors=[...[[12,'about'],[15,'address'],[18,'agent'],[21,'admit'],[24,'art']].map(([n,last])=>['abandon '.repeat(n-1)+last,'TREZOR']),
   [phrase12,undefined],[phrase12,''],[phrase12,'é'],[phrase12,'e\u0301'],[phrase12,'㍍ガバヴァぱばぐゞちぢ十人十色'],[phrase12,'TREZOR '],[phrase12,'TREZOR\0'],
@@ -183,7 +184,7 @@ for(const [number,[phrase,pass]] of vectors.entries()) {
     assert.equal((await owner.call('account_import_mnemonic',input,{mnemonic,passphrase})).error,'ACCOUNT_COLLISION');
     const args={accountId:saved.id};
     assert.equal(typeof (await owner.call('address_current',args)).result,'string');
-    assert.equal((await owner.call('address_next',args)).ok,true);
+    assert.equal((await owner.call('address_next',{...args,request:mnemonicAddressRequest})).ok,true);
     assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
     addresses=(await owner.call('address_list',args)).result;
     assert.equal((await owner.call('close')).ok,true);
@@ -206,7 +207,7 @@ for(const [number,[phrase,pass]] of vectors.entries()) {
     const result=await owner.call('account_import_hd',input,{seed});assert.equal(result.ok,true);
     const {id:ignore,...expected}=result.result,{id:ignored,...actual}=saved;assert.deepEqual(actual,expected);
     const args={accountId:result.result.id};
-    assert.equal((await owner.call('address_next',args)).ok,true);
+    assert.equal((await owner.call('address_next',{...args,request:mnemonicAddressRequest})).ok,true);
     assert.equal((await owner.call('address_at',{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}})).ok,true);
     assert.deepEqual((await owner.call('address_list',args)).result,addresses);
     assert.equal((await owner.call('close')).ok,true);

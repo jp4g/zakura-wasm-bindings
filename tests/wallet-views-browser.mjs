@@ -121,7 +121,7 @@ try {
     if(pass==='é')check((await first.call({...request,passphrase:encoder.encode('e\u0301')})).error==='ACCOUNT_COLLISION','NFKD passphrase');
     if(phrase===phrase12&&pass==='TREZOR')check((await first.call({...request,mnemonic:encoder.encode(phrase.replace(/[a-z]/g,c=>String.fromCharCode(c.charCodeAt(0)+0xfee0)))})).error==='ACCOUNT_COLLISION','NFKD mnemonic');
     check(typeof (await first.call({op:'address_current',generation:opened.generation,args})).result==='string','mnemonic current');
-    check((await first.call({op:'address_next',generation:opened.generation,args})).ok,'mnemonic next');
+    check((await first.call({op:'address_next',generation:opened.generation,args:{...args,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}}})).ok,'mnemonic next');
     check((await first.call({op:'address_at',generation:opened.generation,args:{...args,index:309485009821345068724781055n,request:{format:'unified',transparent:'omit',sapling:'omit',ironwood:'require'}}})).ok,'mnemonic at');
     const records=(await first.call({op:'address_list',generation:opened.generation,args})).result;
     check(mnemonic.every((b,i)=>b===encoder.encode(phrase)[i])&&passphrase.every((b,i)=>b===encoder.encode(pass)[i]),'mnemonic caller bytes');
