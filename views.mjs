@@ -99,14 +99,20 @@ export function viewsForStorage(storage) {
     generation,instance,
     call(token,owner,operation,args={},seed,mnemonic,passphrase) {
       if(poisoned)throw Error('DOMAIN_INVALID');
-      storage.binding(token,owner); // actual Rust generation + owned JS instance
-      if(!operations.has(operation)&&!scans.has(operation))throw TypeError('INVALID_ARGUMENT');
-      const descriptor=Object.getOwnPropertyDescriptor(args,'signal');
-      if(descriptor&&!('value' in descriptor))throw TypeError('INVALID_ARGUMENT');
-      const signal=descriptor?.value;
-      abort(signal,'none');
-      const input=JSON.stringify(scans.has(operation)?lowerScan(args,operation):lower(args));
-      abort(signal,'none');
+      let signal,input;
+      try {
+        storage.binding(token,owner); // actual Rust generation + owned JS instance
+        if(!operations.has(operation)&&!scans.has(operation))throw TypeError('INVALID_ARGUMENT');
+        const descriptor=Object.getOwnPropertyDescriptor(args,'signal');
+        if(descriptor&&!('value' in descriptor))throw TypeError('INVALID_ARGUMENT');
+        signal=descriptor?.value;
+        abort(signal,'none');
+        input=JSON.stringify(scans.has(operation)?lowerScan(args,operation):lower(args));
+        abort(signal,'none');
+      } catch(error) {
+        if(scans.has(operation))throw Object.assign(error instanceof Error?error:Error('INVALID_ARGUMENT'),{commit:'none'});
+        throw error;
+      }
       let result;
       let ownedSeed,ownedMnemonic,ownedPassphrase;
       try {
@@ -131,7 +137,7 @@ export function viewsForStorage(storage) {
       catch(error) {
         // Infallible upstream entropy/clock paths can trap. Never reuse that owner.
         if(typeof error!=='string'){poisoned=true;throw Error('DOMAIN_INVALID');}
-        throw Error(error);
+        throw Object.assign(Error(error),scans.has(operation)?{commit:'none'}:{});
       }
       finally {ownedSeed?.fill(0);ownedMnemonic?.fill(0);ownedPassphrase?.fill(0);}
       abort(signal,writes.has(operation)?'committed':'none');

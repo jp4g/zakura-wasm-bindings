@@ -24,14 +24,22 @@ const shared=new Uint8Array(new SharedArrayBuffer(1));
 const detached=new Uint8Array(1);structuredClone(detached.buffer,{transfer:[detached.buffer]});
 const accessor=[];Object.defineProperty(accessor,'0',{get(){throw Error('getter must not run');}});
 for(const blocks of [[],Array(17).fill(new Uint8Array(1)),Array(1),accessor,[shared],[detached],[new Uint8Array(1048577),new Uint8Array(1048576)]]) {
-  const before=calls;assert.throws(()=>call('scan_ingest_batch',{...batch,blocks}),/INVALID_ARGUMENT|RESOURCE_LIMIT/);assert.equal(calls,before);
+  const before=calls;assert.throws(()=>call('scan_ingest_batch',{...batch,blocks}),e=>/INVALID_ARGUMENT|RESOURCE_LIMIT/.test(e.message)&&e.commit==='none');assert.equal(calls,before);
 }
 for(const args of [{target:{...target,hash:new Uint8Array(31)}},{target:{...target,height:0xffffffff}},{target,blocks:[]},{get target(){throw Error('getter must not run');}}])assert.throws(()=>call('scan_plan',args),/INVALID_ARGUMENT/);
 assert.throws(()=>call('account_list',{target}),/INVALID_ARGUMENT/);
+afterCall=()=>{throw 'STALE_REVISION';};
+assert.throws(()=>call('scan_ingest_batch',batch),e=>e.message==='STALE_REVISION'&&e.commit==='none');
+afterCall=()=>{};
+assert.equal(call('scan_plan',{target}).revision,'native:1','native rejection leaves owner reusable');
 const before=calls, controller=new AbortController();controller.abort();
 assert.throws(()=>call('scan_plan',{target,signal:controller.signal}),e=>e.message==='ABORTED'&&e.commit==='none');assert.equal(calls,before);
 for(const operation of ['scan_plan','scan_ingest_batch']) {
   const controller=new AbortController();afterCall=()=>controller.abort();
   assert.throws(()=>call(operation,{...(operation==='scan_plan'?{target}:batch),signal:controller.signal}),e=>e.message==='ABORTED'&&e.commit==='committed');
 }
+afterCall=()=>{throw new WebAssembly.RuntimeError('trap');};
+assert.throws(()=>call('scan_plan',{target}),e=>e.message==='DOMAIN_INVALID'&&e.commit===undefined);
+afterCall=()=>{};
+assert.throws(()=>call('scan_plan',{target}),e=>e.message==='DOMAIN_INVALID'&&e.commit===undefined);
 console.log('PASS: bounded scan admission, exact byte lowering, native dispatch and cancellation receipts');
