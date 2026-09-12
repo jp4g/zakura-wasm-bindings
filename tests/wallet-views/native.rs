@@ -435,18 +435,24 @@ fn policy_scan_matrix(legacy: bool) {
 
 #[test]
 fn hd_explicit_native_index_and_next_survive_reopen() {
+    for length in [32,64] {
     let (path,g)=open();
     let input=json!({"birthday":fixture(40)["birthday"],"accountIndex":0,"name":"private HD"});
-    let account:Value=serde_json::from_str(&views_seed_call(g,"account_import_hd",&input.to_string(),vec![40;32]).unwrap()).unwrap();
+    let account:Value=serde_json::from_str(&views_seed_call(g,"account_import_hd",&input.to_string(),vec![40;length]).unwrap()).unwrap();
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let key=UnifiedSpendingKey::from_seed(&p,&vec![40;length],zip32::AccountId::ZERO).unwrap().to_unified_full_viewing_key();
+    let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
+    assert_eq!(call(g,"address_list",json!({"accountId":account["id"]})).unwrap(),json!([address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()]));
     assert_eq!(account["accountIndex"],0);
     assert_eq!(account["signerAttached"],false);
     crate::wallet::storage_close(g).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
     let input=json!({"birthday":fixture(40)["birthday"]});
-    let next:Value=serde_json::from_str(&views_seed_call(g,"account_create_hd",&input.to_string(),vec![40;32]).unwrap()).unwrap();
+    let next:Value=serde_json::from_str(&views_seed_call(g,"account_create_hd",&input.to_string(),vec![40;length]).unwrap()).unwrap();
     assert_eq!(next["accountIndex"],1);
     crate::wallet::storage_close(g).unwrap();
+    }
 }
 
 fn hd(g:u32, op:&str, seed:u8, input:Value) -> std::result::Result<Value,String> {
@@ -479,6 +485,21 @@ fn hd_gap_independent_seed_provenance_and_native_default() {
     let next=hd(g,"account_create_hd",40,args.clone()).unwrap();assert_eq!(next["accountIndex"],4);
     let independent=hd(g,"account_create_hd",41,args).unwrap();assert_eq!(independent["accountIndex"],0);
     for a in records {assert_eq!(call(g,"account_get",json!({"accountId":a["id"]})).unwrap(),a);}
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn hd_seed_domain_rejects_before_mutation() {
+    let (path,g)=open();
+    let before=std::fs::read(&path).unwrap();
+    for length in [33,0,16,31,48,63,65,252,253] {
+        for op in ["account_import_hd","account_create_hd"] {
+            let mut input=hd_input(0);
+            if op=="account_create_hd" {input.as_object_mut().unwrap().remove("accountIndex");}
+            assert_eq!(views_seed_call(g,op,&input.to_string(),vec![40;length]).unwrap_err(),"INVALID_ARGUMENT","{op} seed length {length}");
+            assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
+            assert_eq!(std::fs::read(&path).unwrap(),before,"invalid seed leaves DB bytes unchanged");
+        }
+    }
     crate::wallet::storage_close(g).unwrap();
 }
 #[test]

@@ -336,7 +336,7 @@ pub fn views_seed_call(generation: u32, operation: &str, input: &str, seed: Vec<
     execute_seed(generation,operation,input,&seed).map(|v|v.to_string()).map_err(|e|e.0)
 }
 fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<u8>) -> Result<Value> {
-    if input.len()>160000 || !(32..=252).contains(&seed.expose_secret().len()) {return Err("INVALID_ARGUMENT".into());}
+    if input.len()>160000 || !matches!(seed.expose_secret().len(),32|64) {return Err("INVALID_ARGUMENT".into());}
     let v:Value=serde_json::from_str(input).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
     let account_index=match operation {
         "account_import_hd"=>{fields(&v,&["accountIndex","birthday","name","enabledPools"])?;

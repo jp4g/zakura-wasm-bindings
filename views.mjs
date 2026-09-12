@@ -61,8 +61,8 @@ export async function initializeViews(wasm,backend,format,parameters,genesis) {
       let ownedSeed;
       try {
         if(operation==='account_import_hd'||operation==='account_create_hd') {
-          try {ownedSeed=copyBytes(seed,252,'INVALID_ARGUMENT');}catch {throw 'INVALID_ARGUMENT';}
-          if(ownedSeed.length<32)throw 'INVALID_ARGUMENT';
+          try {ownedSeed=copyBytes(seed,64,'INVALID_ARGUMENT');}catch {throw 'INVALID_ARGUMENT';}
+          if(ownedSeed.length!==32&&ownedSeed.length!==64)throw 'INVALID_ARGUMENT';
           result=binding.views_seed_call(token,operation,input,ownedSeed);
         } else {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
