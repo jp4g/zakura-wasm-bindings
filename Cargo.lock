@@ -2269,6 +2269,7 @@ dependencies = [
  "secp256k1",
  "secrecy",
  "serde_json",
+ "sha2 0.10.9",
  "uuid",
  "wasm-bindgen",
  "zakura-client-backend",

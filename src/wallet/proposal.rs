@@ -18,6 +18,28 @@ pub(super) fn initialize(conn: &mut Connection) -> std::result::Result<(),String
     if !exists { conn.execute_batch(SQL).map_err(|_|"STORAGE_INIT_FAILED")?; }
     Ok(())
 }
+// Each component has an explicit little-endian length; domains version both bindings.
+fn digest(domain:&[u8],parts:&[&[u8]])->String {
+    use sha2::{Digest,Sha256};
+    let mut hash=Sha256::new();
+    for part in std::iter::once(domain).chain(parts.iter().copied()) {
+        hash.update((part.len() as u64).to_le_bytes());hash.update(part);
+    }
+    hex::encode(hash.finalize())
+}
+pub(super) fn bind_review(mut review:Value,encoded:&[u8],parameters:&[u8],genesis:&[u8],policy:&Value)->Value {
+    let proposal=digest(b"zakura-wallet-proposal/1",&[review["operationId"].as_str().unwrap().as_bytes(),encoded]);
+    // Fixed-order arrays avoid depending on request object key order. All values
+    // are validated native projection/policy fields, not caller review data.
+    let policy=json!([policy["spendPools"],policy["transparent"],policy["changePool"],policy["feeRule"],
+        policy["confirmations"]["trusted"],policy["confirmations"]["untrusted"],policy["confirmations"]["allowZeroConfirmationShielding"],
+        policy["expiry"]["kind"],policy["expiry"]["blocks"],policy["lockExpiryBlocks"]]).to_string();
+    let commitment=digest(b"zakura-wallet-review/1",&[proposal.as_bytes(),parameters,genesis,
+        review["accountId"].as_str().unwrap().as_bytes(),review["revision"].as_str().unwrap().as_bytes(),policy.as_bytes()]);
+    // The exact stored protobuf plus policy/context binds every projected effect,
+    // including native input references and unresolved internal-output constraints.
+    review["proposalId"]=json!(proposal);review["reviewCommitment"]=json!(commitment);review
+}
 fn pool(value:&str)->Result<ShieldedPool> {
     match value {"sapling"=>Ok(ShieldedPool::Sapling),"ironwood"=>Ok(ShieldedPool::Ironwood),_=>Err("INVALID_ARGUMENT".into())}
 }
@@ -113,6 +135,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
         if domain.failed.is_some(){return Err("STORAGE_ERROR".into());}
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();
+        let parameters=active.bytes.clone();
         active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
             if operation=="proposal_list" {
                 let sequence=|name:&str|->Result<i64>{let s=string(input,name)?;let n=s.parse::<i64>().map_err(|_|Failure::from("INVALID_ARGUMENT"))?;if n<0||n.to_string()!=s{return Err("INVALID_ARGUMENT".into());}Ok(n)};
@@ -129,10 +152,12 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                 if bytes.len()!=32||hex::encode(&bytes)!=id{return Err("INVALID_ARGUMENT".into());}
                 let row=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,CASE WHEN length(policy)<=16384 THEN policy END,account,revision FROM ext_wallet_proposals WHERE operation=?1",[bytes],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,uuid::Uuid>(2)?,r.get::<_,String>(3)?))).optional()?;
                 return match row {None=>Ok(Value::Null),Some((plan,policy,account,revision))=>{
-                    let plan=wire::Proposal::decode(&plan[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
+                    let encoded=plan;
+                    let plan=wire::Proposal::decode(&encoded[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
                     plan.try_into_standard_proposal(&p,db).map_err(|_|Failure::from("STALE_PROPOSAL"))?;
                     let policy=serde_json::from_str(&policy).map_err(|_|Failure::from("STORAGE_ERROR"))?;
-                    review(&plan,&p,&account.to_string(),id,&policy,&revision)
+                    let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
+                    Ok(bind_review(review(&plan,&p,&account.to_string(),id,&policy,&revision)?,&encoded,&parameters,&genesis,&policy))
                 }};
             }
             if super::revision::read(ext)?!=string(input,"revision")? {return Err("STALE_REVISION".into());}
@@ -181,7 +206,8 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
             if encoded.len()>2097152{return Err("RESOURCE_LIMIT".into());}
             super::revision::advance(ext)?;
             let revision=super::revision::read(ext)?;
-            let review=review(&wire,&p,account_text,&hex::encode(id),policy,&revision)?;
+            let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
+            let review=bind_review(review(&wire,&p,account_text,&hex::encode(id),policy,&revision)?,&encoded,&parameters,&genesis,policy);
             let sequence=ext.query_row("SELECT COALESCE(MAX(sequence),0) FROM ext_wallet_proposals",[],|r|r.get::<_,i64>(0))?.checked_add(1).ok_or(Failure::from("RESOURCE_LIMIT"))?;
             ext.execute("INSERT INTO ext_wallet_proposals VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![sequence,&id[..],uuid,encoded,policy.to_string(),revision])?;
             Ok(review)
