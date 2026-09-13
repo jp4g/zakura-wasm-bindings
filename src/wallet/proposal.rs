@@ -111,7 +111,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
     super::DOMAIN.with(|domain|{
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
         if domain.failed.is_some(){return Err("STORAGE_ERROR".into());}
-        let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
+        let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();
         active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
             if operation=="proposal_list" {

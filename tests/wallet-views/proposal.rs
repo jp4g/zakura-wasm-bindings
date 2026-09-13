@@ -6,6 +6,7 @@ fn propose(g:u32,op:&str,input:Value)->std::result::Result<Value,String>{
 fn proposal_retains_native_selection_locks_and_reopens() {
     let fixture=full_scan_fixture();
     let (path,g)=open();
+    let (_,other)=open();
     let account=call(g,"account_import",fixture["import"].clone()).unwrap();
     let scan=|op:&str,v:Value|crate::wallet::scan::scan_call(g,op,&v.to_string()).map(|s|serde_json::from_str::<Value>(&s).unwrap()).unwrap();
     let mut revision=scan("scan_plan",json!({"target":fixture["target"]}))["revision"].clone();
@@ -41,7 +42,9 @@ fn proposal_retains_native_selection_locks_and_reopens() {
     assert_eq!(discovered["highWater"],"1");
     assert_eq!(propose(g,"proposal_get",json!({"operationId":discovered["items"][0]["operationId"]})).unwrap(),plan);
     assert_eq!(propose(g,"proposal_list",json!({"afterSequence":"1","highWater":"1","limit":1})).unwrap()["items"],json!([]));
+    assert_eq!(propose(other,"proposal_list",json!({"afterSequence":"0","limit":1})).unwrap()["items"],json!([]));
     crate::wallet::storage_close(g).unwrap();
+    crate::wallet::storage_close(other).unwrap();
 }
 
 #[test]
