@@ -8,6 +8,8 @@ mod sync;
 mod account_lifecycle;
 #[path = "proposal.rs"]
 mod proposal;
+#[path = "pczt_build.rs"]
+mod pczt_build;
 use serde_json::{json, Value};
 use zcash_client_backend::proto::service::TreeState;
 use prost::Message;
