@@ -6,4 +6,6 @@ A native instance admits at most 1024 signer tokens over its lifetime and 1024 l
 
 Attachment checks exact network registration and native `UnifiedFullViewingKey::subsumes_ufvk`, including outgoing authority and unknown components. A signer may therefore bind an account restricted to a matching subset of its components. View-only tracking remains recovery-required. Account identifiers alone never establish correspondence.
 
-This private slice is not a completed MemorySigner or fused execution path. Same-owner multiwallet/VFS routing and SDK owner/session lifetime composition are required before public integration; no secret migration or foreign-memory pointer is permitted.
+The same serialized native owner admits at most 32 open wallet databases within its existing aggregate memory ceiling. Each database has a distinct generation; native calls route by generation and VFS file handles retain their exact backend. Closing one wallet leaves the others usable. A failed close or native trap invalidates the whole owner; it cannot safely be reused.
+
+This private slice is not a completed MemorySigner or fused execution path. SDK owner/session lifetime composition and native PCZT authorization remain required before public integration; no secret migration or foreign-memory pointer is permitted.

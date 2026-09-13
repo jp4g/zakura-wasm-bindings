@@ -11,7 +11,7 @@ await facade.link(async name=>{
   return new vm.SyntheticModule(Object.keys(exports),function(){for(const [key,value]of Object.entries(exports))this.setExport(key,value);},{context});
 });
 await facade.evaluate();
-const owner={},views=facade.namespace.viewsForStorage({generation:1,instance:owner,binding(){}});
+const owner={},views=facade.namespace.viewsForStorage({generation:1,instance:owner,run:fn=>fn(),binding(){}});
 const call=(operation,args)=>views.call(1,owner,operation,args);
 const id='00000000-0000-0000-0000-000000000001',txid='ab'.repeat(32);
 result={items:[{balanceDelta:'-1',totalReceived:'2',totalSpent:'3',fee:null}],nextCursor:null};

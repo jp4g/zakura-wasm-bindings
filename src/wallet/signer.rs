@@ -24,7 +24,8 @@ pub fn signer_create_account(generation:u32, operation:&str, input:&str, mnemoni
         table.try_reserve(1).map_err(|_|"RESOURCE_LIMIT")?;
         let (parameters,genesis)=super::DOMAIN.with(|domain| {
             let mut domain=domain.try_borrow_mut().map_err(|_|"STORAGE_BUSY")?;
-            let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or("STALE_HANDLE")?;
+        if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+            let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or("STALE_HANDLE")?;
             let genesis=active.wallet.transactionally_with_extension(|_,ext| -> super::accounts::Result<Vec<u8>> {
                 Ok(ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?)
             }).map_err(|e|e.0)?;
@@ -41,6 +42,9 @@ pub fn signer_create_account(generation:u32, operation:&str, input:&str, mnemoni
 fn index(token:u32)->Result<usize,String> { token.checked_sub(1).map(|n|n as usize).ok_or("STALE_HANDLE".into()) }
 #[wasm_bindgen]
 pub fn signer_describe(token:u32)->Result<String,String> {
+    super::DOMAIN.with(|domain| {
+        if domain.try_borrow().map_err(|_|"STORAGE_BUSY")?.failed.is_some() {Err("DOMAIN_INVALID")} else {Ok(())}
+    })?;
     SIGNERS.with(|table| {
         let table=table.try_borrow().map_err(|_|"STORAGE_BUSY")?;
         let signer=table.get(index(token)?).and_then(Option::as_ref).ok_or("STALE_HANDLE")?;
@@ -74,7 +78,8 @@ pub fn signer_bind(token:u32,generation:u32,account_id:&str)->Result<String,Stri
         }
         let state=super::DOMAIN.with(|domain| {
             let mut domain=domain.try_borrow_mut().map_err(|_|"STORAGE_BUSY")?;
-            let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or("STALE_HANDLE")?;
+        if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+            let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or("STALE_HANDLE")?;
             if active.bytes!=signer.parameters {return Err("NETWORK_MISMATCH".to_string());}
             active.wallet.transactionally_with_extension(|db,ext| -> super::accounts::Result<&'static str> {
                 let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
@@ -98,4 +103,8 @@ pub fn signer_unbind(token:u32,generation:u32,account_id:&str)->Result<(),String
         let signer=table.get_mut(index(token)?).and_then(Option::as_mut).ok_or("STALE_HANDLE")?;
         signer.bindings.retain(|pair|*pair!=(generation,account_id)); Ok(())
     })
+}
+
+pub(super) fn is_bound(generation:u32,account_id:&str)->bool {
+    SIGNERS.with(|table| table.borrow().iter().flatten().any(|signer| signer.bindings.iter().any(|(g,id)|*g==generation && id.expose_uuid().to_string()==account_id)))
 }

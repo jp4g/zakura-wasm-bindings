@@ -178,7 +178,8 @@ fn address_list<W: WalletRead<AccountId=AccountUuid,Error=SqliteClientError>>(db
 fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
     super::DOMAIN.with(|domain| {
         let mut domain = domain.try_borrow_mut().map_err(|_| Failure::from("STORAGE_BUSY"))?;
-        let active = domain.active.as_mut().filter(|a| a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
+        if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+        let active = domain.active.iter_mut().find(|a| a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         match operation {
             "account_balance" => {
                 fields(v,&["accountId","confirmations"])?;
@@ -386,7 +387,8 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
     let name=match v.get("name") {None=>"",Some(Value::String(s)) if s.len()<=256=>s,_=>return Err("INVALID_ARGUMENT".into())};
     super::DOMAIN.with(|domain| {
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
-        let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
+        if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+        let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();
         if [NetworkUpgrade::Sapling,NetworkUpgrade::Nu6_3].iter().any(|nu|p.activation_height(*nu).is_none()) {return Err("POOL_UNAVAILABLE".into());}
         active.wallet.transactionally_with_extension(|db,ext| -> Result<(Value, UnifiedSpendingKey)> {
@@ -432,7 +434,17 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
 pub fn views_call(generation: u32, operation: &str, input: &str) -> std::result::Result<String,String> {
     if input.len()>160000 { return Err("INVALID_ARGUMENT".into()); }
     let value = serde_json::from_str(input).map_err(|_| "INVALID_ARGUMENT".to_string())?;
-    execute(generation,operation,&value).map(|v| v.to_string()).map_err(|e|e.0)
+    execute(generation,operation,&value).map(|mut v| {
+        let update=|record:&mut Value| {
+            if let Some(id)=record.get("id").and_then(Value::as_str) {
+                let attached=super::signer::is_bound(generation,id);
+                record["signerAttached"]=json!(attached);
+            }
+        };
+        if operation=="account_list" {for record in v.as_array_mut().expect("native account list") {update(record);}}
+        else if operation=="account_get" {update(&mut v);}
+        v.to_string()
+    }).map_err(|e|e.0)
 }
 #[cfg(test)]
 #[path = "../../tests/wallet-views/native.rs"]
