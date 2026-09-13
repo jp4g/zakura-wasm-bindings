@@ -13,7 +13,7 @@ default = ["viewing", "birthday", "standalone-pczt"]
 standalone-pczt = ["dep:pczt", "dep:postcard", "pczt/transparent", "pczt/sapling", "dep:zcash_script", "dep:zcash_transparent", "dep:serde_json"]
 birthday = ["dep:getrandom", "dep:zcash_client_backend", "zcash_client_backend/orchard", "dep:prost", "dep:serde_json", "dep:hex"]
 viewing = ["dep:zcash_keys", "zcash_keys/sapling", "zcash_keys/orchard", "zcash_keys/transparent-inputs", "dep:zcash_address", "dep:zcash_transparent", "dep:zip32", "dep:serde_json", "dep:hex"]
-wallet-storage = ["dep:secp256k1", "zcash_script/signature-validation","zcash_client_sqlite/serde","zcash_client_backend/pczt", "dep:zcash_note_encryption","dep:sha2","standalone-pczt", "dep:bip39", "dep:secrecy", "dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt", "pczt/io-finalizer", "pczt/signer", "dep:sapling", "dep:orchard", "dep:zcash_client_backend", "dep:zcash_keys", "dep:prost", "dep:zip32", "dep:serde_json", "dep:hex", "dep:zcash_address", "dep:zcash_transparent"]
+wallet-storage = ["dep:time", "dep:secp256k1", "zcash_script/signature-validation","zcash_client_sqlite/serde","zcash_client_backend/pczt", "dep:zcash_note_encryption","dep:sha2","standalone-pczt", "dep:bip39", "dep:secrecy", "dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt", "pczt/io-finalizer", "pczt/signer", "dep:sapling", "dep:orchard", "dep:zcash_client_backend", "dep:zcash_keys", "dep:prost", "dep:zip32", "dep:serde_json", "dep:hex", "dep:zcash_address", "dep:zcash_transparent"]
 
 [[test]]
 name = "wallet_native"
@@ -59,6 +59,8 @@ serde_json = "=1.0.151"
 hex = "=0.4.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Upstream finalization and fused execution call OffsetDateTime::now_utc directly.
+time = { version = "=0.3.55", features = ["wasm-bindgen"], optional = true }
 getrandom = { version = "=0.4.3", features = ["wasm_js"], optional = true }
 uuid = { version = "=1.26.1", features = ["js"], optional = true }
 
