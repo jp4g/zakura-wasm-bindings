@@ -110,12 +110,12 @@ pub fn pczt_build_call(generation:u32,operation:&str,input:&str)->std::result::R
     execute(generation,operation,&input,None).map(|v|v.to_string()).map_err(|e|e.0)
 }
 #[wasm_bindgen]
-pub fn pczt_import_call(generation:u32,operation_id:&str,bytes:&[u8])->std::result::Result<String,String>{
+pub fn pczt_import_call(generation:u32,operation_id:&str,bytes:&[u8],maximum:u32)->std::result::Result<String,String>{
     if operation_id.len()!=64{return Err("INVALID_ARGUMENT".into());}
-    if bytes.len()>4194304{return Err("RESOURCE_LIMIT".into());}
-    execute(generation,"pczt_import",&json!({"operationId":operation_id}),Some(bytes)).map(|v|v.to_string()).map_err(|e|e.0)
+    if maximum==0||maximum>4194304||bytes.len()>maximum as usize{return Err("RESOURCE_LIMIT".into());}
+    execute(generation,"pczt_import",&json!({"operationId":operation_id}),Some((bytes,maximum))).map(|v|v.to_string()).map_err(|e|e.0)
 }
-fn execute(generation:u32,operation:&str,input:&Value,incoming:Option<&[u8]>)->Result<Value> {
+fn execute(generation:u32,operation:&str,input:&Value,incoming:Option<(&[u8],u32)>)->Result<Value> {
     fields(input,match operation {"pczt_build"=>&["operationId","proposalId","reviewCommitment"][..],"pczt_get_artifact"=>&["operationId","artifactId"],"pczt_import"=>&["operationId"],_=>return Err("INVALID_ARGUMENT".into())})?;
     let id=string(input,"operationId")?;let operation_bytes=hex::decode(id).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
     if operation_bytes.len()!=32||hex::encode(&operation_bytes)!=id{return Err("INVALID_ARGUMENT".into());}
@@ -145,11 +145,11 @@ fn execute(generation:u32,operation:&str,input:&Value,incoming:Option<&[u8]>)->R
             let (artifact,bytes,outputs)=if let Some((artifact,bytes))=retained {
                 if artifact!=super::proposal::digest(b"zakura-wallet-pczt/1",&[id.as_bytes(),&bytes]){return Err("STORAGE_ERROR".into());}
                 let mut value=pczt::Pczt::parse(&bytes).map_err(|_|Failure::from("STORAGE_ERROR"))?;
-                let (artifact,bytes)=if let Some(incoming)=incoming {
-                    let imported=crate::standalone_pczt::parse_standalone_pczt(&parameters,&genesis,wire.min_target_height,review["branchId"].as_u64().ok_or_else(bad)? as u32,incoming,4194304).map_err(Failure)?.into_value();
+                let (artifact,bytes)=if let Some((incoming,maximum))=incoming {
+                    let imported=crate::standalone_pczt::parse_standalone_pczt(&parameters,&genesis,wire.min_target_height,review["branchId"].as_u64().ok_or_else(bad)? as u32,incoming,maximum).map_err(Failure)?.into_value();
                     value=super::pczt_import::combine(value,imported)?;
                     let merged=value.clone().serialize().map_err(|_|bad())?;
-                    if merged.len()>4194304{return Err("RESOURCE_LIMIT".into());}
+                    if merged.len()>maximum as usize{return Err("RESOURCE_LIMIT".into());}
                     let next=super::proposal::digest(b"zakura-wallet-pczt/1",&[id.as_bytes(),&merged]);
                     if next!=artifact {
                         // Keep every issued identity; repeated exact imports do not mutate revision.

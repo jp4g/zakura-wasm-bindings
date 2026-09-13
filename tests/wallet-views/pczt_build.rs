@@ -132,7 +132,7 @@ fn pczt_import_retains_versions_and_rolls_back_invalid_returns() {
     let original=invoke(g,"pczt_build",request(&plan)).unwrap();
     let bytes=hex::decode(original["bytes"].as_str().unwrap()).unwrap();
     let signed=crate::wallet::signer::signer_authorize(token,PARAMS,&[3;32],40001,plan["branchId"].as_u64().unwrap() as u32,&bytes,4194304).unwrap();
-    let import=|g,bytes:&[u8]|crate::wallet::pczt_build::pczt_import_call(g,plan["operationId"].as_str().unwrap(),bytes).map(|s|serde_json::from_str::<Value>(&s).unwrap());
+    let import=|g,bytes:&[u8]|crate::wallet::pczt_build::pczt_import_call(g,plan["operationId"].as_str().unwrap(),bytes,4194304).map(|s|serde_json::from_str::<Value>(&s).unwrap());
     let conn=rusqlite::Connection::open(&path).unwrap();
     let before=policy_rows(&conn,&["ext_wallet_pczt","ext_wallet_pczt_artifacts","ext_wallet_revision"]);
     let mut changed=serde_json::to_value(pczt::v2::Pczt::try_from(pczt::Pczt::parse(&signed).unwrap()).unwrap()).unwrap();
@@ -143,10 +143,14 @@ fn pczt_import_retains_versions_and_rolls_back_invalid_returns() {
     pczt::roles::verifier::Verifier::new(pczt::Pczt::parse(&signed).unwrap()).with_sapling::<(),_>(|bundle|{let bytes:[u8;64]=bundle.spends()[0].spend_auth_sig().clone().unwrap().into();signature=bytes.to_vec();Ok(())}).unwrap();
     let mut invalid_signed=signed.clone();let at=invalid_signed.windows(64).position(|part|part==signature).unwrap();invalid_signed[at+63]^=1;
     assert_eq!(import(g,&invalid_signed).unwrap_err(),"INVALID_PCZT");
-    assert_eq!(crate::wallet::pczt_build::pczt_import_call(g,&"00".repeat(32),&signed).unwrap_err(),"OPERATION_NOT_FOUND");
+    assert_eq!(crate::wallet::pczt_build::pczt_import_call(g,&"00".repeat(32),&signed,4194304).unwrap_err(),"OPERATION_NOT_FOUND");
     conn.execute_batch("CREATE TRIGGER import_fail BEFORE INSERT ON ext_wallet_pczt_artifacts BEGIN SELECT RAISE(ABORT,'synthetic import failure'); END").unwrap();
     assert_eq!(import(g,&signed).unwrap_err(),"STORAGE_ERROR");
     conn.execute_batch("DROP TRIGGER import_fail").unwrap();
+    assert_eq!(policy_rows(&conn,&["ext_wallet_pczt","ext_wallet_pczt_artifacts","ext_wallet_revision"]),before);
+    let reduced=crate::standalone_pczt::parse_standalone_pczt(PARAMS,&[3;32],40001,plan["branchId"].as_u64().unwrap() as u32,&signed,4194304).unwrap().redact("zakura-signer-full/1").unwrap().serialize().unwrap();
+    assert!(reduced.len()<signed.len());
+    assert_eq!(crate::wallet::pczt_build::pczt_import_call(g,plan["operationId"].as_str().unwrap(),&reduced,reduced.len() as u32).unwrap_err(),"RESOURCE_LIMIT");
     assert_eq!(policy_rows(&conn,&["ext_wallet_pczt","ext_wallet_pczt_artifacts","ext_wallet_revision"]),before);
     let accepted=import(g,&signed).unwrap();assert_eq!(accepted["authorizationComplete"],true);assert_ne!(accepted["artifactId"],original["artifactId"]);
     let after=policy_rows(&conn,&["ext_wallet_pczt","ext_wallet_pczt_artifacts","ext_wallet_revision"]);

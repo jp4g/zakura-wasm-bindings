@@ -200,8 +200,8 @@ Actual WASM and SDK qualification is separate from these native source fixtures.
 
 ### Retained PCZT import candidate
 
-`pczt_import_call(generation, operationId, bytes)` accepts at most 4 MiB for an
-already-built operation. Native combination and transaction-effect digests bind
+`pczt_import_call(generation, operationId, bytes, maximum)` accepts at most 4 MiB for an
+already-built operation. The configured maximum also bounds the merged full copy before commit. Native combination and transaction-effect digests bind
 returned data; native signature roles and the native transparent script interpreter
 validate supplied authorizations, including finalized scriptSig data. Partial
 signatures remain permitted. This does not verify proofs or finalize transactions.
