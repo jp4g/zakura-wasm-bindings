@@ -8,7 +8,7 @@ const operations = new Set(['account_balance','account_import','account_import_h
 const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','wallet_utxos']);
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
-const proposals = new Set(['proposal_create','proposal_get','proposal_list']);
+const proposals = new Set(['proposal_create','proposal_get','proposal_list','proposal_lookup_intent']);
 const pczt = new Set(['pczt_build','pczt_get_artifact']);
 const lifecycle = new Set(['account_remove','account_check_key']);
 const scans = new Set([...pczt,...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
@@ -73,24 +73,34 @@ function scanHex(bytes) {
     return new TextDecoder().decode(ascii);
 }
 function lowerProposal(args, operation) {
-  const input=scanFields(args,[...(operation==='proposal_create'?['revision','accountId','payments','policy','maxFee']:operation==='proposal_get'?['operationId']:['afterSequence','highWater','limit']),'signal']);delete input.signal;
+  const input=scanFields(args,[...((operation==='proposal_create'||operation==='proposal_lookup_intent')?['revision','accountId','payments','policy','maxFee','kind','threshold','fromAddresses','idempotencyKey']:operation==='proposal_get'?['operationId']:['afterSequence','highWater','limit']),'signal']);delete input.signal;
   const text=(value,max)=>{if(typeof value!=='string'||value.length>max)throw TypeError('INVALID_ARGUMENT');return value;};
   const decimal=value=>{text(value,20);if(!/^(0|[1-9][0-9]*)$/.test(value))throw TypeError('INVALID_ARGUMENT');return value;};
   const money=value=>{if(typeof value!=='bigint'||value<0n||value>2100000000000000n)throw TypeError('INVALID_ARGUMENT');return value.toString();};
-  const list=(value,max,project)=>{
+  const list=(value,max,project,min=1)=>{
     if(!Array.isArray(value))throw TypeError('INVALID_ARGUMENT');
     const length=Object.getOwnPropertyDescriptor(value,'length')?.value;
-    if(!Number.isInteger(length)||length<1||length>max||Reflect.ownKeys(value).length!==length+1)throw TypeError('RESOURCE_LIMIT');
+    if(!Number.isInteger(length)||length<min||length>max||Reflect.ownKeys(value).length!==length+1)throw TypeError('RESOURCE_LIMIT');
     return Array.from({length},(_,i)=>{const d=Object.getOwnPropertyDescriptor(value,String(i));if(!d||!('value'in d))throw TypeError('INVALID_ARGUMENT');return project(d.value);});
   };
   if(operation==='proposal_get') {if(!/^[0-9a-f]{64}$/.test(text(input.operationId,64)))throw TypeError('INVALID_ARGUMENT');return input;}
   if(operation==='proposal_list') {decimal(input.afterSequence);if(Object.hasOwn(input,'highWater'))decimal(input.highWater);if(!Number.isInteger(input.limit)||input.limit<1||input.limit>200)throw TypeError('INVALID_ARGUMENT');return input;}
-  text(input.revision,128);text(input.accountId,36);
-  input.payments=list(input.payments,16,value=>{
+  if(operation==='proposal_create'||Object.hasOwn(input,'revision'))text(input.revision,128);
+  if(operation==='proposal_lookup_intent'&&!Object.hasOwn(input,'idempotencyKey'))throw TypeError('INVALID_ARGUMENT');
+  text(input.accountId,36);
+  if(Object.hasOwn(input,'idempotencyKey')&&text(input.idempotencyKey,1024).length===0)throw TypeError('INVALID_ARGUMENT');
+  if(input.kind==='shield') {
+    if(Object.hasOwn(input,'payments'))throw TypeError('INVALID_ARGUMENT');
+    input.threshold=money(input.threshold);
+    if(Object.hasOwn(input,'fromAddresses'))input.fromAddresses=list(input.fromAddresses,256,value=>text(value,2048),0);
+  }else {
+    if(Object.hasOwn(input,'kind')||Object.hasOwn(input,'threshold')||Object.hasOwn(input,'fromAddresses'))throw TypeError('INVALID_ARGUMENT');
+    input.payments=list(input.payments,16,value=>{
     const payment=scanFields(value,['to','amount','memo']);text(payment.to,2048);payment.amount=money(payment.amount);
     if(Object.hasOwn(payment,'memo')&&payment.memo!==null)payment.memo=scanHex(copyBytes(payment.memo,512,'INVALID_ARGUMENT',0));
     return payment;
   });
+  }
   if(Object.hasOwn(input,'maxFee'))input.maxFee=money(input.maxFee);
   const policy=scanFields(input.policy,['spendPools','transparent','changePool','feeRule','confirmations','expiry','lockExpiryBlocks']);
   policy.spendPools=list(policy.spendPools,3,value=>text(value,16));
