@@ -39,7 +39,8 @@ function string(ptr) {
   const b = bytes(ptr, Math.min(512, memory.buffer.byteLength - (ptr >>> 0)));
   const end = b.indexOf(0);
   if (end < 0) throw Error('unterminated path');
-  return new TextDecoder('utf-8', { fatal: true }).decode(b.subarray(0, end));
+  const path = b.subarray(0, end);
+  return new TextDecoder('utf-8', { fatal: true }).decode(path.buffer instanceof ArrayBuffer ? path : Uint8Array.from(path));
 }
 function name(ptr) {
   const value = string(ptr);
