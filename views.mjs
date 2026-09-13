@@ -9,8 +9,9 @@ const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','w
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const proposals = new Set(['proposal_create','proposal_get','proposal_list']);
-const scans = new Set([...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
-const writes = new Set(['proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
+const lifecycle = new Set(['account_remove','account_check_key']);
+const scans = new Set([...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
+const writes = new Set(['account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -101,6 +102,12 @@ function lowerProposal(args, operation) {
   scanHeight(policy.lockExpiryBlocks);input.policy=policy;return input;
 }
 function lowerScan(args, operation) {
+  if(lifecycle.has(operation)){
+    const input=scanFields(args,operation==='account_remove'?['accountId','acknowledge','signal']:['accountId','viewingKey','signal']);
+    delete input.signal;
+    for(const value of Object.values(input))if(typeof value!=='string'||value.length>140000)throw TypeError('INVALID_ARGUMENT');
+    return input;
+  }
   if (proposals.has(operation)) return lowerProposal(args,operation);
   if (queries.has(operation)) {
     const inventory=operation==='wallet_notes'||operation==='wallet_utxos';
@@ -249,7 +256,7 @@ export function viewsForStorage(storage) {
           result=storage.run(()=>binding.views_seed_call(token,operation,input,ownedSeed));
         } else {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
-          result=storage.run(()=>proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
+          result=storage.run(()=>lifecycle.has(operation)?binding.account_lifecycle_call(token,operation,input):proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
             scans.has(operation)?binding.scan_call(token,operation,input):binding.views_call(token,operation,input));
         }
       }

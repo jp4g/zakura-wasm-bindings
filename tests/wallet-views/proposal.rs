@@ -26,6 +26,7 @@ fn proposal_retains_native_selection_locks_and_reopens() {
     assert_eq!(propose(g,"proposal_create",legacy).unwrap_err(),"INVALID_ARGUMENT");
     assert_eq!(propose(g,"proposal_list",json!({"afterSequence":"0","limit":200})).unwrap()["items"],json!([]));
     let plan=propose(g,"proposal_create",input.clone()).unwrap();
+    assert_eq!(crate::wallet::account_lifecycle::account_lifecycle_call(g,"account_remove",&json!({"accountId":account["id"],"acknowledge":"deletes-local-history"}).to_string()).unwrap_err(),"RECOVERY_REQUIRED");
     assert_eq!(plan["steps"][0]["inputs"][0]["pool"],"sapling");
     assert_eq!(plan["steps"][0]["outputs"][0]["address"],address["address"]);
     assert_eq!(plan["steps"][0]["outputs"][1]["address"],Value::Null);
@@ -45,6 +46,13 @@ fn proposal_retains_native_selection_locks_and_reopens() {
     assert_eq!(propose(other,"proposal_list",json!({"afterSequence":"0","limit":1})).unwrap()["items"],json!([]));
     crate::wallet::storage_close(g).unwrap();
     crate::wallet::storage_close(other).unwrap();
+    // Isolate the independent native lock guard from the journal guard above.
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DELETE FROM ext_wallet_proposals",[]).unwrap();drop(conn);
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(crate::wallet::account_lifecycle::account_lifecycle_call(g,"account_remove",&json!({"accountId":account["id"],"acknowledge":"deletes-local-history"}).to_string()).unwrap_err(),"INPUT_LOCKED");
+    assert!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap().is_object());
+    crate::wallet::storage_close(g).unwrap();
 }
 
 #[test]
