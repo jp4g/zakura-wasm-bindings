@@ -9,6 +9,14 @@ if(isMainThread) {
   const worker=new Worker(new URL(import.meta.url));
   await new Promise((resolve,reject)=>{worker.once('error',reject);worker.once('exit',code=>code===0?resolve():reject(Error(`worker exit ${code}`)));});
 } else {
+const sharedHost=await import('../wallet-host/storage-host.mjs?shared-entropy');
+const sharedMemory=new WebAssembly.Memory({initial:1,maximum:1,shared:true});sharedHost.attachMemory(sharedMemory,true);
+const originalRandom=crypto.getRandomValues;let entropyCalls=0,scratch;
+try {
+  crypto.getRandomValues=value=>{assert.ok(value.buffer instanceof ArrayBuffer);entropyCalls++;scratch=value;value.fill(9);return value;};
+  assert.equal(sharedHost.entropy(0,32),32);assert.ok(new Uint8Array(sharedMemory.buffer,0,32).every(value=>value===9));assert.ok(scratch.every(value=>value===0));
+  assert.equal(sharedHost.entropy(65530,32),0);assert.equal(entropyCalls,1,'bounds checked before entropy callback');
+} finally {crypto.getRandomValues=originalRandom;}
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'wallet-host-multi-'));
 const directories=['one','two'].map(name=>{const p=path.join(root,name);fs.mkdirSync(p,{mode:0o700});return p;});
 const owners=directories.map(p=>acquire(p,{create:true}));

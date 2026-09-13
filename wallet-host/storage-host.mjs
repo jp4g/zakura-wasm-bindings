@@ -161,7 +161,11 @@ export function host_error(size, ptr) {
 }
 export function entropy(ptr, n) {
   if (n < 0 || n > 65536) throw Error('entropy bounds');
-  try { crypto.getRandomValues(bytes(ptr, n)); return n; } catch { return 0; }
+  try {
+    const target = bytes(ptr, n), ordinary = target.buffer instanceof ArrayBuffer ? target : new Uint8Array(n);
+    try { crypto.getRandomValues(ordinary); if (ordinary !== target) target.set(ordinary); return n; }
+    finally { if (ordinary !== target) ordinary.fill(0); }
+  } catch { return 0; }
 }
 export function utc_ms() { return Date.now(); }
 export function sleep(us) {
