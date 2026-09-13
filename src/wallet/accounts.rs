@@ -8,7 +8,7 @@ use zcash_client_backend::{data_api::{Account, AccountBirthday, AccountPurpose, 
 use zcash_client_backend::data_api::ll::LowLevelWalletRead;
 use zcash_keys::keys::transparent::gap_limits::{AddressStore, GapLimits};
 use zcash_client_sqlite::{AccountUuid, error::SqliteClientError};
-use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey, UnifiedAddressRequest, ReceiverRequirement};
+use zcash_keys::keys::{UnifiedSpendingKey, UnifiedFullViewingKey, UnifiedIncomingViewingKey, UnifiedAddressRequest, ReceiverRequirement};
 use zcash_address::unified::{Ufvk, Fvk, Encoding, Container};
 use zcash_transparent::{address::TransparentAddress, keys::{IncomingViewingKey, NonHardenedChildIndex, TransparentKeyScope}};
 use zcash_client_backend::wallet::Exposure;
@@ -343,7 +343,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
 #[wasm_bindgen]
 pub fn views_seed_call(generation: u32, operation: &str, input: &str, seed: Vec<u8>) -> std::result::Result<String,String> {
     let seed=SecretVec::new(seed);
-    execute_seed(generation,operation,input,&seed).map(|v|v.to_string()).map_err(|e|e.0)
+    execute_seed(generation,operation,input,&seed).map(|(v,_)|v.to_string()).map_err(|e|e.0)
 }
 fn normalized_secret(bytes: &SecretVec<u8>, limit: usize) -> Result<SecretString> {
     if bytes.expose_secret().len()>limit {return Err("INVALID_ARGUMENT".into());}
@@ -356,18 +356,17 @@ fn normalized_secret(bytes: &SecretVec<u8>, limit: usize) -> Result<SecretString
 }
 #[wasm_bindgen]
 pub fn views_mnemonic_call(generation: u32, input: &str, mnemonic: Vec<u8>, passphrase: Vec<u8>) -> std::result::Result<String,String> {
-    let mnemonic=SecretVec::new(mnemonic);
-    let passphrase=SecretVec::new(passphrase);
-    (|| -> Result<Value> {
-        let mnemonic=normalized_secret(&mnemonic,4096)?;
-        let passphrase=normalized_secret(&passphrase,65536)?;
-        let mnemonic=Mnemonic::parse_in_normalized(Language::English,mnemonic.expose_secret()).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
-        let seed=Secret::new(mnemonic.to_seed_normalized(passphrase.expose_secret()));
-        let seed=SecretVec::new(seed.expose_secret().to_vec());
-        execute_seed(generation,"account_import_hd",input,&seed)
-    })().map(|v|v.to_string()).map_err(|e|e.0)
+    mnemonic_account(generation,"account_import_hd",input,SecretVec::new(mnemonic),SecretVec::new(passphrase)).map(|(v,_)|v.to_string()).map_err(|e|e.0)
 }
-fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<u8>) -> Result<Value> {
+pub(super) fn mnemonic_account(generation: u32, operation: &str, input: &str, mnemonic: SecretVec<u8>, passphrase: SecretVec<u8>) -> Result<(Value, UnifiedSpendingKey)> {
+    let mnemonic=normalized_secret(&mnemonic,4096)?;
+    let passphrase=normalized_secret(&passphrase,65536)?;
+    let mnemonic=Mnemonic::parse_in_normalized(Language::English,mnemonic.expose_secret()).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+    let seed=Secret::new(mnemonic.to_seed_normalized(passphrase.expose_secret()));
+    let seed=SecretVec::new(seed.expose_secret().to_vec());
+    execute_seed(generation,operation,input,&seed)
+}
+fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<u8>) -> Result<(Value, UnifiedSpendingKey)> {
     if input.len()>160000 || !matches!(seed.expose_secret().len(),32|64) {return Err("INVALID_ARGUMENT".into());}
     let v:Value=serde_json::from_str(input).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
     let account_index=match operation {
@@ -390,7 +389,7 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
         let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();
         if [NetworkUpgrade::Sapling,NetworkUpgrade::Nu6_3].iter().any(|nu|p.activation_height(*nu).is_none()) {return Err("POOL_UNAVAILABLE".into());}
-        active.wallet.transactionally_with_extension(|db,ext| -> Result<Value> {
+        active.wallet.transactionally_with_extension(|db,ext| -> Result<(Value, UnifiedSpendingKey)> {
             let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
             let birthday_value=if account_index.is_some() {
                 v.get("birthday").ok_or(Failure::from("INVALID_BIRTHDAY"))?.clone()
@@ -418,8 +417,6 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
                 let (id,usk)=db.create_account(name,seed,&birthday,None)?;
                 (db.get_account(id)?.ok_or(Failure::from("STORAGE_ERROR"))?,usk)
             };
-            // No signer exists in this prerequisite. Ordinary drop is not a RAM-erasure claim.
-            drop(usk);
             // Native add_account can upgrade a partial UFVK and return its old UUID.
             if existing.contains(&account.id()) {return Err("ACCOUNT_COLLISION".into());}
             let (ua,j)=account.uivk().default_address(UnifiedAddressRequest::AllAvailableKeys).map_err(|_|Failure::from("ADDRESS_UNAVAILABLE"))?;
@@ -427,7 +424,7 @@ fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<
             let metadata=json!({"birthday":birthday_value,"name":v.get("name"),"enabledPools":defaults});
             ext.execute("INSERT INTO ext_viewing_accounts(account_uuid,metadata) VALUES(?1,?2)",rusqlite::params![account.id().expose_uuid(),metadata.to_string()])?;
             super::revision::advance(ext)?;
-            stored_record(ext,&account)
+            Ok((stored_record(ext,&account)?,usk))
         })
     })
 }

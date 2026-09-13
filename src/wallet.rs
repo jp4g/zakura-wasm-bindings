@@ -167,6 +167,7 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
         let mut domain = domain.try_borrow_mut().map_err(|_| "STORAGE_BUSY")?;
         if !domain.active.as_ref().is_some_and(|a| a.generation == generation) { return Err("STALE_HANDLE".into()); }
         let active = domain.active.take().ok_or("STALE_HANDLE")?;
+        signer::detach_wallet(generation);
         drop(active.wallet);
         let error = active.receipt.borrow().error.clone();
         if let Some(error) = error { domain.failed = Some(active.receipt); return Err(error); }
@@ -179,6 +180,7 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
 mod schema_prefix;
 
 mod accounts;
+pub mod signer;
 
 mod scan;
 mod sync;

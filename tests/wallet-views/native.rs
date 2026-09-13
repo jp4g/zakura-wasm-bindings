@@ -1261,3 +1261,41 @@ fn wallet_memory_is_explicit_and_ephemeral() {
     assert_eq!(call(fresh,"account_list",json!({})).unwrap(),json!([]));
     crate::wallet::storage_close(fresh).unwrap();
 }
+
+#[test]
+fn native_signer_outlives_wallet_and_binds_reopened_account() {
+    use crate::wallet::signer::*;
+    let (path,g)=open();
+    let input=hd_input(0).to_string();
+    let created:Value=serde_json::from_str(&signer_create_account(g,"account_import_hd",&input,MNEMONIC.as_bytes().to_vec(),vec![]).unwrap()).unwrap();
+    let token=created["signerToken"].as_u64().unwrap() as u32;
+    let id=created["account"]["id"].as_str().unwrap();
+    let description=signer_describe(token).unwrap();
+    assert_eq!(signer_bind(token,g,id).unwrap(),"ready");
+    assert_eq!(signer_create_account(g,"account_import_hd",&input,MNEMONIC.as_bytes().to_vec(),vec![]).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(signer_describe(token+1).unwrap_err(),"STALE_HANDLE");
+    crate::wallet::storage_close(g).unwrap();
+    assert_eq!(signer_describe(token).unwrap(),description);
+    let reopened=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(signer_bind(token,reopened,id).unwrap(),"ready");
+    signer_unbind(token,reopened,id).unwrap();
+    crate::wallet::storage_close(reopened).unwrap();
+    let (_other,g2)=open();
+    let mut viewing=fixture(11);
+    viewing["viewingKey"]=serde_json::from_str::<Value>(&description).unwrap()["viewingKey"].clone();
+    let second=call(g2,"account_import",viewing).unwrap();
+    assert_eq!(signer_bind(token,g2,second["id"].as_str().unwrap()).unwrap(),"ready");
+    let different=call(g2,"account_import",fixture(12)).unwrap();
+    assert_eq!(signer_bind(token,g2,different["id"].as_str().unwrap()).unwrap_err(),"SIGNER_MISMATCH");
+    crate::wallet::storage_close(g2).unwrap();
+    let (_partial,g2)=open();
+    let mut viewing=fixture(11);
+    viewing["viewingKey"]=serde_json::from_str::<Value>(&description).unwrap()["viewingKey"].clone();
+    viewing["enabledPools"]=json!(["sapling"]);
+    let second=call(g2,"account_import",viewing).unwrap();
+    assert_eq!(signer_bind(token,g2,second["id"].as_str().unwrap()).unwrap(),"ready");
+    signer_release(token).unwrap();
+    assert_eq!(signer_describe(token).unwrap_err(),"STALE_HANDLE");
+    assert_eq!(signer_bind(token,g2,second["id"].as_str().unwrap()).unwrap_err(),"STALE_HANDLE");
+    crate::wallet::storage_close(g2).unwrap();
+}
