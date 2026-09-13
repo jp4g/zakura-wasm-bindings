@@ -17,7 +17,9 @@ await facade.link(async name=>{
     assert.equal(spend.byteLength,0);assert.equal(output.byteLength,0);if(failure)throw failure;after();return nativeResult();
   },pczt_finalize_call(g,operationId,artifactId,spend,output,maximum){
     calls++;assert.equal(g,1);assert.equal(operationId,request.operationId);assert.equal(artifactId,'04'.repeat(32));assert.equal(maximum,16);assert.equal(spend.length,0);assert.equal(output.length,0);if(failure)throw failure;after();return JSON.stringify({bytes:'0001',txid:'05'.repeat(32)});
-  },finalized_get(g,operationId){calls++;assert.equal(operationId,request.operationId);return JSON.stringify({bytes:'0001'});
+  },finalized_get(g,operationId){calls++;assert.equal(operationId,request.operationId);return JSON.stringify({operationId,revision:'1',transactions:[{bytes:'0001',stepIndex:0,artifactId:null}]});
+  },fused_send_call(g,operationId,proposalId,reviewCommitment,token,spend,output,maximum){
+    calls++;assert.equal(g,1);assert.equal(operationId,request.operationId);assert.equal(proposalId,request.proposalId);assert.equal(reviewCommitment,request.reviewCommitment);assert.equal(token,7);assert.equal(spend.length,0);assert.equal(output.length,0);assert.equal(maximum,16);if(failure)throw failure;after();return JSON.stringify({transactions:[{bytes:'0001',artifactId:null},{bytes:'0203',artifactId:null}]});
   },payment_call(g,op,text){
     calls++;assert.equal(g,1);const input=JSON.parse(text);assert.equal(input.operationId,request.operationId);
     if(op==='payment_attempt_begin'){assert.equal(input.policy.minIntervalMs,100);assert.equal(input.maximum,2097152);}
@@ -71,7 +73,7 @@ assert.equal(call('pczt_prove',proof).outputs[0].amount,10000n);
 console.log('PCZT prove asset admission, exact artifact binding and commit receipts passed');
 
 assert.deepEqual(call('pczt_finalize',proof).bytes,new Uint8Array([0,1]));
-assert.deepEqual(call('finalized_get',{operationId:request.operationId}).bytes,new Uint8Array([0,1]));
+assert.deepEqual(call('finalized_get',{operationId:request.operationId}).transactions[0].bytes,new Uint8Array([0,1]));
 const finalAbort=new AbortController();after=()=>finalAbort.abort();
 assert.throws(()=>call('pczt_finalize',{...proof,signal:finalAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
 const attempt={operationId:request.operationId,stepIndex:0,sourceId:'fixture',mode:'automatic',routeBinding:'07'.repeat(32),wallTimeMs:1000,monotonicElapsedMs:100,observationSequence:'1',policy:{maxAttempts:1,minIntervalMs:100},maximum:2097152};
@@ -85,3 +87,11 @@ const startAbort=new AbortController();after=()=>startAbort.abort();
 assert.throws(()=>call('payment_attempt_begin',{...attempt,signal:startAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
 assert.equal(call('payment_get',{operationId:request.operationId}).observationSequence,'1');
 console.log('Finalization and submission facade owned metadata, exact binary routes, bounds and commit receipts passed');
+
+const fused={...request,token:7,spend:new Uint8Array(),output:new Uint8Array(),maximum:16};
+assert.deepEqual(call('fused_send',fused).transactions.map(t=>t.bytes),[new Uint8Array([0,1]),new Uint8Array([2,3])]);
+for(const token of [-1,0x100000000,1.5]){const before=calls;assert.throws(()=>call('fused_send',{...fused,token}),{message:'INVALID_ARGUMENT',commit:'none'});assert.equal(calls,before);}
+failure='STALE_HANDLE';assert.throws(()=>call('fused_send',fused),{message:'STALE_HANDLE',commit:'none'});failure=undefined;
+const fusedAbort=new AbortController();after=()=>fusedAbort.abort();assert.throws(()=>call('fused_send',{...fused,signal:fusedAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
+call('payment_reconcile',{operationId:request.operationId,wallTimeMs:1000,policy:{maxAttempts:1,minIntervalMs:100}});
+console.log('Fused multi-step owned result, authority token admission, and committed cancellation passed');

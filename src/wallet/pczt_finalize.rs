@@ -21,14 +21,27 @@ pub(super) fn project(operation:&str,step:u32,row:Row,revision:String,branch:Bra
     if !reader.is_empty()||transaction.consensus_branch_id()!=branch||transaction.txid().as_ref()!=txid.as_slice(){return Err("STORAGE_ERROR".into());}
     Ok(json!({"operationId":operation,"stepIndex":step,"artifactId":artifact,"txid":zcash_protocol::TxId::from_bytes(txid.try_into().map_err(|_|Failure::from("STORAGE_ERROR"))?).to_string(),"bytes":hex::encode(bytes),"exactBytesSha256":hex::encode(digest),"revision":revision}))
 }
-pub(super) fn read(ext:&zcash_client_sqlite::ExtensionTransaction<'_>,parameters:&crate::Document,operation_id:&str)->Result<Value>{
+pub(super) fn read_step(ext:&zcash_client_sqlite::ExtensionTransaction<'_>,parameters:&crate::Document,operation_id:&str,step:u32)->Result<Value>{
     let operation=id(operation_id)?;
-    let row=ext.query_row("SELECT artifact,txid,CASE WHEN length(bytes)<=4194304 THEN bytes END,digest FROM ext_wallet_finalized WHERE operation=?1 AND step=0",[&operation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let row=ext.query_row("SELECT artifact,txid,CASE WHEN length(bytes)<=4194304 THEN bytes END,digest FROM ext_wallet_finalized WHERE operation=?1 AND step=?2",rusqlite::params![operation,step],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     if let Some(row)=row {
         let plan:Vec<u8>=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END FROM ext_wallet_proposals WHERE operation=?1",[&operation],|r|r.get(0))?;
         let plan=zcash_client_backend::proto::proposal::Proposal::decode(&plan[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
-        project(operation_id,0,row,super::revision::read(ext)?,BranchId::for_height(parameters,plan.min_target_height.into()))
+        project(operation_id,step,row,super::revision::read(ext)?,BranchId::for_height(parameters,plan.min_target_height.into()))
     }else{Ok(Value::Null)}
+}
+pub(super) fn read_all(ext:&zcash_client_sqlite::ExtensionTransaction<'_>,parameters:&crate::Document,operation_id:&str)->Result<Value>{
+    let operation=id(operation_id)?;
+    let(count,size):(i64,i64)=ext.query_row("SELECT COUNT(*),COALESCE(SUM(length(bytes)),0) FROM ext_wallet_finalized WHERE operation=?1",[&operation],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    if count>16||size>4194304{return Err("RESOURCE_LIMIT".into());}
+    let mut transactions=vec![];
+    if count>0 {
+        let plan:Vec<u8>=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END FROM ext_wallet_proposals WHERE operation=?1",[&operation],|r|r.get(0))?;
+        let plan=zcash_client_backend::proto::proposal::Proposal::decode(&plan[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
+        if plan.steps.len()>16||plan.steps.len() as i64!=count{return Err("STORAGE_ERROR".into());}
+        for step in 0..count as u32 {let row=read_step(ext,parameters,operation_id,step)?;if row.is_null(){return Err("STORAGE_ERROR".into());}transactions.push(row);}
+    }
+    Ok(json!({"operationId":operation_id,"revision":super::revision::read(ext)?,"transactions":transactions}))
 }
 #[wasm_bindgen]
 pub fn finalized_get(generation:u32,operation_id:&str)->std::result::Result<String,String>{
@@ -39,7 +52,7 @@ pub fn finalized_get(generation:u32,operation_id:&str)->std::result::Result<Stri
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let parameters=active.wallet.params().clone();
         active.wallet.transactionally_with_extension(|_,ext|->Result<Value>{
-            read(ext,&parameters,operation_id)
+            read_all(ext,&parameters,operation_id)
         })
     }).map(|v|v.to_string()).map_err(|e|e.0)
 }
@@ -48,8 +61,8 @@ pub fn pczt_finalize_call(generation:u32,operation_id:&str,artifact_id:&str,spen
     let operation=id(operation_id).map_err(|e|e.0)?;id(artifact_id).map_err(|e|e.0)?;
     if maximum==0||maximum>4194304{return Err("RESOURCE_LIMIT".into());}
     // Never regenerate randomized binding signatures for an already committed operation.
-    let prior=finalized_get(generation,operation_id)?;
-    if prior!="null"{let value:Value=serde_json::from_str(&prior).map_err(|_|"STORAGE_ERROR")?;if value["artifactId"]!=artifact_id{return Err("PCZT_ASSOCIATION_MISMATCH".into());}if value["bytes"].as_str().ok_or("STORAGE_ERROR")?.len()/2>maximum as usize{return Err("RESOURCE_LIMIT".into());}return Ok(prior);}
+    let prior:Value=serde_json::from_str(&finalized_get(generation,operation_id)?).map_err(|_|"STORAGE_ERROR")?;
+    if let Some(value)=prior["transactions"].as_array().and_then(|v|v.first()) {if prior["transactions"].as_array().unwrap().len()!=1||value["artifactId"]!=artifact_id{return Err("PCZT_ASSOCIATION_MISMATCH".into());}if value["bytes"].as_str().ok_or("STORAGE_ERROR")?.len()/2>maximum as usize{return Err("RESOURCE_LIMIT".into());}return Ok(value.to_string());}
     let retained=super::pczt_build::pczt_build_call(generation,"pczt_get_artifact",&json!({"operationId":operation_id,"artifactId":artifact_id}).to_string())?;
     let retained:Value=serde_json::from_str(&retained).map_err(|_|"STORAGE_ERROR")?;
     let bytes=hex::decode(retained["bytes"].as_str().ok_or("NOT_FINALIZED")?).map_err(|_|"STORAGE_ERROR")?;

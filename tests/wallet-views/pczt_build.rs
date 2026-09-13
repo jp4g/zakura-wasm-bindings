@@ -219,7 +219,7 @@ fn prove_retained(ironwood:bool,finalize:bool) {
         conn.execute_batch("CREATE TRIGGER finalize_fail BEFORE INSERT ON ext_wallet_finalized BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
         assert!(call(&spend,&output).is_err());conn.execute_batch("DROP TRIGGER finalize_fail").unwrap();
         assert_eq!(policy_rows(&conn,&tables),before,"backend storage and outbox insertion roll back together");
-        assert_eq!(crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap(),"null");
+        assert_eq!(serde_json::from_str::<Value>(&crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap()).unwrap()["transactions"],json!([]));
         let finalized=call(&spend,&output).unwrap();
         assert_eq!(call(&[],&[]).unwrap(),finalized,"already committed exact bytes need no extraction or assets");
         let txid:Vec<u8>=conn.query_row("SELECT txid FROM ext_wallet_finalized",[],|r|r.get(0)).unwrap();
@@ -232,7 +232,7 @@ fn prove_retained(ironwood:bool,finalize:bool) {
     drop(conn);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"]})).unwrap(),proven);
     if let Some(finalized)=finalized {
-        let mut old:Value=serde_json::from_str(&finalized).unwrap();let mut reopened:Value=serde_json::from_str(&crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap()).unwrap();
+        let mut old:Value=serde_json::from_str(&finalized).unwrap();let mut reopened:Value=serde_json::from_str::<Value>(&crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap()).unwrap()["transactions"][0].clone();
         let current:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();assert_eq!(reopened["revision"],current["revision"]);
         old.as_object_mut().unwrap().remove("revision");reopened.as_object_mut().unwrap().remove("revision");assert_eq!(reopened,old);
         if !ironwood {let state=payment(g,"payment_reconcile",json!({"operationId":plan["operationId"],"wallTimeMs":3000000})).unwrap();assert_eq!(state["state"]["steps"][0]["attempts"].as_array().unwrap().len(),2);let conn=rusqlite::Connection::open(&path).unwrap();assert_eq!(conn.query_row("SELECT automatic_count FROM ext_wallet_submission",[],|r|r.get::<_,i64>(0)).unwrap(),1);assert_eq!(conn.query_row("SELECT max_attempts FROM ext_wallet_submission",[],|r|r.get::<_,i64>(0)).unwrap(),1);}
@@ -329,7 +329,9 @@ fn fused_send_real_transfer_shield_and_multistep() {
         assert_eq!(value["transactions"].as_array().unwrap().len(),if mode=="tex"{2}else{1});
         for tx in value["transactions"].as_array().unwrap(){assert_eq!(tx["artifactId"],Value::Null);assert!(tx["bytes"].as_str().unwrap().len()>100);}
         crate::wallet::signer::signer_release(token).unwrap();assert_eq!(call(g,0,&[],&[]).unwrap(),result,"retry uses stored bytes without authority or assets");
+        if mode=="tex"{payment_multistep(g,&path,&plan,&value);}
         drop(conn);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        if mode=="tex"{let db=rusqlite::Connection::open(&path).unwrap();assert_eq!(db.query_row("SELECT count(*) FROM ext_wallet_submission WHERE max_attempts=1 AND min_interval=500",[],|r|r.get::<_,i64>(0)).unwrap(),2);}
         let reopened:Value=serde_json::from_str(&call(g,0,&[],&[]).unwrap()).unwrap();
         for (old,new) in value["transactions"].as_array().unwrap().iter().zip(reopened["transactions"].as_array().unwrap()) {assert_eq!(old["bytes"],new["bytes"]);assert_eq!(old["txid"],new["txid"]);}
         crate::wallet::storage_close(g).unwrap();
@@ -345,4 +347,32 @@ fn fused_signer_lookup_accepts_ironwood_only_account() {
     crate::wallet::DOMAIN.with(|domain|{let mut domain=domain.borrow_mut();let db=&mut domain.active.iter_mut().find(|a|a.generation==g).unwrap().wallet;
         let found=db.get_account_for_ufvk(&ufvk).unwrap().expect("native full authority resolves Ironwood-only stored account");assert_eq!(found.id(),zcash_client_sqlite::AccountUuid::from_uuid(uuid::Uuid::parse_str(account["id"].as_str().unwrap()).unwrap()));
     });crate::wallet::storage_close(g).unwrap();let _=path;
+}
+
+fn payment_multistep(g:u32,path:&str,plan:&Value,finalized:&Value){
+    let id=&plan["operationId"];let txs=&finalized["transactions"];
+    let read=payment(g,"payment_get",json!({"operationId":id})).unwrap();
+    assert_eq!(read["state"]["missing"],json!([]));assert_eq!(read["state"]["steps"][1]["blockedBy"],json!([0]));
+    let observe=|index,mined|payment(g,"payment_observe",json!({"operationId":id,"stepIndex":index,"wallTimeMs":1000,"observation":{"sourceId":"fixture","observedAt":"2026-09-13T00:00:00.000Z","txid":txs[index]["txid"],"state":if mined{"mined"}else{"notSeen"},"inclusion":if mined{json!({"height":40000,"blockHash":"08".repeat(32),"confirmations":1})}else{Value::Null},"tip":{"height":40000,"hash":"08".repeat(32)},"priorInclusion":null}})).unwrap();
+    observe(0,false);let state=observe(1,false);
+    let mut begin=json!({"operationId":id,"stepIndex":1,"sourceId":"fixture","routeBinding":"01".repeat(32),"mode":"explicit","origin":"send","wallTimeMs":1000,"monotonicElapsedMs":1000,"observationSequence":state["observationSequences"][1],"policy":{"maxAttempts":2,"minIntervalMs":100},"maximum":2097152});
+    assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap_err(),"PAYMENT_BLOCKED");
+    begin["stepIndex"]=json!(0);begin["observationSequence"]=state["observationSequences"][0].clone();
+    let parent=payment(g,"payment_attempt_begin",begin.clone()).unwrap();
+    payment(g,"payment_attempt_finish",json!({"operationId":id,"attemptId":parent["attemptId"],"outcome":"acknowledged","txid":txs[0]["txid"],"wallTimeMs":1001})).unwrap();
+    begin["stepIndex"]=json!(1);begin["observationSequence"]=state["observationSequences"][1].clone();
+    assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap_err(),"PAYMENT_BLOCKED","ack does not unlock child");
+    let mined=observe(0,true);assert_eq!(mined["state"]["steps"][1]["blockedBy"],json!([]));
+    let mut automatic=begin.clone();automatic["mode"]=json!("automatic");automatic.as_object_mut().unwrap().remove("origin");
+    assert!(payment(g,"payment_attempt_begin",automatic).unwrap().is_null(),"recovery never first-dispatches child");
+    let db=rusqlite::Connection::open(path).unwrap();let hash:Vec<u8>=db.query_row("SELECT hash FROM blocks WHERE height=40000",[],|r|r.get(0)).unwrap();
+    db.execute("UPDATE blocks SET hash=zeroblob(32) WHERE height=40000",[]).unwrap();
+    assert_eq!(payment(g,"payment_get",json!({"operationId":id})).unwrap()["state"]["steps"][1]["blockedBy"],json!([0]));
+    db.execute("UPDATE blocks SET hash=?1 WHERE height=40000",[hash]).unwrap();
+    let mempool=payment(g,"payment_observe",json!({"operationId":id,"stepIndex":0,"wallTimeMs":1002,"observation":{"sourceId":"fixture","observedAt":"2026-09-13T00:00:00.000Z","txid":txs[0]["txid"],"state":"mempool","inclusion":null,"tip":{"height":40000,"hash":"08".repeat(32)},"priorInclusion":null}})).unwrap();assert_eq!(mempool["state"]["steps"][1]["blockedBy"],json!([]));
+    let child=payment(g,"payment_attempt_begin",begin.clone()).unwrap();assert_eq!(child["bytes"],txs[1]["bytes"]);
+    payment(g,"payment_reconcile",json!({"operationId":id,"wallTimeMs":1002,"policy":{"maxAttempts":1,"minIntervalMs":500}})).unwrap();
+    begin["observationSequence"]=json!("0");assert_eq!(payment(g,"payment_attempt_begin",begin).unwrap_err(),"RECOVERY_REQUIRED");
+    assert_eq!(db.query_row("SELECT count(*) FROM ext_wallet_submission WHERE max_attempts=1 AND min_interval=500",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    let state=payment(g,"payment_get",json!({"operationId":id})).unwrap();assert_eq!(state["state"]["steps"][0]["attempts"].as_array().unwrap().len(),1);assert_eq!(state["state"]["steps"][1]["attempts"].as_array().unwrap().len(),1);
 }

@@ -9,11 +9,11 @@ const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','w
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const proposals = new Set(['proposal_create','proposal_get','proposal_list','proposal_lookup_intent']);
-const pczt = new Set(['pczt_finalize','finalized_get','pczt_prove','pczt_build','pczt_get_artifact','pczt_import']);
+const pczt = new Set(['fused_send','pczt_finalize','finalized_get','pczt_prove','pczt_build','pczt_get_artifact','pczt_import']);
 const lifecycle = new Set(['account_remove','account_check_key']);
 const payments = new Set(['payment_get','payment_list','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position']);
 const scans = new Set([...payments,...pczt,...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
-const writes = new Set(['payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position','pczt_finalize','pczt_prove','pczt_import','pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
+const writes = new Set(['fused_send','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position','pczt_finalize','pczt_prove','pczt_import','pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -114,7 +114,7 @@ function lowerProposal(args, operation) {
   scanHeight(policy.lockExpiryBlocks);input.policy=policy;return input;
 }
 function lowerPayment(args, operation) {
-  const keys={payment_get:['operationId'],payment_list:['afterSequence','highWater','limit','accountId'],payment_reconcile:['operationId','wallTimeMs'],payment_observe:['operationId','stepIndex','observation','wallTimeMs'],payment_attempt_begin:['operationId','stepIndex','sourceId','routeBinding','mode','origin','wallTimeMs','monotonicElapsedMs','observationSequence','policy','maximum'],payment_attempt_finish:['operationId','attemptId','outcome','txid','wallTimeMs','diagnosticCode'],payment_recovery_position:['afterSequence']}[operation];
+  const keys={payment_get:['operationId'],payment_list:['afterSequence','highWater','limit','accountId'],payment_reconcile:['operationId','wallTimeMs','policy'],payment_observe:['operationId','stepIndex','observation','wallTimeMs'],payment_attempt_begin:['operationId','stepIndex','sourceId','routeBinding','mode','origin','wallTimeMs','monotonicElapsedMs','observationSequence','policy','maximum'],payment_attempt_finish:['operationId','attemptId','outcome','txid','wallTimeMs','diagnosticCode'],payment_recovery_position:['afterSequence']}[operation];
   const input=scanFields(args,[...keys,'signal']);delete input.signal;
   const owned=(value,depth=0)=>{
     if(depth>3)throw TypeError('INVALID_ARGUMENT');
@@ -134,10 +134,10 @@ function lowerPayment(args, operation) {
 function lowerScan(args, operation) {
   if(payments.has(operation))return lowerPayment(args,operation);
   if(pczt.has(operation)) {
-    const keys=operation==='pczt_build'?['operationId','proposalId','reviewCommitment']:operation==='pczt_import'?['operationId','bytes','maximum']:(operation==='pczt_prove'||operation==='pczt_finalize')?['operationId','artifactId','spend','output','maximum']:operation==='finalized_get'?['operationId']:['operationId','artifactId'];
+    const keys=operation==='fused_send'?['operationId','proposalId','reviewCommitment','token','spend','output','maximum']:operation==='pczt_build'?['operationId','proposalId','reviewCommitment']:operation==='pczt_import'?['operationId','bytes','maximum']:(operation==='pczt_prove'||operation==='pczt_finalize')?['operationId','artifactId','spend','output','maximum']:operation==='finalized_get'?['operationId']:['operationId','artifactId'];
     const input=scanFields(args,[...keys,'signal']);delete input.signal;
-    for(const key of keys)if(!['bytes','maximum','spend','output'].includes(key)&&(key!=='artifactId'||operation!=='pczt_get_artifact'||Object.hasOwn(input,key))&&(typeof input[key]!=='string'||! /^[0-9a-f]{64}$/.test(input[key])))throw TypeError('INVALID_ARGUMENT');
-    if(operation==='pczt_prove'||operation==='pczt_finalize') {
+    for(const key of keys)if(!['bytes','maximum','spend','output','token'].includes(key)&&(key!=='artifactId'||operation!=='pczt_get_artifact'||Object.hasOwn(input,key))&&(typeof input[key]!=='string'||! /^[0-9a-f]{64}$/.test(input[key])))throw TypeError('INVALID_ARGUMENT');
+    if(operation==='fused_send'||operation==='pczt_prove'||operation==='pczt_finalize') {
       if(!Number.isInteger(input.maximum)||input.maximum<1||input.maximum>4194304)throw TypeError('RESOURCE_LIMIT');
       for(const [key,size] of [['spend',47958396],['output',3592860]]) {
         let length;try{length=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),'byteLength').get.call(input[key]);}catch{throw TypeError('INVALID_ARGUMENT');}
@@ -145,6 +145,7 @@ function lowerScan(args, operation) {
         input[key]=copyBytes(input[key],size,'INVALID_ARGUMENT',0);
       }
     }
+    if(operation==='fused_send'&&(!Number.isInteger(input.token)||input.token<0||input.token>0xffffffff))throw TypeError('INVALID_ARGUMENT');
     if(operation==='pczt_import') {
       if(!Number.isInteger(input.maximum)||input.maximum<1||input.maximum>4194304)throw TypeError('RESOURCE_LIMIT');
       let length;try{length=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),'byteLength').get.call(input.bytes);}catch{throw TypeError('INVALID_PCZT');}
@@ -285,7 +286,7 @@ export function viewsForStorage(storage) {
         abort(signal,'none');
         const lowered=scans.has(operation)?lowerScan(args,operation):lower(args);
         if(operation==='pczt_import'){ownedPczt=lowered.bytes;pcztOperationId=lowered.operationId;pcztMaximum=lowered.maximum;delete lowered.bytes;}
-        if(operation==='pczt_prove'||operation==='pczt_finalize'){proof={...lowered};delete lowered.spend;delete lowered.output;}
+        if(operation==='fused_send'||operation==='pczt_prove'||operation==='pczt_finalize'){proof={...lowered};delete lowered.spend;delete lowered.output;}
         input=JSON.stringify(lowered);
         abort(signal,'none');
       } catch(error) {
@@ -310,7 +311,7 @@ export function viewsForStorage(storage) {
           result=storage.run(()=>binding.views_seed_call(token,operation,input,ownedSeed));
         } else {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
-          result=storage.run(()=>payments.has(operation)?binding.payment_call(token,operation,input):operation==='finalized_get'?binding.finalized_get(token,JSON.parse(input).operationId):operation==='pczt_finalize'?binding.pczt_finalize_call(token,proof.operationId,proof.artifactId,proof.spend,proof.output,proof.maximum):operation==='pczt_prove'?binding.pczt_prove_call(token,proof.operationId,proof.artifactId,proof.spend,proof.output,proof.maximum):operation==='pczt_import'?binding.pczt_import_call(token,pcztOperationId,ownedPczt,pcztMaximum):pczt.has(operation)?binding.pczt_build_call(token,operation,input):lifecycle.has(operation)?binding.account_lifecycle_call(token,operation,input):proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
+          result=storage.run(()=>payments.has(operation)?binding.payment_call(token,operation,input):operation==='finalized_get'?binding.finalized_get(token,JSON.parse(input).operationId):operation==='fused_send'?binding.fused_send_call(token,proof.operationId,proof.proposalId,proof.reviewCommitment,proof.token,proof.spend,proof.output,proof.maximum):operation==='pczt_finalize'?binding.pczt_finalize_call(token,proof.operationId,proof.artifactId,proof.spend,proof.output,proof.maximum):operation==='pczt_prove'?binding.pczt_prove_call(token,proof.operationId,proof.artifactId,proof.spend,proof.output,proof.maximum):operation==='pczt_import'?binding.pczt_import_call(token,pcztOperationId,ownedPczt,pcztMaximum):pczt.has(operation)?binding.pczt_build_call(token,operation,input):lifecycle.has(operation)?binding.account_lifecycle_call(token,operation,input):proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
             scans.has(operation)?binding.scan_call(token,operation,input):binding.views_call(token,operation,input));
         }
       }
@@ -329,8 +330,10 @@ export function viewsForStorage(storage) {
       }
       abort(signal,writes.has(operation)?'committed':'none');
       if((pczt.has(operation)||operation==='payment_attempt_begin')&&value!==null) {
-        const hex=value.bytes;value.bytes=new Uint8Array(hex.length/2);
-        for(let i=0;i<value.bytes.length;i++)value.bytes[i]=parseInt(hex.slice(2*i,2*i+2),16);
+        for(const row of operation==='finalized_get'||operation==='fused_send'?value.transactions:[value]) {
+          const hex=row.bytes;row.bytes=new Uint8Array(hex.length/2);
+          for(let i=0;i<row.bytes.length;i++)row.bytes[i]=parseInt(hex.slice(2*i,2*i+2),16);
+        }
         for(const output of value.outputs??[]) {
           output.amount=BigInt(output.amount);
           if(output.memo!==null)output.memo=Uint8Array.from(output.memo.match(/../g)??[],hex=>parseInt(hex,16));

@@ -30,13 +30,7 @@ pub fn fused_send_call(generation:u32,operation_id:&str,proposal_id:&str,review_
             if count!=0 {
                 if count!=wire.steps.len() as i64{return Err("STORAGE_ERROR".into());}
                 if size>i64::from(maximum){return Err("RESOURCE_LIMIT".into());}
-                let revision=super::revision::read(ext)?;
-                let mut transactions=vec![];
-                for step in 0..count as u32 {
-                    let row=ext.query_row("SELECT artifact,txid,bytes,digest FROM ext_wallet_finalized WHERE operation=?1 AND step=?2",rusqlite::params![operation,step],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-                    transactions.push(super::pczt_finalize::project(operation_id,step,row,revision.clone(),branch)?);
-                }
-                return Ok(json!({"operationId":operation_id,"revision":revision,"transactions":transactions}));
+                return super::pczt_finalize::read_all(ext,&p,operation_id);
             }
             if super::revision::read(ext)?!=revision||db.chain_height()?.map(u32::from).and_then(|h|h.checked_add(1))!=Some(wire.min_target_height){return Err("STALE_PROPOSAL".into());}
             let account_id=zcash_client_sqlite::AccountUuid::from_uuid(account);
