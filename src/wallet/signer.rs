@@ -146,6 +146,7 @@ pub fn signer_authorize(token:u32,parameters:&[u8],genesis:&[u8],height:u32,bran
         let p=crate::Document::parse(parameters).map_err(|_|"INVALID_ARGUMENT")?;
         let pczt=crate::standalone_pczt::parse_standalone_pczt(parameters,genesis,height,branch,bytes,maximum)?.into_value();
         let mut transparent=Vec::new();
+        let mut own_sapling=Vec::new();let mut foreign_sapling=Vec::new();
         let pczt=Verifier::new(pczt).with_ironwood::<(),_>(|bundle| {
             bundle.verify_cross_address_restriction().map_err(|_|OrchardError::Custom(()))
         }).map_err(|_|"INVALID_PCZT")?.with_transparent::<(),_>(|bundle| {
@@ -162,6 +163,30 @@ pub fn signer_authorize(token:u32,parameters:&[u8],genesis:&[u8],height:u32,bran
                 }
             }
             Ok(())
+        }).map_err(|_|"INVALID_PCZT")?.with_sapling::<(),_>(|bundle| {
+            // Builder omits PGK. Bind missing material to the retained native randomized key first.
+            for (index,spend) in bundle.spends().iter().enumerate() {
+                if spend.proof_generation_key().is_some(){continue;}
+                match spend.verify_rk(Some(&signer.key.sapling().to_diversifiable_full_viewing_key().fvk())) {
+                    Ok(())=>{
+                        let key=signer.key.sapling().to_diversifiable_full_viewing_key();
+                        let internal=if spend.verify_nullifier(Some(key.fvk())).is_ok(){false}
+                            else if spend.verify_nullifier(Some(&key.to_internal_fvk())).is_ok(){true}
+                            else{return Err(pczt::roles::verifier::SaplingError::Custom(()));};
+                        own_sapling.push((index,internal));
+                    },
+                    Err(sapling::pczt::VerifyError::InvalidRandomizedVerificationKey)=>foreign_sapling.push(index),
+                    Err(_)=>return Err(pczt::roles::verifier::SaplingError::Custom(())),
+                }
+            }
+            Ok(())
+        }).map_err(|_|"INVALID_PCZT")?.finish();
+        let pczt=pczt::roles::updater::Updater::new(pczt).update_sapling_with(|mut bundle| {
+            for (index,internal) in own_sapling {
+                let pgk=if internal{signer.key.sapling().derive_internal().expsk.proof_generation_key()}else{signer.key.sapling().expsk.proof_generation_key()};
+                bundle.update_spend_with(index,|mut spend|spend.set_proof_generation_key(pgk))?;
+            }
+            Ok(())
         }).map_err(|_|"INVALID_PCZT")?.finish();
         let sapling=pczt.sapling().spends().len();
         let ironwood=pczt.ironwood().actions().len();
@@ -169,6 +194,7 @@ pub fn signer_authorize(token:u32,parameters:&[u8],genesis:&[u8],height:u32,bran
         let mut signed=0usize;
         for (index,key) in transparent {role.sign_transparent(index,&key).map_err(|_|"INVALID_PCZT")?;signed+=1;}
         for index in 0..sapling {
+            if foreign_sapling.contains(&index){continue;}
             match role.sign_sapling(index,&signer.key.sapling().expsk.ask) {
                 Ok(())=>signed+=1,
                 Err(RoleError::SaplingSign(sapling::pczt::SignerError::WrongSpendAuthorizingKey))=>{},
