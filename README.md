@@ -197,3 +197,16 @@ transparent has no circuit label. These identify authorization context, not a
 prover or proof-verification claim. Proof material is not required for signing.
 Native role checks remain authoritative; unsupported/malformed material rejects.
 Actual WASM and SDK qualification is separate from these native source fixtures.
+
+### Retained PCZT import candidate
+
+`pczt_import_call(generation, operationId, bytes, maximum)` accepts at most 4 MiB for an
+already-built operation. The configured maximum also bounds the merged full copy before commit. Native combination and transaction-effect digests bind
+returned data; native signature roles and the native transparent script interpreter
+validate supplied authorizations, including finalized scriptSig data. Partial
+signatures remain permitted. This does not verify proofs or finalize transactions.
+The original `ext_wallet_pczt` row remains immutable. New full copies append to
+`ext_wallet_pczt_artifacts`; exact duplicate imports do not advance the revision.
+`pczt_get_artifact` accepts an optional artifactId for old versions, otherwise
+returns the latest retained copy. Native source tests are separate from pending
+WASM/SDK qualification.

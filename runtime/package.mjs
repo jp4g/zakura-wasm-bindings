@@ -7,15 +7,15 @@ import { createHash } from 'node:crypto';
 import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dist/index.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const nativeReceipt = '29d142ec496dbddf0bc4f0de397df1d168578f8d9df2d7005a0d9c737a9723be';
-const overlayRevision = '2c7535c';
+const nativeReceipt = '67867d0921f51b0526a7b1c0d1e833f593787c4dd9a60838785ba6864834f56d';
+const overlayRevision = '0d3862c';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
-// Version 4 adds retained PCZT artifacts and canonical proposal intent lookup.
+// Version 5 adds immutable retained PCZT import versions.
 // The storage marker stays version 1; the Rust owner migrates legacy files.
 export const profile = {
   contractRevision: 'zakura-private-wallet/1', abiVersion: 'checked-bindgen-0.2.128/1',
-  schemas: { operations: { walletViews: '5', walletSigner: '2', walletProposals: '2', walletPczt: '1', walletScan: '1', walletSync: '2', walletEnhancement: '1', walletQueries: '2', consensusContext: '1', decodeTransaction: '1' },
-    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/4',
+  schemas: { operations: { walletViews: '5', walletSigner: '2', walletProposals: '2', walletPczt: '2', walletScan: '1', walletSync: '2', walletEnhancement: '1', walletQueries: '2', consensusContext: '1', decodeTransaction: '1' },
+    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/5',
     hostServices: { nodeFilesystem: 'linux-flock/1', browserOpfs: 'sync-access-handle/1', storage: 'scalar-vfs/1' } },
 };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -31,7 +31,7 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   const receiptBytes = readFileSync(resolve(nativeBuild, 'build.json'));
   requireThat(sha(receiptBytes) === nativeReceipt, 'accepted native receipt mismatch');
   const receipt = JSON.parse(receiptBytes);
-  requireThat(receipt.complete && receipt.revision === '2c7535c1c7f61cc6e5e6d22de995886ab85e2951', 'native build identity');
+  requireThat(receipt.complete && receipt.revision === '0d3862c9b7ab6af94c2d3b858109d12860b66f2a', 'native build identity');
   const inputs = {};
   for (const [name, digest] of Object.entries(receipt.artifacts)) {
     const bytes = readFileSync(resolve(nativeBuild, 'bundle', name));
