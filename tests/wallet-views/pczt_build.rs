@@ -165,11 +165,17 @@ fn pczt_import_retains_versions_and_rolls_back_invalid_returns() {
 
 #[test]
 #[ignore = "requires locally qualified canonical Sapling parameters and real proving"]
-fn pczt_prove_real_sapling_retains_and_verifies() { prove_retained(false); }
+fn pczt_prove_real_sapling_retains_and_verifies() { prove_retained(false,false); }
 #[test]
 #[ignore = "requires locally qualified parameters and real Sapling/Ironwood proving"]
-fn pczt_prove_real_ironwood_retains_and_verifies() { prove_retained(true); }
-fn prove_retained(ironwood:bool) {
+fn pczt_prove_real_ironwood_retains_and_verifies() { prove_retained(true,false); }
+#[test]
+#[ignore = "requires canonical assets and real finalize proof fixture"]
+fn pczt_finalize_real_sapling_atomic() { prove_retained(false,true); }
+#[test]
+#[ignore = "requires canonical assets and real finalize proof fixture"]
+fn pczt_finalize_real_ironwood_atomic() { prove_retained(true,true); }
+fn prove_retained(ironwood:bool,finalize:bool) {
     let root=std::env::var("PCZT_PROVING_PARAMETERS").unwrap();
     let spend=std::fs::read(format!("{root}/sapling-spend.params")).unwrap();
     let output=std::fs::read(format!("{root}/sapling-output.params")).unwrap();
@@ -194,7 +200,28 @@ fn prove_retained(ironwood:bool) {
     let output_vk=sapling::circuit::OutputParameters::read(&output[..],false).unwrap().verifying_key();
     pczt::roles::tx_extractor::TransactionExtractor::new(value).with_sapling(&spend_vk,&output_vk).extract().unwrap();
     assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"],"artifactId":original["artifactId"]})).unwrap(),original);
+    let finalized=if finalize {
+        let call=|spend:&[u8],output:&[u8]|crate::wallet::pczt_finalize::pczt_finalize_call(g,plan["operationId"].as_str().unwrap(),proven["artifactId"].as_str().unwrap(),spend,output,4194304);
+        let tables=["transactions","sent_notes","sapling_received_note_spends","orchard_received_note_spends","ironwood_received_note_spends","ext_wallet_finalized","ext_wallet_revision"];
+        let before=policy_rows(&conn,&tables);
+        conn.execute_batch("CREATE TRIGGER finalize_fail BEFORE INSERT ON ext_wallet_finalized BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+        assert!(call(&spend,&output).is_err());conn.execute_batch("DROP TRIGGER finalize_fail").unwrap();
+        assert_eq!(policy_rows(&conn,&tables),before,"backend storage and outbox insertion roll back together");
+        assert_eq!(crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap(),"null");
+        let finalized=call(&spend,&output).unwrap();
+        assert_eq!(call(&[],&[]).unwrap(),finalized,"already committed exact bytes need no extraction or assets");
+        let txid:Vec<u8>=conn.query_row("SELECT txid FROM ext_wallet_finalized",[],|r|r.get(0)).unwrap();
+        conn.execute("UPDATE ext_wallet_finalized SET txid=zeroblob(32)",[]).unwrap();
+        assert_eq!(crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap_err(),"STORAGE_ERROR");
+        conn.execute("UPDATE ext_wallet_finalized SET txid=?1",[txid]).unwrap();
+        Some(finalized)
+    }else{None};
     drop(conn);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"]})).unwrap(),proven);
+    if let Some(finalized)=finalized {
+        let mut old:Value=serde_json::from_str(&finalized).unwrap();let mut reopened:Value=serde_json::from_str(&crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap()).unwrap();
+        let current:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();assert_eq!(reopened["revision"],current["revision"]);
+        old.as_object_mut().unwrap().remove("revision");reopened.as_object_mut().unwrap().remove("revision");assert_eq!(reopened,old);
+    }
     crate::wallet::storage_close(g).unwrap();crate::wallet::signer::signer_release(token).unwrap();
 }
