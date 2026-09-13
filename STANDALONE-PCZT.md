@@ -4,7 +4,8 @@ The private `parse_standalone_pczt` binding owns a wasm-bindgen handle; serializ
 combination and redaction return independent values. The caller supplies a positive
 u32 byte limit. Parsing and serialized results must fit it; combination uses the
 smaller input limit. Inputs must share exact parameter bytes, genesis, height and
-branch. Native consensus rules check version, branch, coin type and pool activation.
+branch. The qualified transaction versions are V5 and V6. Native consensus rules check
+version, branch, coin type and pool activation.
 Legacy Orchard transactions are outside this three-pool profile and reject explicitly.
 
 Inspection reports **structural role material completeness**, not cryptographic

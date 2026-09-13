@@ -4,7 +4,7 @@ use serde_json::json;
 use wasm_bindgen::prelude::*;
 use zcash_primitives::transaction::TxVersion;
 use zcash_script::script::Evaluable;
-use zcash_protocol::constants::{V4_VERSION_GROUP_ID,V5_VERSION_GROUP_ID,V6_VERSION_GROUP_ID};
+use zcash_protocol::constants::{V5_VERSION_GROUP_ID,V6_VERSION_GROUP_ID};
 use zcash_protocol::{PoolType, consensus::{BranchId,Parameters,NetworkConstants,NetworkUpgrade}};
 
 type Result<T> = std::result::Result<T, String>;
@@ -99,7 +99,7 @@ pub fn parse_standalone_pczt(parameters:&[u8],genesis:&[u8],height:u32,branch:u3
     if serde_json::to_value(global).map_err(|_|INVALID)?["coin_type"].as_u64()!=Some(u64::from(document.network_type().coin_type())) {return Err("NETWORK_MISMATCH".into());}
     if *global.consensus_branch_id()!=branch {return Err("NETWORK_MISMATCH".into());}
     let version=match (*global.tx_version(),*global.version_group_id()) {
-        (4,V4_VERSION_GROUP_ID)=>TxVersion::V4,(5,V5_VERSION_GROUP_ID)=>TxVersion::V5,(6,V6_VERSION_GROUP_ID)=>TxVersion::V6,
+        (5,V5_VERSION_GROUP_ID)=>TxVersion::V5,(6,V6_VERSION_GROUP_ID)=>TxVersion::V6,
         _=>return Err("UNSUPPORTED_VERSION".into()),
     };
     if !version.valid_in_branch(BranchId::try_from(branch).map_err(|_|"NETWORK_MISMATCH")?) {return Err("NETWORK_MISMATCH".into());}
@@ -162,6 +162,9 @@ mod tests {
         // Native serde representation of an upstream Creator fixture, not a second PCZT encoding.
         let mut fixture=serde_json::to_value(pczt::v1::Pczt::try_from(empty(BranchId::Nu6,1)).unwrap()).unwrap();
         fixture["global"]["proprietary"]=json!({"zcash_client_backend:proposal_info":[1,2],"other":[3]});
+        let mut v4=fixture.clone();v4["global"]["tx_version"]=json!(4);v4["global"]["version_group_id"]=json!(zcash_protocol::constants::V4_VERSION_GROUP_ID);
+        let unsupported=serde_json::from_value::<pczt::v1::Pczt>(v4).unwrap().serialize();
+        assert_eq!(parse_standalone_pczt(PARAMS,&[3;32],70,BranchId::Nu6.into(),&unsupported,65536).err().unwrap(),"UNSUPPORTED_VERSION");
         let encoded=serde_json::from_value::<pczt::v1::Pczt>(fixture).unwrap().serialize();
         let full=parse_standalone_pczt(PARAMS,&[3;32],70,BranchId::Nu6.into(),&encoded,65536).unwrap();
         let redacted=full.redact("zakura-signer-full/1").unwrap();
@@ -169,23 +172,33 @@ mod tests {
         let returned=serde_json::to_value(pczt::v1::Pczt::try_from(Pczt::parse(&redacted.serialize().unwrap()).unwrap()).unwrap()).unwrap();
         assert!(returned["global"]["proprietary"].get("zcash_client_backend:proposal_info").is_none());
         assert_eq!(returned["global"]["proprietary"]["other"],json!([3]));
+        if let Ok(path)=std::env::var("PCZT_FIXTURE_PATH") {
+            let (ironwood,ironwood_early)=ironwood_fixture();
+            let fixture=json!({"ironwood":hex::encode(ironwood),"ironwoodEarly":hex::encode(ironwood_early),"ironwoodEarlyBranch":u32::from(BranchId::Nu5),"ironwoodHeight":100,"ironwoodBranch":u32::from(BranchId::Nu6_3),"parameters":String::from_utf8(PARAMS.to_vec()).unwrap(),"genesis":hex::encode([3;32]),"height":70,"branch":u32::from(BranchId::Nu6),
+                "pczt":hex::encode(&encoded),"v2":hex::encode(v2),"v4":hex::encode(unsupported),"redacted":hex::encode(redacted.serialize().unwrap())});
+            std::fs::write(path,serde_json::to_string_pretty(&fixture).unwrap()+"\n").unwrap();
+        }
         assert_eq!(open(empty(BranchId::Nu6_3,1),100).inspect().unwrap().contains("\"transactionVersion\":6"),true);
     }
-    #[test]
-    fn standalone_pczt_ironwood_activation_and_material_only_flags() {
+    fn ironwood_fixture()->(Vec<u8>,Vec<u8>) {
         let mut fixture=serde_json::to_value(pczt::v2::Pczt::try_from(empty(BranchId::Nu6_3,1)).unwrap()).unwrap();
         let zero=vec![0u8;32];
         fixture["ironwood"]=json!({"actions":[{"cv_net":zero,"spend":{"nullifier":zero,"rk":zero,"proprietary":{}},
             "output":{"cmx":zero,"ephemeral_key":zero,"enc_ciphertext":{"Encrypted":[]},"out_ciphertext":[],"proprietary":{}}}],
             "flags":3,"value_sum":[0,true],"anchor":zero,"note_version":"V3"});
         let bytes=serde_json::from_value::<pczt::v2::Pczt>(fixture.clone()).unwrap().serialize();
+        fixture["global"]["consensus_branch_id"]=json!(u32::from(BranchId::Nu5));
+        fixture["global"]["tx_version"]=json!(5);fixture["global"]["version_group_id"]=json!(V5_VERSION_GROUP_ID);
+        let early=serde_json::from_value::<pczt::v2::Pczt>(fixture).unwrap().serialize();
+        (bytes,early)
+    }
+    #[test]
+    fn standalone_pczt_ironwood_activation_and_material_only_flags() {
+        let (bytes,early)=ironwood_fixture();
         let handle=parse_standalone_pczt(PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&bytes,65536).unwrap();
         let inspection:serde_json::Value=serde_json::from_str(&handle.inspect().unwrap()).unwrap();
         assert_eq!(inspection["pools"],json!(["ironwood"]));
         assert_eq!(inspection["proofsComplete"],false);assert_eq!(inspection["authorizationComplete"],false);
-        fixture["global"]["consensus_branch_id"]=json!(u32::from(BranchId::Nu5));
-        fixture["global"]["tx_version"]=json!(5);fixture["global"]["version_group_id"]=json!(V5_VERSION_GROUP_ID);
-        let early=serde_json::from_value::<pczt::v2::Pczt>(fixture).unwrap().serialize();
         assert_eq!(parse_standalone_pczt(PARAMS,&[3;32],60,BranchId::Nu5.into(),&early,65536).err().unwrap(),"NETWORK_MISMATCH");
         assert_eq!(handle.serialize().unwrap(),bytes);
     }
