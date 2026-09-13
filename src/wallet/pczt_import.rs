@@ -95,8 +95,10 @@ mod tests {
             assert_eq!(combine(without_preimage,Pczt::parse(&forged).unwrap()).unwrap_err().0,"INVALID_PCZT");
             let invalid_partial=corrupt(signed.clone(),&signature);
             assert_eq!(combine(original.clone(),invalid_partial).unwrap_err().0,"INVALID_PCZT");
-            let finalized=pczt::roles::spend_finalizer::SpendFinalizer::new(signed).finalize_spends().unwrap();
+            let finalized=pczt::roles::spend_finalizer::SpendFinalizer::new(signed.clone()).finalize_spends().unwrap();
             combine(original.clone(),finalized.clone()).unwrap();
+            // Native finalizer gap: it clears partials, then rejects its own output.
+            assert!(matches!(pczt::roles::spend_finalizer::SpendFinalizer::new(finalized.clone()).finalize_spends(),Err(pczt::roles::spend_finalizer::Error::TransparentFinalize(zcash_transparent::pczt::SpendFinalizerError::MissingSignature))));
             let corrupt=corrupt(finalized,&signature);
             assert_eq!(combine(original,corrupt).unwrap_err().0,"INVALID_PCZT");
         }
