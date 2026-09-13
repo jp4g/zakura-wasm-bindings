@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto';
 import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dist/index.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const nativeReceipt = 'e14bba343dad6564e71ff7f9077f6cc3f4a72e9fa350914cf2cd7bbe209f5ff5';
-const overlayRevision = '7f5f597';
+const nativeReceipt = '13c5fcb25b17a8fba92aeb647ba6f693e5342c69c659a55f2f21ff011e47222d';
+const overlayRevision = '10ab080';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
 // Version 3 adds the durable creation snapshot and local-only account creation.
 // The storage marker stays version 1; the Rust owner migrates legacy files.
@@ -31,7 +31,7 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   const receiptBytes = readFileSync(resolve(nativeBuild, 'build.json'));
   requireThat(sha(receiptBytes) === nativeReceipt, 'accepted native receipt mismatch');
   const receipt = JSON.parse(receiptBytes);
-  requireThat(receipt.complete && receipt.revision === '7f5f597de0efd5efd13ff89faf84ec99efc9dc0e', 'native build identity');
+  requireThat(receipt.complete && receipt.revision === '10ab080fa6f90524b21238ac9f611aa5e8b70a91', 'native build identity');
   const inputs = {};
   for (const [name, digest] of Object.entries(receipt.artifacts)) {
     const bytes = readFileSync(resolve(nativeBuild, 'bundle', name));

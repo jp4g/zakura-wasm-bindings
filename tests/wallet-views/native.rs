@@ -1247,3 +1247,17 @@ mod enhancement;
 mod query;
 
 mod inventory;
+
+#[test]
+fn wallet_memory_is_explicit_and_ephemeral() {
+    let open = || crate::wallet::storage_initialize_memory("zcash-js-network/1", PARAMS, &[3;32]).unwrap();
+    let g = open();
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),json!([]));
+    let account = call(g,"account_import",fixture(29)).unwrap();
+    assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
+    assert_eq!(call(g,"account_list",json!({})).unwrap().as_array().unwrap().len(),1);
+    crate::wallet::storage_close(g).unwrap();
+    let fresh = open();
+    assert_eq!(call(fresh,"account_list",json!({})).unwrap(),json!([]));
+    crate::wallet::storage_close(fresh).unwrap();
+}
