@@ -175,3 +175,21 @@ python3 -O build-wallet.py /home/jack/zakura-wallet-storage-scratch/NEW_BUILD
 The builder runs actual native migrations, unchanged primitive Node tests, actual generated wallet WASM lifecycle/fault tests, process-crash recovery and an import/memory audit. It preserves failed stages and complete provenance. Browser execution requires the ordinary host command `node tests/wallet-firefox.mjs NEW_BUILD/bundle` with the existing packaged Firefox/geckodriver. Workspace loopback denial is not browser evidence; see the external `REPORT.md` and `checkpoint.md` in `/home/jack/zakura-wallet-storage-logs` for exact run status and the hash-pinned parent command. Injected I/O/quota faults, native quota exhaustion and UA eviction are separate claims; the latter two are not established here.
 
 [Source/backend/VFS provenance](wallet-host/PROVENANCE.md). This bounded candidate stops for independent review, without claiming acceptance of issues #2, #4 or #5.
+
+### Retained native signer authorization candidate
+
+The worker-local signer table survives database close and signs through the pinned
+native PCZT Signer role. The zakura-memory-signer/1 capability revision is bounded
+to 4 MiB input/output, application review, and zakura-signer-full/1 disclosure.
+That existing Full profile retains the Sapling proof-generation key and alpha,
+Ironwood FVK and alpha, and transparent BIP44 derivations needed by the roles.
+Account IDs are routing hints; native key correspondence is authoritative.
+
+Qualified source fixtures cover transparent and Sapling V5 on Nu5, Nu6, Nu6_1,
+Nu6_2 (PCZT wire 1 and 2), and all three pools V6 on Nu6_3 (wire 2).
+Circuit labels are sapling-groth16/1 (the pinned Sapling spend/output circuit)
+and ironwood-post-nu6_3/1 (native OrchardCircuitVersion::PostNu6_3);
+transparent has no circuit label. These identify authorization context, not a
+prover or proof-verification claim. Proof material is not required for signing.
+Native role checks remain authoritative; unsupported/malformed material rejects.
+Actual WASM and SDK qualification is separate from these native source fixtures.

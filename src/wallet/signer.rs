@@ -8,6 +8,7 @@ use zcash_client_sqlite::AccountUuid;
 use zcash_keys::keys::UnifiedSpendingKey;
 
 const MAX_SIGNERS: usize = 1024;
+const MAX_PCZT_BYTES: u32 = 4 * 1024 * 1024;
 struct Signer { key: UnifiedSpendingKey, parameters: Vec<u8>, genesis: Vec<u8>, account_index: u32,
     bindings: Vec<(u32,AccountUuid)> }
 // Tokens never recycle within this native instance; exhausted instances fail closed.
@@ -52,6 +53,26 @@ pub fn signer_describe(token:u32)->Result<String,String> {
         Ok(json!({"parameters":hex::encode(&signer.parameters),"genesis":hex::encode(&signer.genesis),
             "accountIndex":signer.account_index,"viewingKey":signer.key.to_unified_full_viewing_key().encode(&p)}).to_string())
     })
+}
+/// Native role profile; the host maps the retained network identity to its registered ID.
+#[wasm_bindgen]
+pub fn signer_capabilities(token:u32)->Result<String,String> {
+    use zcash_protocol::consensus::BranchId;
+    let identity:serde_json::Value=serde_json::from_str(&signer_describe(token)?).map_err(|_|"DOMAIN_INVALID")?;
+    let mut authorizations=Vec::new();
+    for (version,branches,pczt_versions) in [
+        (5,vec![BranchId::Nu5,BranchId::Nu6,BranchId::Nu6_1,BranchId::Nu6_2],vec![1,2]),
+        (6,vec![BranchId::Nu6_3],vec![2]),
+    ] {
+        for pool in if version==5 { &["transparent","sapling"][..] } else { &["transparent","sapling","ironwood"][..] } {
+            let circuits=match *pool { "sapling"=>vec!["sapling-groth16/1"],"ironwood"=>vec!["ironwood-post-nu6_3/1"],_=>vec![] };
+            authorizations.push(json!({"pool":pool,"txVersion":version,"branchIds":branches.iter().map(|b|u32::from(*b)).collect::<Vec<_>>(),
+                "circuitVersions":circuits,"pcztVersions":pczt_versions,"proofState":"not-required",
+                "requiredFields":["zakura-signer-full/1"],"review":"application"}));
+        }
+    }
+    Ok(json!({"revision":"zakura-memory-signer/1","parameters":identity["parameters"],"genesis":identity["genesis"],
+        "authorizations":authorizations,"accountDiscovery":"explicit-index","exportableViewing":["ufvk","uivk"],"maxPcztBytes":MAX_PCZT_BYTES}).to_string())
 }
 #[wasm_bindgen]
 pub fn signer_release(token:u32)->Result<(),String> {
@@ -117,6 +138,7 @@ pub fn signer_authorize(token:u32,parameters:&[u8],genesis:&[u8],height:u32,bran
     super::DOMAIN.with(|domain| {
         if domain.try_borrow().map_err(|_|"STORAGE_BUSY")?.failed.is_some() {Err("DOMAIN_INVALID")} else {Ok(())}
     })?;
+    if maximum==0 || maximum>MAX_PCZT_BYTES {return Err("RESOURCE_LIMIT".into());}
     SIGNERS.with(|table| {
         let table=table.try_borrow().map_err(|_|"STORAGE_BUSY")?;
         let signer=table.get(index(token)?).and_then(Option::as_ref).ok_or("STALE_HANDLE")?;
@@ -176,21 +198,20 @@ mod authorization_tests {
     use zcash_script::script::Evaluable;
     const PARAMS:&[u8]=br#"{"encoding":"regtest","Overwinter":10,"Sapling":20,"Blossom":30,"Heartwood":40,"Canopy":50,"Nu5":60,"Nu6":70,"Nu6_1":80,"Nu6_2":90,"Nu6_3":100}"#;
     fn key(seed:u8)->UnifiedSpendingKey {UnifiedSpendingKey::from_seed(&crate::Document::parse(PARAMS).unwrap(),&[seed;32],zip32::AccountId::ZERO).unwrap()}
-    fn fixture(key:&UnifiedSpendingKey)->Pczt {
+    fn fixture_for(key:&UnifiedSpendingKey,branch:BranchId)->Pczt {
         // Native Creator/Updater plus synthetic effects, following upstream role fixtures.
         // This qualifies actual authorization signatures, not proofs or spendability.
-        let branch=BranchId::Nu6_3;
-        let base=Creator::new(branch.into(),140,1,None,None).unwrap().build().unwrap();
+        let base=Creator::new(branch.into(),140,1,Some([0;32]),Some([0;32])).unwrap().build().unwrap();
         let mut value=serde_json::to_value(pczt::v2::Pczt::try_from(base).unwrap()).unwrap();
         let alpha={let mut a=[0u8;32];a[0]=1;a};
         let rcv=sapling::value::ValueCommitTrapdoor::from_bytes(alpha).unwrap();
         let cv=sapling::value::ValueCommitment::derive(sapling::value::NoteValue::from_raw(0),rcv).to_bytes();
         let rk:[u8;32]=sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).randomize(&1u64.into()).into();
-        value["sapling"]=json!({"spends":[{"cv":cv,"nullifier":vec![0u8;32],"rk":rk,"alpha":alpha,"proof_generation_key":[sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).to_bytes(),key.sapling().expsk.nsk.to_bytes()],"proprietary":{}}],"outputs":[],"value_sum":0,"anchor":null});
+        value["sapling"]=json!({"spends":[{"cv":cv,"nullifier":vec![0u8;32],"rk":rk,"alpha":alpha,"proof_generation_key":[sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).to_bytes(),key.sapling().expsk.nsk.to_bytes()],"proprietary":{}}],"outputs":[],"value_sum":0,"anchor":vec![0u8;32]});
         let ask=orchard::keys::SpendAuthorizingKey::from(key.orchard());
         let rk:[u8;32]=orchard::keys::SpendValidatingKey::from(&ask).randomize(&1u64.into()).into();
         let cv=orchard::value::ValueCommitment::derive(orchard::value::NoteValue::from_raw(0)-orchard::value::NoteValue::from_raw(0),orchard::value::ValueCommitTrapdoor::from_bytes(alpha).unwrap()).to_bytes();
-        value["ironwood"]=json!({"actions":[{"cv_net":cv,"spend":{"nullifier":vec![0u8;32],"rk":rk,"alpha":alpha,"fvk":orchard::keys::FullViewingKey::from(key.orchard()).to_bytes().to_vec(),"proprietary":{}},"output":{"cmx":vec![0u8;32],"ephemeral_key":rk,"enc_ciphertext":{"Encrypted":vec![0u8;580]},"out_ciphertext":vec![0u8;80],"proprietary":{}}}],"flags":7,"value_sum":[0,true],"anchor":null,"note_version":"V3"});
+        if branch==BranchId::Nu6_3 { value["ironwood"]=json!({"actions":[{"cv_net":cv,"spend":{"nullifier":vec![0u8;32],"rk":rk,"alpha":alpha,"fvk":orchard::keys::FullViewingKey::from(key.orchard()).to_bytes().to_vec(),"proprietary":{}},"output":{"cmx":vec![0u8;32],"ephemeral_key":rk,"enc_ciphertext":{"Encrypted":vec![0u8;580]},"out_ciphertext":vec![0u8;80],"proprietary":{}}}],"flags":7,"value_sum":[0,true],"anchor":null,"note_version":"V3"}); }
         let path=vec![0x8000002c,0x80000001,0x80000000,0,5];
         let p=crate::Document::parse(PARAMS).unwrap();
         let public=key.transparent().to_account_pubkey().derive_pubkey_at_bip32_path(&p,zip32::AccountId::ZERO,&path.iter().map(|n|(*n).into()).collect::<Vec<_>>()).unwrap();
@@ -201,11 +222,16 @@ mod authorization_tests {
             input.set_hash160_preimage(public.serialize().to_vec());input.set_bip32_derivation(public.serialize(),zcash_transparent::pczt::Bip32Derivation::parse([0;32],path).unwrap());Ok(())
         })).unwrap().finish()
     }
+    fn fixture(key:&UnifiedSpendingKey)->Pczt { fixture_for(key,BranchId::Nu6_3) }
     #[test]
     fn native_signer_authorizes_three_pools_with_verified_signatures() {
         let authority=key(61);let unsigned=fixture(&authority);
         let token=SIGNERS.with(|table|{let mut t=table.borrow_mut();t.push(Some(Signer{key:authority,parameters:PARAMS.to_vec(),genesis:vec![3;32],account_index:0,bindings:vec![]}));t.len() as u32});
+        let caps:serde_json::Value=serde_json::from_str(&signer_capabilities(token).unwrap()).unwrap();
+        assert_eq!(caps["authorizations"].as_array().unwrap().len(),5);
+        assert_eq!(caps["maxPcztBytes"],MAX_PCZT_BYTES);
         let raw=unsigned.clone().serialize().unwrap();
+        assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,MAX_PCZT_BYTES+1).unwrap_err(),"RESOURCE_LIMIT");
         let output=signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap();
         let signed=Pczt::parse(&output).unwrap();
         let mut sapling_signature=None;let mut transparent_signature=None;
@@ -220,6 +246,28 @@ mod authorization_tests {
         assert_eq!(signer_authorize(token,PARAMS,&[4;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap_err(),"NETWORK_MISMATCH");
         let foreign=fixture(&key(62)).serialize().unwrap();
         assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&foreign,65536).unwrap_err(),"SIGNER_MISMATCH");
+        for (branch,height) in [(BranchId::Nu5,60),(BranchId::Nu6,70),(BranchId::Nu6_1,80),(BranchId::Nu6_2,90)] {
+            let original=fixture_for(&key(61),branch);
+            let bytes=original.clone().serialize().unwrap();
+            let wire2=pczt::v2::Pczt::try_from(original.clone()).unwrap().serialize();
+            signer_authorize(token,PARAMS,&[3;32],height,branch.into(),&wire2,65536).unwrap();
+            let result=signer_authorize(token,PARAMS,&[3;32],height,branch.into(),&bytes,65536).unwrap();
+            let signed=Pczt::parse(&result).unwrap();
+            let mut signature=None;
+            Verifier::new(signed.clone()).with_sapling::<(),_>(|b|{signature=b.spends()[0].spend_auth_sig().clone();Ok(())}).unwrap();
+            Role::new(original).unwrap().apply_sapling_signature(0,signature.unwrap()).unwrap();
+            Verifier::new(signed).with_transparent::<(),_>(|b|{assert_eq!(b.inputs()[0].partial_signatures().len(),1);Ok(())}).unwrap();
+        }
+        if let Ok(path)=std::env::var("SIGNER_FIXTURE_OUT") {
+            let mnemonic="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+            let seed=bip39::Mnemonic::parse(mnemonic).unwrap().to_seed("");
+            let authority=UnifiedSpendingKey::from_seed(&crate::Document::parse(PARAMS).unwrap(),&seed,zip32::AccountId::ZERO).unwrap();
+            let vectors=[(BranchId::Nu5,60),(BranchId::Nu6,70),(BranchId::Nu6_1,80),(BranchId::Nu6_2,90),(BranchId::Nu6_3,100)].into_iter().map(|(branch,height)| {
+                let value=fixture_for(&authority,branch);
+                json!({"height":height,"branch":u32::from(branch),"bytes":hex::encode(value.clone().serialize().unwrap()),"wire2":hex::encode(pczt::v2::Pczt::try_from(value).unwrap().serialize())})
+            }).collect::<Vec<_>>();
+            std::fs::write(path,serde_json::to_string_pretty(&json!({"parameters":String::from_utf8(PARAMS.to_vec()).unwrap(),"genesis":hex::encode([3;32]),"mnemonic":mnemonic,"vectors":vectors})).unwrap()+"\n").unwrap();
+        }
         signer_release(token).unwrap();
         assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap_err(),"STALE_HANDLE");
     }

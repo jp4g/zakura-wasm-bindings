@@ -42,6 +42,14 @@ export function initializeWalletRuntime(wasm) {
   return Object.freeze({
     get invalid() { return invalid; },
     signers: Object.freeze({
+      capabilities(token) { uint(token); return JSON.parse(run(undefined, () => binding.signer_capabilities(token))); },
+      authorize(token, format, parameters, genesis, height, branch, bytes, maximum) {
+        uint(token); const { params, identity } = network(format, parameters, genesis);
+        if (!Number.isInteger(height) || height < 0 || height > 0xffffffff || !Number.isInteger(branch) || branch < 0 || branch > 0xffffffff) throw TypeError("INVALID_ARGUMENT");
+        if (!Number.isInteger(maximum) || maximum < 1 || maximum > 4 * 1024 * 1024) throw TypeError("RESOURCE_LIMIT");
+        const input = copyBytes(bytes, maximum, "invalid PCZT");
+        return run(undefined, () => binding.signer_authorize(token, params, identity, height, branch, input, maximum));
+      },
       describe(token) { uint(token); return JSON.parse(run(undefined, () => binding.signer_describe(token))); },
       release(token) { uint(token); return run(undefined, () => binding.signer_release(token)); },
     }),
