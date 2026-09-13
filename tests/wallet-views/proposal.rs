@@ -157,6 +157,8 @@ fn proposal_shielding_uses_native_utxos_and_atomic_idempotency() {
     assert_eq!(plan["steps"][0]["outputs"][0]["pool"],"sapling");
     assert_eq!(plan["steps"][0]["outputs"][0]["address"],Value::Null);
     assert_eq!(propose(g,"proposal_create",input.clone()).unwrap(),plan);
+    let mut exhausted=input.clone();exhausted["revision"]=plan["revision"].clone();exhausted["idempotencyKey"]=json!("new-shield");
+    assert_eq!(propose(g,"proposal_create",exhausted).unwrap_err(),"NOTHING_TO_SHIELD");
     for field in ["threshold","maxFee"] {let mut changed=input.clone();changed[field]=json!("20000");assert_eq!(propose(g,"proposal_create",changed).unwrap_err(),"IDEMPOTENCY_CONFLICT");}
     crate::wallet::storage_close(g).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();

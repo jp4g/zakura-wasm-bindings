@@ -246,7 +246,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                 if addresses.is_empty(){return Err("NOTHING_TO_SHIELD".into());}
                 let plan=propose_shielding::<_,_,_,_,rusqlite::Error>(db,&p,&selector,&strategy,threshold,&addresses,account,confirmations,
                     zcash_client_backend::data_api::CoinbaseFilter::AllTransparentOutputs,Some(LockRequest::new(LockOwner::new(id),lock_blocks)))
-                    .map_err(|e|Failure::from(match e {zcash_client_backend::data_api::error::Error::InsufficientFunds{..}=>"NOTHING_TO_SHIELD",zcash_client_backend::data_api::error::Error::ScanRequired=>"SYNC_REQUIRED",_=>"BACKEND_ERROR"}))?;
+                    .map_err(|e|Failure::from(match e {zcash_client_backend::data_api::error::Error::InsufficientFunds{..}|zcash_client_backend::data_api::error::Error::Change(zcash_client_backend::fees::ChangeError::InsufficientFunds{..})=>"NOTHING_TO_SHIELD",zcash_client_backend::data_api::error::Error::ScanRequired=>"SYNC_REQUIRED",_=>"BACKEND_ERROR"}))?;
                 wire::Proposal::from_standard_proposal(&plan.with_proposed_version(Some(version)))
             }else{
                 let plan=propose_transfer::<_,_,_,_,rusqlite::Error>(db,&p,account,&selector,&strategy,request.unwrap(),confirmations,&spend,Some(LockRequest::new(LockOwner::new(id),lock_blocks)),Some(version))
