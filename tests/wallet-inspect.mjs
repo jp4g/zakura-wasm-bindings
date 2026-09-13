@@ -8,11 +8,13 @@ const module = new WebAssembly.Module(bytes);
 const imports = WebAssembly.Module.imports(module);
 // time's pinned wasm-bindgen clock uses Date construction and getTime.
 const generated = ['__wbg_getTime_65922ba0b59d55a7', '__wbg_new_0_35540e542ba689d2', '__wbg_getRandomValues_a678b7300e8ed57f', '__wbg_getRandomValues_436a51d0629d84e1', '__wbg___wbindgen_throw_5d9e815e6fdf150f', '__wbindgen_init_externref_table', '__wbindgen_generic_0000000000000001'];
+// Shared-memory getrandom uses an ordinary Uint8Array, then copies into WASM.
+const sharedGenerated = ['__wbg_getRandomValues_18a36ae0f9014eda', '__wbg_getRandomValues_104f2a2a337e0ecc', '__wbg_length_31bdaf014f5fbde2', '__wbg_prototypesetcall_ae9f5e7459250748', '__wbg_new_with_length_5ffeddb9d9fbb96f', '__wbg_subarray_1daff70dde20c145'];
 const host = ['entropy', 'utc_ms', 'sleep', 'host_error', 'file_open', 'file_close', 'file_read', 'file_write', 'file_truncate', 'file_sync', 'file_size', 'file_lock', 'file_unlock', 'file_reserved', 'file_delete', 'file_access'];
 for (const entry of imports) {
   if (threaded && entry.kind === 'memory') { assert.equal(entry.module, './bindings_bg.js'); assert.equal(entry.name, 'memory'); continue; }
   assert.equal(entry.kind, 'function');
-  assert.ok(entry.module === './bindings_bg.js' && generated.includes(entry.name) || entry.module === './wallet-host/storage-host.mjs' && host.includes(entry.name), JSON.stringify(entry));
+  assert.ok(entry.module === './bindings_bg.js' && (generated.includes(entry.name) || threaded && sharedGenerated.includes(entry.name)) || entry.module === './wallet-host/storage-host.mjs' && host.includes(entry.name), JSON.stringify(entry));
 }
 // Read the memory limits from these same validated module bytes.
 let at = 8, limits;

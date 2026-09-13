@@ -58,7 +58,11 @@ if (!isMainThread) {
         await Promise.all([0,1].map(async index=>{const compute=spawn('compute'),loaded=next(compute);compute.postMessage({...prepared,index});assert.deepEqual(await loaded,{loaded:true});}));
         const finished=next(owner);owner.postMessage({build:true});const result=await finished;
         assert.equal(result.pass,true);
-        if(create) first=result.result;else assert.deepEqual(result.result,first,'exact persisted scan/balance after fresh shared owner');
+        if(create) first=result.result;
+        else {
+          assert.notEqual(result.result.scan.revision,first.scan.revision,'fresh owner has a new revision epoch');
+          assert.deepEqual({...result.result,scan:{...result.result.scan,revision:first.scan.revision}},first,'exact persisted scan/balance after fresh shared owner');
+        }
       } finally {
         const stopped=await Promise.allSettled(workers.map(async w=>{await w.terminate();destroyed++;}));
         const failure=stopped.find(result=>result.status==='rejected');if(failure)throw failure.reason;
