@@ -98,6 +98,10 @@ pub(super) fn validate(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Resul
     if actual.contains_key(super::creation::TABLE) {
         expected.insert(super::creation::TABLE.into(), ("table".into(), super::creation::TABLE.into(), Some(super::creation::SQL.into())));
     }
+    if actual.contains_key(super::proposal::TABLE) {
+        expected.insert(super::proposal::TABLE.into(), ("table".into(), super::proposal::TABLE.into(), Some(super::proposal::SQL.into())));
+        expected.insert("sqlite_autoindex_ext_wallet_proposals_1".into(), ("index".into(), super::proposal::TABLE.into(), None));
+    }
     // Exact producer text preserves literals and SQLite's indirect rewrites.
     // No view is prepared: legitimate intermediate views can be unselectable.
     if actual != expected { return Err(MISMATCH.into()); }
