@@ -75,6 +75,27 @@ fn creation_scanned_frontiers_and_rewind_invalidation() {
     let mut raw=Vec::new();zcash_primitives::merkle_tree::write_commitment_tree(&ironwood_tree,&mut raw).unwrap();tree.ironwood_tree=hex::encode(raw);
     let mut populated=input.clone();populated["treeState"]=json!(hex::encode(tree.encode_to_vec()));
     crate::wallet::sync::sync_call(g,"scan_complete",&populated.to_string()).unwrap();
+    // Ordinary empty blocks need no upstream checkpoint, but are valid sync targets.
+    let mut previous=target["hash"].as_str().unwrap().to_owned();
+    for height in 101..=102u32 {
+        let mut hash=vec![0x31;32];hash[0]=(height-100) as u8;
+        let next=json!({"height":height,"hash":hex::encode(&hash)});
+        let plan:Value=serde_json::from_str(&crate::wallet::scan::scan_call(g,"scan_plan",&json!({"target":next}).to_string()).unwrap()).unwrap();
+        let empty=zcash_client_backend::proto::compact_formats::CompactBlock{height:height.into(),hash,prev_hash:hex::decode(&previous).unwrap(),chain_metadata:block.chain_metadata.clone(),..Default::default()};
+        crate::wallet::scan::scan_call(g,"scan_ingest_batch",&json!({"revision":plan["revision"],"target":next,"priorTreeState":hex::encode(tree.encode_to_vec()),"blocks":[hex::encode(empty.encode_to_vec())]}).to_string()).unwrap();
+        previous=next["hash"].as_str().unwrap().to_owned();tree.height=height.into();tree.hash=hex::encode(hex::decode(&previous).unwrap().into_iter().rev().collect::<Vec<_>>());
+    }
+    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.first_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
+        for prefix in ["sapling","orchard","ironwood"] {assert_eq!(ext.query_row(&format!("SELECT COUNT(*) FROM {prefix}_tree_checkpoints WHERE checkpoint_id=102"),[],|r|r.get::<_,u32>(0))?,0);}
+        Ok(())
+    })).unwrap();
+    let mut suffix=complete_target(g,102,&previous);suffix["treeState"]=json!(hex::encode(tree.encode_to_vec()));
+    let mut bad=suffix.clone();let mut wrong_tree=tree.clone();wrong_tree.sapling_tree="000000".into();bad["treeState"]=json!(hex::encode(wrong_tree.encode_to_vec()));
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_complete",&bad.to_string()).unwrap_err(),"CHAIN_MISMATCH");
+    let completed:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_complete",&suffix.to_string()).unwrap()).unwrap();
+    crate::wallet::sync::sync_call(g,"scan_rewind",&json!({"revision":completed["revision"],"requestedPoint":target}).to_string()).unwrap();
+    let reset=complete_target(g,100,target["hash"].as_str().unwrap());populated["revision"]=reset["revision"].clone();
+    crate::wallet::sync::sync_call(g,"scan_complete",&populated.to_string()).unwrap();
     let historical=complete(g,99); // 99 is retained as a block, but native rewind needs checkpoint96.
     crate::wallet::sync::sync_call(g,"scan_complete",&historical.to_string()).unwrap();
     crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.first_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
