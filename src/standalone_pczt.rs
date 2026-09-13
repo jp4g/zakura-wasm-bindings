@@ -230,9 +230,12 @@ mod tests {
         // Move the finalized input through its public mutable slot, preserving it
         // beside a pending input without assuming Input implements Clone.
         let finalized=std::mem::replace(&mut complete.inputs_mut()[0],pending_input(0));
-        let mixed=Bundle::parse(vec![finalized,pending_input(2)],vec![]).unwrap();
+        let mut mixed=Bundle::parse(vec![finalized,pending_input(2)],vec![]).unwrap();
         assert!(transparent_complete(&mixed).unwrap());
         assert!(mixed.inputs()[0].script_sig().is_some());assert!(mixed.inputs()[1].script_sig().is_none());
         assert_eq!(mixed.inputs()[1].partial_signatures().len(),2);
+        // Locked structural finalizer reprocesses the completed P2SH input after
+        // clearing its redeem script; the pending input has all native role material.
+        assert!(matches!(mixed.finalize_spends(),Err(zcash_transparent::pczt::SpendFinalizerError::MissingRedeemScript)));
     }
 }
