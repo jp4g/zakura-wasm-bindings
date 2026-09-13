@@ -1,7 +1,7 @@
 # Native submission journal
 
 `payment_call` exposes local operation inventory, reconciliation, endpoint observations,
-and single-step exact-byte attempt reservations. It performs no network I/O. The host
+and per-step exact-byte attempt reservations for all retained proposal steps. It performs no network I/O. The host
 must serialize the complete reconcile/observe/begin/dispatch/finish interval for each
 operation; local reconciliation may classify an interrupted `started` record as unknown.
 A successful begin commits consent and attempt-start before returning bytes. A later
@@ -25,9 +25,13 @@ against retained native chain identity; missing chain evidence requires explicit
 Inventory captures a creation high-water mark and walks pages of at most 200 IDs.
 Reads project all retained proposal steps and bounded attempt history, without loading
 signers or proving assets. Material flags reuse native PCZT inspection and are structural,
-not a claim of cryptographic authorization or available host assets. The dispatch path
-is single-step; multi-step local scheduling is a separate integration.
+not a claim of cryptographic authorization or available host assets. Native eligibility
+checks retained dependencies before each step: acknowledgement alone does not establish
+a parent, and automatic recovery never first-dispatches an unattempted child. The host
+owns network observation and parent-first dispatch; the native journal owns eligibility,
+consent, and exact-byte attempt records.
 
 Finalization reuses native extraction/storage and immutable finalized records. The
 already-finalized transparent-input limitation remains tracked by private SDK issue 102;
 this journal does not change the underlying finalizer or claim that edge is qualified.
+Actual combined Node/browser runtime qualification remains pending.
