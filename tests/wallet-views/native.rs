@@ -4,6 +4,8 @@ use super::*;
 mod creation;
 #[path = "sync.rs"]
 mod sync;
+#[path = "proposal.rs"]
+mod proposal;
 use serde_json::{json, Value};
 use zcash_client_backend::proto::service::TreeState;
 use prost::Message;
