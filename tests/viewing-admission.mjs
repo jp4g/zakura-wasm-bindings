@@ -8,7 +8,7 @@ const native=()=>({describe:()=>'{"kind":"ufvk"}',export:()=> 'viewing-key',to_i
 const context=vm.createContext({Uint8Array,JSON,Object,Number,TypeError,Error,parseInt});
 const facade=new vm.SourceTextModule(fs.readFileSync(new URL('../network.mjs',import.meta.url),'utf8'),{context});
 await facade.link(specifier=>{
-  const exports=specifier==='./bytes.mjs'?{copyBytes}:{initSync(){initializations++;},consensus_branch(){return 0;},viewing_open(){opens++;return native();},viewing_decode_address(){return '{"encoded":"address","knownReceivers":[],"unknownTypecodes":[100]}';},viewing_select_receiver(){return '{"pool":"sapling","type":"sapling","bytes":"00ff"}';}};
+  const exports=specifier==='./bytes.mjs'?{copyBytes}:{validate_birthday(){},initSync(){initializations++;},consensus_branch(){return 0;},viewing_open(){opens++;return native();},viewing_decode_address(){return '{"encoded":"address","knownReceivers":[],"unknownTypecodes":[100]}';},viewing_select_receiver(){return '{"pool":"sapling","type":"sapling","bytes":"00ff"}';}};
   return new vm.SyntheticModule(Object.keys(exports),function(){for(const [key,value]of Object.entries(exports))this.setExport(key,value);},{context});
 });
 await facade.evaluate();
