@@ -24,7 +24,8 @@ assert.equal(api.runtimeIdentity.dependencyGraphSha256, digest(readFileSync(join
 assert.equal(api.runtimeIdentity.contractRevision, profile.contractRevision);
 assert.deepEqual(api.runtimeIdentity.schemas, result.manifest.schemas);
 assert.equal(api.runtimeIdentity.schemas.operations.walletViews, '4');
-assert.equal(api.runtimeIdentity.schemas.operations.walletSigner, '1');
+assert.equal(api.runtimeIdentity.schemas.operations.walletSigner, '2');
+assert.equal(api.runtimeIdentity.schemas.operations.walletProposals, '1');
 assert.equal(api.runtimeIdentity.schemas.operations.walletScan, '1');
 assert.equal(api.runtimeIdentity.schemas.operations.walletSync, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletEnhancement, '1');
