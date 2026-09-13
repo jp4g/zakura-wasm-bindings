@@ -108,3 +108,119 @@ pub fn signer_unbind(token:u32,generation:u32,account_id:&str)->Result<(),String
 pub(super) fn is_bound(generation:u32,account_id:&str)->bool {
     SIGNERS.with(|table| table.borrow().iter().flatten().any(|signer| signer.bindings.iter().any(|(g,id)|*g==generation && id.expose_uuid().to_string()==account_id)))
 }
+
+/// Authorize only spends controlled by this retained key; account IDs are not authority.
+#[wasm_bindgen]
+pub fn signer_authorize(token:u32,parameters:&[u8],genesis:&[u8],height:u32,branch:u32,bytes:&[u8],maximum:u32)->Result<Vec<u8>,String> {
+    use pczt::roles::{signer::{Signer as Role,Error as RoleError},verifier::{Verifier,OrchardError}};
+    use zcash_transparent::keys::{TransparentKeyScope,NonHardenedChildIndex};
+    super::DOMAIN.with(|domain| {
+        if domain.try_borrow().map_err(|_|"STORAGE_BUSY")?.failed.is_some() {Err("DOMAIN_INVALID")} else {Ok(())}
+    })?;
+    SIGNERS.with(|table| {
+        let table=table.try_borrow().map_err(|_|"STORAGE_BUSY")?;
+        let signer=table.get(index(token)?).and_then(Option::as_ref).ok_or("STALE_HANDLE")?;
+        if parameters!=signer.parameters || genesis!=signer.genesis {return Err("NETWORK_MISMATCH".into());}
+        let p=crate::Document::parse(parameters).map_err(|_|"INVALID_ARGUMENT")?;
+        let pczt=crate::standalone_pczt::parse_standalone_pczt(parameters,genesis,height,branch,bytes,maximum)?.into_value();
+        let mut transparent=Vec::new();
+        let pczt=Verifier::new(pczt).with_ironwood::<(),_>(|bundle| {
+            bundle.verify_cross_address_restriction().map_err(|_|OrchardError::Custom(()))
+        }).map_err(|_|"INVALID_PCZT")?.with_transparent::<(),_>(|bundle| {
+            for (index,input) in bundle.inputs().iter().enumerate() {
+                for (public,derivation) in input.bip32_derivation() {
+                    let path=derivation.derivation_path();
+                    if path.len()!=5 {continue;}
+                    let public_key=signer.key.transparent().to_account_pubkey().derive_pubkey_at_bip32_path(&p,zip32::AccountId::try_from(signer.account_index).expect("native account index"),path);
+                    if !public_key.is_ok_and(|key|key.serialize()==*public) {continue;}
+                    let invalid=||pczt::roles::verifier::TransparentError::Custom(());
+                    let scope=TransparentKeyScope::custom(path[3].index()).ok_or_else(invalid)?;
+                    let child=NonHardenedChildIndex::from_index(path[4].index()).ok_or_else(invalid)?;
+                    transparent.push((index,signer.key.transparent().derive_secret_key(scope,child).map_err(|_|invalid())?));
+                }
+            }
+            Ok(())
+        }).map_err(|_|"INVALID_PCZT")?.finish();
+        let sapling=pczt.sapling().spends().len();
+        let ironwood=pczt.ironwood().actions().len();
+        let mut role=Role::new(pczt).map_err(|_|"ROLE_PRECONDITION")?;
+        let mut signed=0usize;
+        for (index,key) in transparent {role.sign_transparent(index,&key).map_err(|_|"INVALID_PCZT")?;signed+=1;}
+        for index in 0..sapling {
+            match role.sign_sapling(index,&signer.key.sapling().expsk.ask) {
+                Ok(())=>signed+=1,
+                Err(RoleError::SaplingSign(sapling::pczt::SignerError::WrongSpendAuthorizingKey))=>{},
+                Err(_)=>return Err("INVALID_PCZT".into()),
+            }
+        }
+        let ask=signer.key.orchard().into();
+        for index in 0..ironwood {
+            match role.sign_ironwood(index,&ask) {
+                Ok(())=>signed+=1,
+                Err(RoleError::IronwoodSign(orchard::pczt::SignerError::WrongSpendAuthorizingKey))=>{},
+                Err(_)=>return Err("INVALID_PCZT".into()),
+            }
+        }
+        if signed==0 {return Err("SIGNER_MISMATCH".into());}
+        let output=role.finish().serialize().map_err(|_|"INVALID_PCZT")?;
+        if output.len()>maximum as usize {return Err("RESOURCE_LIMIT".into());}
+        Ok(output)
+    })
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use pczt::{Pczt,roles::{creator::Creator,updater::Updater,signer::Signer as Role,verifier::Verifier}};
+    use zcash_protocol::consensus::BranchId;
+    use zcash_script::script::Evaluable;
+    const PARAMS:&[u8]=br#"{"encoding":"regtest","Overwinter":10,"Sapling":20,"Blossom":30,"Heartwood":40,"Canopy":50,"Nu5":60,"Nu6":70,"Nu6_1":80,"Nu6_2":90,"Nu6_3":100}"#;
+    fn key(seed:u8)->UnifiedSpendingKey {UnifiedSpendingKey::from_seed(&crate::Document::parse(PARAMS).unwrap(),&[seed;32],zip32::AccountId::ZERO).unwrap()}
+    fn fixture(key:&UnifiedSpendingKey)->Pczt {
+        // Native Creator/Updater plus synthetic effects, following upstream role fixtures.
+        // This qualifies actual authorization signatures, not proofs or spendability.
+        let branch=BranchId::Nu6_3;
+        let base=Creator::new(branch.into(),140,1,None,None).unwrap().build().unwrap();
+        let mut value=serde_json::to_value(pczt::v2::Pczt::try_from(base).unwrap()).unwrap();
+        let alpha={let mut a=[0u8;32];a[0]=1;a};
+        let rcv=sapling::value::ValueCommitTrapdoor::from_bytes(alpha).unwrap();
+        let cv=sapling::value::ValueCommitment::derive(sapling::value::NoteValue::from_raw(0),rcv).to_bytes();
+        let rk:[u8;32]=sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).randomize(&1u64.into()).into();
+        value["sapling"]=json!({"spends":[{"cv":cv,"nullifier":vec![0u8;32],"rk":rk,"alpha":alpha,"proof_generation_key":[sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).to_bytes(),key.sapling().expsk.nsk.to_bytes()],"proprietary":{}}],"outputs":[],"value_sum":0,"anchor":null});
+        let ask=orchard::keys::SpendAuthorizingKey::from(key.orchard());
+        let rk:[u8;32]=orchard::keys::SpendValidatingKey::from(&ask).randomize(&1u64.into()).into();
+        let cv=orchard::value::ValueCommitment::derive(orchard::value::NoteValue::from_raw(0)-orchard::value::NoteValue::from_raw(0),orchard::value::ValueCommitTrapdoor::from_bytes(alpha).unwrap()).to_bytes();
+        value["ironwood"]=json!({"actions":[{"cv_net":cv,"spend":{"nullifier":vec![0u8;32],"rk":rk,"alpha":alpha,"fvk":orchard::keys::FullViewingKey::from(key.orchard()).to_bytes().to_vec(),"proprietary":{}},"output":{"cmx":vec![0u8;32],"ephemeral_key":rk,"enc_ciphertext":{"Encrypted":vec![0u8;580]},"out_ciphertext":vec![0u8;80],"proprietary":{}}}],"flags":7,"value_sum":[0,true],"anchor":null,"note_version":"V3"});
+        let path=vec![0x8000002c,0x80000001,0x80000000,0,5];
+        let p=crate::Document::parse(PARAMS).unwrap();
+        let public=key.transparent().to_account_pubkey().derive_pubkey_at_bip32_path(&p,zip32::AccountId::ZERO,&path.iter().map(|n|(*n).into()).collect::<Vec<_>>()).unwrap();
+        let script=zcash_transparent::address::TransparentAddress::from_pubkey(&public).script().to_bytes();
+        value["transparent"]=json!({"inputs":[{"prevout_txid":vec![1u8;32],"prevout_index":0,"value":1,"script_pubkey":script,"partial_signatures":{},"sighash_type":1,"bip32_derivation":{},"ripemd160_preimages":{},"sha256_preimages":{},"hash160_preimages":{},"hash256_preimages":{},"proprietary":{}}],"outputs":[]});
+        let raw=serde_json::from_value::<pczt::v2::Pczt>(value).unwrap().serialize();
+        Updater::new(Pczt::parse(&raw).unwrap()).update_transparent_with(|mut bundle|bundle.update_input_with(0,|mut input| {
+            input.set_hash160_preimage(public.serialize().to_vec());input.set_bip32_derivation(public.serialize(),zcash_transparent::pczt::Bip32Derivation::parse([0;32],path).unwrap());Ok(())
+        })).unwrap().finish()
+    }
+    #[test]
+    fn native_signer_authorizes_three_pools_with_verified_signatures() {
+        let authority=key(61);let unsigned=fixture(&authority);
+        let token=SIGNERS.with(|table|{let mut t=table.borrow_mut();t.push(Some(Signer{key:authority,parameters:PARAMS.to_vec(),genesis:vec![3;32],account_index:0,bindings:vec![]}));t.len() as u32});
+        let raw=unsigned.clone().serialize().unwrap();
+        let output=signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap();
+        let signed=Pczt::parse(&output).unwrap();
+        let mut sapling_signature=None;let mut transparent_signature=None;
+        Verifier::new(signed.clone()).with_sapling::<(),_>(|b|{sapling_signature=b.spends()[0].spend_auth_sig().clone();Ok(())}).unwrap()
+          .with_transparent::<(),_>(|b|{transparent_signature=Some(b.inputs()[0].partial_signatures().values().next().unwrap().clone());Ok(())}).unwrap();
+        let mut verifier=Role::new(unsigned.clone()).unwrap();
+        verifier.apply_sapling_signature(0,sapling_signature.unwrap()).unwrap();
+        verifier.apply_ironwood_signature(0,signed.ironwood().actions()[0].spend().spend_auth_sig().unwrap().into()).unwrap();
+        let signature=transparent_signature.unwrap();
+        Role::new(signed.clone()).unwrap().append_transparent_signature(0,secp256k1::ecdsa::Signature::from_der(&signature[..signature.len()-1]).unwrap()).unwrap();
+        assert!(Role::new(unsigned).unwrap().apply_sapling_signature(0,[0u8;64].into()).is_err());
+        assert_eq!(signer_authorize(token,PARAMS,&[4;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap_err(),"NETWORK_MISMATCH");
+        let foreign=fixture(&key(62)).serialize().unwrap();
+        assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&foreign,65536).unwrap_err(),"SIGNER_MISMATCH");
+        signer_release(token).unwrap();
+        assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap_err(),"STALE_HANDLE");
+    }
+}

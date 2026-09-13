@@ -2266,6 +2266,7 @@ dependencies = [
  "prost",
  "rand_core 0.10.1",
  "rusqlite",
+ "secp256k1",
  "secrecy",
  "serde_json",
  "uuid",
