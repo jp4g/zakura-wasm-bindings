@@ -88,15 +88,16 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
         let prepared = (|| -> Result<(), String> {
             let conn = std::borrow::BorrowMut::<Connection>::borrow_mut(&mut owned);
             validate_schema(conn, bytes, genesis)?;
-            conn.execute_batch("PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;").map_err(|_| "STORAGE_POLICY_FAILED")?;
+            let memory = path == ":memory:";
+            conn.execute_batch(if memory { "PRAGMA journal_mode=MEMORY; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;" } else { "PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;" }).map_err(|_| "STORAGE_POLICY_FAILED")?;
             let journal: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;
             let synchronous: u32 = conn.query_row("PRAGMA synchronous", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;
             let temp: u32 = conn.query_row("PRAGMA temp_store", [], |r| r.get(0)).map_err(|_| "STORAGE_POLICY_FAILED")?;
-            if journal != "truncate" || synchronous != 2 || temp != 2 { return Err("STORAGE_POLICY_FAILED".into()); }
+            if journal != if memory { "memory" } else { "truncate" } || synchronous != 2 || temp != 2 { return Err("STORAGE_POLICY_FAILED".into()); }
             #[cfg(target_arch = "wasm32")]
             {
-                unsafe extern "C" { fn wallet_policy(conn: *mut rusqlite::ffi::sqlite3) -> i32; }
-                if unsafe { wallet_policy(conn.handle()) } != 0 { return Err("STORAGE_POLICY_FAILED".into()); }
+                unsafe extern "C" { fn wallet_policy(conn: *mut rusqlite::ffi::sqlite3, memory: i32) -> i32; }
+                if unsafe { wallet_policy(conn.handle(), i32::from(memory)) } != 0 { return Err("STORAGE_POLICY_FAILED".into()); }
             }
             rusqlite::vtab::array::load_module(conn).map_err(|_| "STORAGE_INIT_FAILED")?;
             bind_network(conn, bytes, genesis)?;
@@ -139,6 +140,16 @@ pub fn storage_initialize(format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
         if unsafe { wallet_ready() } != 1 { return Err("RUNTIME_UNAVAILABLE".into()); }
     }
     initialize("/wallet.db", format, bytes, genesis)
+}
+
+#[wasm_bindgen]
+pub fn storage_initialize_memory(format: &str, bytes: &[u8], genesis: &[u8]) -> Result<u32, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        unsafe extern "C" { fn wallet_ready() -> i32; }
+        if unsafe { wallet_ready() } != 1 { return Err("RUNTIME_UNAVAILABLE".into()); }
+    }
+    initialize(":memory:", format, bytes, genesis)
 }
 
 #[wasm_bindgen]

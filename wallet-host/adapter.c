@@ -129,12 +129,12 @@ double wallet_time(void) { return host_utc_ms(); }
 static int authorize(void *p, int op, const char *a, const char *b, const char *db, const char *trigger) {
  if (op == SQLITE_ATTACH || op == SQLITE_DETACH) return SQLITE_DENY;
  if (op == SQLITE_PRAGMA && b) {
-  if (!sqlite3_stricmp(a,"journal_mode") && sqlite3_stricmp(b,"truncate")) return SQLITE_DENY;
+  if (!sqlite3_stricmp(a,"journal_mode") && sqlite3_stricmp(b,p ? "memory" : "truncate")) return SQLITE_DENY;
   if (!sqlite3_stricmp(a,"synchronous") && sqlite3_stricmp(b,"full") && strcmp(b,"2")) return SQLITE_DENY;
   if (!sqlite3_stricmp(a,"locking_mode") && sqlite3_stricmp(b,"normal")) return SQLITE_DENY;
   if (!sqlite3_stricmp(a,"temp_store") && sqlite3_stricmp(b,"memory") && strcmp(b,"2")) return SQLITE_DENY;
  }
  return SQLITE_OK;
 }
-int wallet_policy(sqlite3 *db) { return sqlite3_set_authorizer(db, authorize, 0); }
+int wallet_policy(sqlite3 *db, int memory) { return sqlite3_set_authorizer(db, authorize, memory ? (void*)1 : 0); }
 

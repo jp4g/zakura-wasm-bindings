@@ -152,6 +152,8 @@ The private stateless lightwallet protobuf production codec is documented in [li
 
 ## Private wallet storage lifecycle candidate
 
+`initializeWalletRuntime(wasm).openMemory(format, parameters, genesis)` explicitly uses SQLite `:memory:` with the same wallet migrations and operations. It attaches no filesystem/OPFS backend, loses all state on close, and never serves as a fallback for durable storage failure. Durable connections retain their existing TRUNCATE journal policy; memory connections require MEMORY journals.
+
 The optional `wallet-storage` feature and `wallet.mjs` implement an internal schema lifecycle primitive for a later H1 owner. This is **not `wallet_open`, `WalletClient`, or complete recovery**. The branch starts from transaction candidate `acaf706`, which remains under independent review.
 
 `initializeStorage(verifiedWasmBytes, ownedBackend, format, parameters, genesis)` returns an instance-bound storage owner with `binding(generation, instance)` and `close(generation, instance)`. The enclosing host must supply an already validated `zcash-js-network/1` registration and checked genesis; this primitive persists and compares that identity, without making network requests to authenticate it. Parameters lower through the unchanged frozen parser. The backend performs real WalletDb migrations, loads rusqlite's array module and queries the resulting account schema. There are no account/signing/send or arbitrary SQL commands.

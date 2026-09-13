@@ -35,6 +35,12 @@ export function initializeWalletRuntime(wasm) {
   if (exports.wallet_runtime_init() !== 0) throw Error('RUNTIME_UNAVAILABLE');
   let opened = false;
   return Object.freeze({
+    openMemory(format, parameters, genesis) {
+      const { params, identity } = network(format, parameters, genesis);
+      if (opened) throw Error('DOMAIN_USED');
+      opened = true;
+      return openStorage(undefined, instance, format, params, identity);
+    },
     open(backend, format, parameters, genesis) {
       const { params, identity } = network(format, parameters, genesis);
       if (opened) throw Error('DOMAIN_USED');
@@ -45,7 +51,9 @@ export function initializeWalletRuntime(wasm) {
   });
 }
 function openStorage(backend, instance, format, params, identity) {
-  const generation = binding.storage_initialize(format, params, identity);
+  const generation = backend === undefined
+    ? binding.storage_initialize_memory(format, params, identity)
+    : binding.storage_initialize(format, params, identity);
   let closed = false, closeError;
   return {
     generation, instance,
@@ -66,7 +74,7 @@ function openStorage(backend, instance, format, params, identity) {
         binding.storage_close(token);
         // SQLite may ignore an xClose error. The host latch is authoritative too.
         if (host.state.closeError) throw Error('STORAGE_CLOSE_FAILED');
-        backend.release();
+        if (backend) backend.release();
       } catch { closeError = Error('STORAGE_CLOSE_FAILED'); throw closeError; }
     },
   };
