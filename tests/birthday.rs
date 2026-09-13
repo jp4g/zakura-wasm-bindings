@@ -16,3 +16,12 @@ fn birthday_uses_native_tree_validation_and_exact_boundaries() {
     tree.sapling_tree.clear();assert_eq!(validate_birthday(DOC,&[3;32],100,&tree.encode_to_vec(),None).unwrap_err(),"INVALID_BIRTHDAY");
     assert_eq!(validate_birthday(DOC,&[3;32],100,&[0],None).unwrap_err(),"INVALID_BIRTHDAY");
 }
+
+#[test]
+fn birthday_genesis_uses_protocol_bytes_and_display_tree_hash() {
+    let genesis:[u8;32]=std::array::from_fn(|i|i as u8);
+    let tree=TreeState{network:"regtest".into(),height:0,hash:hex::encode(genesis.iter().copied().rev().collect::<Vec<_>>()),..Default::default()};
+    assert!(validate_birthday(DOC,&genesis,1,&tree.encode_to_vec(),None).is_ok());
+    let reversed:Vec<u8>=genesis.iter().copied().rev().collect();
+    assert_eq!(validate_birthday(DOC,&reversed,1,&tree.encode_to_vec(),None).unwrap_err(),"NETWORK_MISMATCH");
+}
