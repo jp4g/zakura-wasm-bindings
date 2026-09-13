@@ -308,3 +308,12 @@ mod authorization_tests {
         assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap_err(),"STALE_HANDLE");
     }
 }
+
+// Synchronous worker-local borrowing only; no raw spending-key representation crosses the ABI.
+pub(super) fn with_spending_key<T>(token:u32, use_key:impl FnOnce(&UnifiedSpendingKey,&[u8],&[u8])->super::accounts::Result<T>)->super::accounts::Result<T> {
+    SIGNERS.with(|table| {
+        let table=table.try_borrow().map_err(|_|super::accounts::Failure::from("STORAGE_BUSY"))?;
+        let signer=table.get(index(token).map_err(super::accounts::Failure)?).and_then(Option::as_ref).ok_or(super::accounts::Failure::from("STALE_HANDLE"))?;
+        use_key(&signer.key,&signer.parameters,&signer.genesis)
+    })
+}

@@ -197,6 +197,7 @@ mod pczt_build;
 mod pczt_import;
 mod pczt_prove;
 mod pczt_finalize;
+mod fused_send;
 mod enhancement;
 
 mod query;

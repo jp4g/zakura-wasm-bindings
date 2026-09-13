@@ -28,7 +28,8 @@ pub(super) fn pczt_fixture()->Value {
     json!({"mnemonic":WORDS,"accountIndex":0,"external":scan_fixture(true,false),"internal":scan_fixture(true,true)})
 }
 fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32,Value,Option<u32>) {prepared_proving(post_zip212,with_signer,internal,false)}
-fn prepared_proving(post_zip212:bool,with_signer:bool,internal:bool,ironwood:bool)->(String,u32,Value,Option<u32>) {
+fn prepared_proving(post_zip212:bool,with_signer:bool,internal:bool,ironwood:bool)->(String,u32,Value,Option<u32>) {prepared_mode(post_zip212,with_signer,internal,ironwood,"transfer")}
+fn prepared_mode(post_zip212:bool,with_signer:bool,internal:bool,ironwood:bool,mode:&str)->(String,u32,Value,Option<u32>) {
     let fixture=if post_zip212{scan_fixture(with_signer,internal)}else{full_scan_fixture()};
     let (path,g)=open();
     let (account,token)=if with_signer {
@@ -42,8 +43,19 @@ fn prepared_proving(post_zip212:bool,with_signer:bool,internal:bool,ironwood:boo
     let t=call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"transparent"}})).unwrap();
     let s=call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"unified","transparent":"omit","sapling":if ironwood{"omit"}else{"require"},"ironwood":if ironwood{"require"}else{"omit"}}})).unwrap();
     let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();
-    let input=json!({"revision":state["revision"],"accountId":account["id"],"payments":[{"to":t["address"],"amount":"10000"},{"to":s["address"],"amount":"10000","memo":hex::encode(zcash_protocol::memo::MemoBytes::empty().as_array())}],
+    let mut input=json!({"revision":state["revision"],"accountId":account["id"],"payments":[{"to":t["address"],"amount":"10000"},{"to":s["address"],"amount":"10000","memo":hex::encode(zcash_protocol::memo::MemoBytes::empty().as_array())}],
         "policy":{"spendPools":["sapling"],"transparent":"disallow","changePool":if ironwood{"ironwood"}else{"sapling"},"feeRule":"zip317-standard","confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":false},"expiry":{"kind":"offset","blocks":40},"lockExpiryBlocks":20}});
+    if mode=="tex" {input["payments"]=json!([{"to":zcash_keys::address::Address::Tex([4;20]).encode(&crate::Document::parse(PARAMS).unwrap()),"amount":"10000"}]);}
+    if mode=="shield" {
+        crate::wallet::DOMAIN.with(|domain| {
+            let mut domain=domain.borrow_mut();let db=&mut domain.active.iter_mut().find(|a|a.generation==g).unwrap().wallet;
+            let zcash_keys::address::Address::Transparent(address)=zcash_keys::address::Address::decode(db.params(),t["address"].as_str().unwrap()).unwrap() else {panic!()};
+            let id=zcash_client_sqlite::AccountUuid::from_uuid(uuid::Uuid::parse_str(account["id"].as_str().unwrap()).unwrap());
+            let utxo=zcash_client_backend::wallet::WalletTransparentOutput::from_parts(zcash_transparent::bundle::OutPoint::new([33;32],0),zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(70000),address.script().into()),Some(40000u32.into()),Some(id),Some(TransparentKeyScope::EXTERNAL),None).unwrap();
+            db.put_received_transparent_utxo(&utxo).unwrap();
+        });
+        input.as_object_mut().unwrap().remove("payments");input["kind"]=json!("shield");input["threshold"]=json!("10000");input["policy"]["spendPools"]=json!(["transparent"]);input["policy"]["transparent"]=json!("allow-owned");
+    }
     let plan:Value=serde_json::from_str(&crate::wallet::proposal::proposal_call(g,"proposal_create",&input.to_string()).unwrap()).unwrap();
     (path,g,plan,token)
 }
@@ -224,4 +236,42 @@ fn prove_retained(ironwood:bool,finalize:bool) {
         old.as_object_mut().unwrap().remove("revision");reopened.as_object_mut().unwrap().remove("revision");assert_eq!(reopened,old);
     }
     crate::wallet::storage_close(g).unwrap();crate::wallet::signer::signer_release(token).unwrap();
+}
+
+#[test]
+#[ignore = "requires canonical parameters and real fused proving"]
+fn fused_send_real_transfer_shield_and_multistep() {
+    let root=std::env::var("PCZT_PROVING_PARAMETERS").unwrap();
+    let spend=std::fs::read(format!("{root}/sapling-spend.params")).unwrap();let output=std::fs::read(format!("{root}/sapling-output.params")).unwrap();
+    for mode in ["transfer","shield","tex"] {
+        let(path,g,plan,token)=prepared_mode(true,true,false,false,mode);let token=token.unwrap();
+        let call=|generation,token,spend:&[u8],output:&[u8]|crate::wallet::fused_send::fused_send_call(generation,plan["operationId"].as_str().unwrap(),plan["proposalId"].as_str().unwrap(),plan["reviewCommitment"].as_str().unwrap(),token,spend,output,4194304);
+        let conn=rusqlite::Connection::open(&path).unwrap();
+        let tables=["transactions","sent_notes","sapling_received_note_spends","transparent_received_output_spends","ext_wallet_finalized","ext_wallet_revision","addresses"];
+        let before=policy_rows(&conn,&tables);
+        assert_eq!(call(g,0,&spend,&output).unwrap_err(),"STALE_HANDLE");
+        assert_eq!(policy_rows(&conn,&tables),before);
+        conn.execute_batch(&format!("CREATE TRIGGER fused_fail BEFORE INSERT ON ext_wallet_finalized WHEN NEW.step={} BEGIN SELECT RAISE(ABORT,'fixture'); END",if mode=="tex"{1}else{0})).unwrap();
+        assert!(call(g,token,&spend,&output).is_err());conn.execute_batch("DROP TRIGGER fused_fail").unwrap();
+        assert_eq!(policy_rows(&conn,&tables),before,"all native effects and exact-byte rows roll back");
+        let result=call(g,token,&spend,&output).unwrap();let value:Value=serde_json::from_str(&result).unwrap();
+        assert_eq!(value["transactions"].as_array().unwrap().len(),if mode=="tex"{2}else{1});
+        for tx in value["transactions"].as_array().unwrap(){assert_eq!(tx["artifactId"],Value::Null);assert!(tx["bytes"].as_str().unwrap().len()>100);}
+        crate::wallet::signer::signer_release(token).unwrap();assert_eq!(call(g,0,&[],&[]).unwrap(),result,"retry uses stored bytes without authority or assets");
+        drop(conn);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        let reopened:Value=serde_json::from_str(&call(g,0,&[],&[]).unwrap()).unwrap();
+        for (old,new) in value["transactions"].as_array().unwrap().iter().zip(reopened["transactions"].as_array().unwrap()) {assert_eq!(old["bytes"],new["bytes"]);assert_eq!(old["txid"],new["txid"]);}
+        crate::wallet::storage_close(g).unwrap();
+    }
+}
+
+#[test]
+fn fused_signer_lookup_accepts_ironwood_only_account() {
+    let(path,g)=open();let p=crate::Document::parse(PARAMS).unwrap();
+    let seed=bip39::Mnemonic::parse(WORDS).unwrap().to_seed("");let ufvk=zcash_keys::keys::UnifiedSpendingKey::from_seed(&p,&seed,zip32::AccountId::ZERO).unwrap().to_unified_full_viewing_key();
+    let mut input=fixture(10);input["viewingKey"]=json!(ufvk.encode(&p));input["enabledPools"]=json!(["ironwood"]);
+    let account=call(g,"account_import",input).unwrap();
+    crate::wallet::DOMAIN.with(|domain|{let mut domain=domain.borrow_mut();let db=&mut domain.active.iter_mut().find(|a|a.generation==g).unwrap().wallet;
+        let found=db.get_account_for_ufvk(&ufvk).unwrap().expect("native full authority resolves Ironwood-only stored account");assert_eq!(found.id(),zcash_client_sqlite::AccountUuid::from_uuid(uuid::Uuid::parse_str(account["id"].as_str().unwrap()).unwrap()));
+    });crate::wallet::storage_close(g).unwrap();let _=path;
 }
