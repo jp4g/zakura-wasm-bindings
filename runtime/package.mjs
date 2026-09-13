@@ -9,7 +9,7 @@ import { rolldown, VERSION } from '/home/jack/zcash.js/node_modules/rolldown/dis
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const acceptedBuilds = {
   '635f8a8163fbd94c4c7ff0a2d6a47b5b3971b070b18475f7bfbe7f4428e4cdb7': { revision: 'bb74dace75d6f1ca3c43108cf46390db9469b5e4', mode: 'baseline' },
-  'f8572cdfe68259ae74ceb62385f98d096d3b5a0357bb7dea4dfa01f0e507014e': { revision: '061e3fcb25ae2b35f1953daf156a0fa051757b06', mode: 'threaded' },
+  'f8572cdfe68259ae74ceb62385f98d096d3b5a0357bb7dea4dfa01f0e507014e': { revision: '061e3fcb25ae2b35f1953daf156a0fa051757b06', mode: 'threaded', overlayRevision: 'dd9cd296c3dbee6635d4d7587fb03e1ae38d8702' },
 };
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
 // Version 6 adds exact finalized bytes and durable per-step submission records.
@@ -34,8 +34,8 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   const nativeReceipt = sha(receiptBytes), accepted = acceptedBuilds[nativeReceipt];
   requireThat(accepted, 'accepted native receipt mismatch');
   const receipt = JSON.parse(receiptBytes);
-  const { mode, revision: overlayRevision } = accepted;
-  requireThat(receipt.complete && receipt.revision === overlayRevision && (receipt.mode ?? 'baseline') === mode, 'native build identity');
+  const { mode, revision: nativeRevision } = accepted, overlayRevision = accepted.overlayRevision ?? nativeRevision;
+  requireThat(receipt.complete && receipt.revision === nativeRevision && (receipt.mode ?? 'baseline') === mode, 'native build identity');
   const inputs = {};
   for (const [name, digest] of Object.entries(receipt.artifacts)) {
     const bytes = readFileSync(resolve(nativeBuild, 'bundle', name));
@@ -43,7 +43,8 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
     inputs[name] = bytes;
   }
   for (const name of overlays) {
-    requireThat(inputs[name].equals(git('show', `${overlayRevision}:${name}`)), `startup overlay mismatch: ${name}`);
+    requireThat(inputs[name].equals(git('show', `${nativeRevision}:${name}`)), `native source mismatch: ${name}`);
+    inputs[name] = git('show', `${overlayRevision}:${name}`);
   }
   const entry = mode === 'threaded' ? readFileSync(resolve(root, 'runtime/entry.mjs')) : git('show', `${overlayRevision}:runtime/entry.mjs`);
   const sourceNames = ['bindings.js', 'bytes.mjs', 'wallet.mjs', 'views.mjs', 'network.mjs', 'transaction.mjs', 'wallet-host/storage-host.mjs'];
