@@ -102,6 +102,14 @@ pub(super) fn validate(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Resul
         expected.insert(super::proposal::TABLE.into(), ("table".into(), super::proposal::TABLE.into(), Some(super::proposal::SQL.into())));
         expected.insert("sqlite_autoindex_ext_wallet_proposals_1".into(), ("index".into(), super::proposal::TABLE.into(), None));
     }
+    if actual.contains_key(super::pczt_build::TABLE) {
+        expected.insert(super::pczt_build::TABLE.into(), ("table".into(), super::pczt_build::TABLE.into(), Some(super::pczt_build::SQL.into())));
+        expected.insert("sqlite_autoindex_ext_wallet_pczt_1".into(), ("index".into(), super::pczt_build::TABLE.into(), None));
+    }
+    if actual.contains_key(super::proposal::INTENTS) {
+        expected.insert(super::proposal::INTENTS.into(), ("table".into(), super::proposal::INTENTS.into(), Some(super::proposal::INTENTS_SQL.into())));
+        for index in [1,2] {expected.insert(format!("sqlite_autoindex_ext_wallet_proposal_intents_{index}"), ("index".into(), super::proposal::INTENTS.into(), None));}
+    }
     // Exact producer text preserves literals and SQLite's indirect rewrites.
     // No view is prepared: legitimate intermediate views can be unselectable.
     if actual != expected { return Err(MISMATCH.into()); }

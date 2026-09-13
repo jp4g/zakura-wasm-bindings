@@ -115,6 +115,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
             revision::initialize(conn, &epoch)?;
             creation::initialize(conn)?;
             proposal::initialize(conn)?;
+            pczt_build::initialize(conn)?;
             Ok(())
         })();
         if let Err(error) = prepared {
@@ -183,12 +184,14 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
 mod schema_prefix;
 
 mod accounts;
+mod account_lifecycle;
 pub mod signer;
 
 mod scan;
 mod sync;
 mod creation;
 mod proposal;
+mod pczt_build;
 mod enhancement;
 
 mod query;
