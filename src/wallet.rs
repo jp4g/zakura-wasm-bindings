@@ -114,6 +114,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
             conn.query_row("SELECT EXISTS(SELECT 1 FROM accounts LIMIT 1)", [], |r| r.get::<_, bool>(0)).map_err(|_| "SCHEMA_MISMATCH")?;
             revision::initialize(conn, &epoch)?;
             creation::initialize(conn)?;
+            proposal::initialize(conn)?;
             Ok(())
         })();
         if let Err(error) = prepared {
@@ -187,6 +188,7 @@ pub mod signer;
 mod scan;
 mod sync;
 mod creation;
+mod proposal;
 mod enhancement;
 
 mod query;

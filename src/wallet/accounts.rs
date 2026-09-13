@@ -362,7 +362,7 @@ pub fn views_mnemonic_call(generation: u32, input: &str, mnemonic: Vec<u8>, pass
 pub(super) fn mnemonic_account(generation: u32, operation: &str, input: &str, mnemonic: SecretVec<u8>, passphrase: SecretVec<u8>) -> Result<(Value, UnifiedSpendingKey)> {
     let mnemonic=normalized_secret(&mnemonic,4096)?;
     let passphrase=normalized_secret(&passphrase,65536)?;
-    let mnemonic=Mnemonic::parse_in_normalized(Language::English,mnemonic.expose_secret()).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+    let mnemonic=Mnemonic::parse_in_normalized(Language::English,mnemonic.expose_secret()).map_err(|_|Failure::from("INVALID_MNEMONIC"))?;
     let seed=Secret::new(mnemonic.to_seed_normalized(passphrase.expose_secret()));
     let seed=SecretVec::new(seed.expose_secret().to_vec());
     execute_seed(generation,operation,input,&seed)

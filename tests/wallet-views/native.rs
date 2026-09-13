@@ -4,6 +4,8 @@ use super::*;
 mod creation;
 #[path = "sync.rs"]
 mod sync;
+#[path = "proposal.rs"]
+mod proposal;
 use serde_json::{json, Value};
 use zcash_client_backend::proto::service::TreeState;
 use prost::Message;
@@ -785,7 +787,10 @@ fn mnemonic_vectors_normalization_and_rejection() {
         assert!(std::fs::read(path).unwrap().windows(phrase.len()).all(|w|w!=phrase.as_bytes()),"mnemonic not persisted");
     }
     let (path,g)=open();let before=std::fs::read(&path).unwrap();
-    for phrase in ["abandon ".repeat(12),"unknown ".repeat(12),"abandon ".repeat(11),"abandon ".repeat(13),"abandon ".repeat(25),MNEMONIC.to_uppercase(),MNEMONIC.replace("abandon","aban"),"あいこくしん ".repeat(12),"a".repeat(4097),"㍍".repeat(1000)] {
+    for phrase in ["abandon ".repeat(12),"unknown ".repeat(12),"abandon ".repeat(11),"abandon ".repeat(13),"abandon ".repeat(25),MNEMONIC.to_uppercase(),MNEMONIC.replace("abandon","aban"),"あいこくしん ".repeat(12)] {
+        assert_eq!(mnemonic(g,hd_input(0),phrase.as_bytes(),b"").unwrap_err(),"INVALID_MNEMONIC");
+    }
+    for phrase in ["a".repeat(4097),"㍍".repeat(1000)] {
         assert_eq!(mnemonic(g,hd_input(0),phrase.as_bytes(),b"").unwrap_err(),"INVALID_ARGUMENT");
     }
     for (phrase,pass) in [(vec![0xff],vec![]),(MNEMONIC.as_bytes().to_vec(),vec![0xff]),(MNEMONIC.as_bytes().to_vec(),vec![b'a';65537]),(MNEMONIC.as_bytes().to_vec(),"㍍".repeat(15000).into_bytes())] {

@@ -75,6 +75,7 @@ impl StandalonePczt {
     }
 }
 impl StandalonePczt {
+    pub(crate) fn into_value(self) -> Pczt { self.value }
     fn with_value(&self,value:Pczt,maximum:u32)->Result<Self> {
         let output=Self {value,parameters:self.parameters.clone(),genesis:self.genesis.clone(),height:self.height,branch:self.branch,maximum};
         output.serialize()?; Ok(output)
