@@ -25,7 +25,7 @@ fn scan_fixture(with_signer:bool,internal:bool)->Value {
         json!({"import":import,"target":{"height":40000,"hash":"08".repeat(32)},"batches":[{"priorTreeState":hex::encode(state.encode_to_vec()),"blocks":[hex::encode(block.encode_to_vec())]}]})
 }
 pub(super) fn pczt_fixture()->Value {
-    json!({"mnemonic":WORDS,"accountIndex":0,"external":scan_fixture(true,false),"internal":scan_fixture(true,true)})
+    json!({"mnemonic":WORDS,"accountIndex":0,"external":scan_fixture(true,false),"internal":scan_fixture(true,true),"publicWallet":public_wallet_funds(&serde_json::from_str(include_str!("../public-wallet-funding.json")).unwrap())})
 }
 fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32,Value,Option<u32>) {prepared_proving(post_zip212,with_signer,internal,false)}
 fn prepared_proving(post_zip212:bool,with_signer:bool,internal:bool,ironwood:bool)->(String,u32,Value,Option<u32>) {prepared_mode(post_zip212,with_signer,internal,ironwood,"transfer")}
@@ -46,16 +46,23 @@ fn prepared_mode(post_zip212:bool,with_signer:bool,internal:bool,ironwood:bool,m
     let mut input=json!({"revision":state["revision"],"accountId":account["id"],"payments":[{"to":t["address"],"amount":"10000"},{"to":s["address"],"amount":"10000","memo":hex::encode(zcash_protocol::memo::MemoBytes::empty().as_array())}],
         "policy":{"spendPools":["sapling"],"transparent":"disallow","changePool":if ironwood{"ironwood"}else{"sapling"},"feeRule":"zip317-standard","confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":false},"expiry":{"kind":"offset","blocks":40},"lockExpiryBlocks":20}});
     if mode=="tex" {input["payments"]=json!([{"to":zcash_keys::address::Address::Tex([4;20]).encode(&crate::Document::parse(PARAMS).unwrap()),"amount":"10000"}]);}
-    if mode=="shield" {
+    if mode=="shield"||mode=="fixture" {
         crate::wallet::DOMAIN.with(|domain| {
             let mut domain=domain.borrow_mut();let db=&mut domain.active.iter_mut().find(|a|a.generation==g).unwrap().wallet;
             let zcash_keys::address::Address::Transparent(address)=zcash_keys::address::Address::decode(db.params(),t["address"].as_str().unwrap()).unwrap() else {panic!()};
             let id=zcash_client_sqlite::AccountUuid::from_uuid(uuid::Uuid::parse_str(account["id"].as_str().unwrap()).unwrap());
-            let utxo=zcash_client_backend::wallet::WalletTransparentOutput::from_parts(zcash_transparent::bundle::OutPoint::new([33;32],0),zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(70000),address.script().into()),Some(40000u32.into()),Some(id),Some(TransparentKeyScope::EXTERNAL),None).unwrap();
+            let mut parent_id=[33;32];
+            if mode=="fixture" {
+                let coinbase=zcash_transparent::bundle::TxIn::coinbase(39900.into(),None).unwrap();
+                let parent=zcash_primitives::transaction::TransactionData::<zcash_primitives::transaction::Authorized>::from_parts(zcash_primitives::transaction::TxVersion::V5,zcash_protocol::consensus::BranchId::for_height(db.params(),39900.into()),0,0.into(),Some(zcash_transparent::bundle::Bundle{vin:vec![zcash_transparent::bundle::TxIn::from_parts(coinbase.prevout().clone(),coinbase.script_sig().into(),coinbase.sequence())],vout:vec![zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(70000),address.script().into())],authorization:zcash_transparent::bundle::Authorized}),None,None,None).freeze().unwrap();
+                parent_id=*parent.txid().as_ref();let mut bytes=vec![];parent.write(&mut bytes).unwrap();input["fundingParent"]=json!({"raw":hex::encode(bytes),"txid":parent.txid().to_string(),"minedHeight":39900});
+            }
+            let utxo=zcash_client_backend::wallet::WalletTransparentOutput::from_parts(zcash_transparent::bundle::OutPoint::new(parent_id,0),zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(70000),address.script().into()),Some(40000u32.into()),Some(id),Some(TransparentKeyScope::EXTERNAL),None).unwrap();
             db.put_received_transparent_utxo(&utxo).unwrap();
         });
         input.as_object_mut().unwrap().remove("payments");input["kind"]=json!("shield");input["threshold"]=json!("10000");input["policy"]["spendPools"]=json!(["transparent"]);input["policy"]["transparent"]=json!("allow-owned");
     }
+    if mode=="fixture"{return(path,g,input,token);}
     let plan:Value=serde_json::from_str(&crate::wallet::proposal::proposal_call(g,"proposal_create",&input.to_string()).unwrap()).unwrap();
     (path,g,plan,token)
 }
@@ -375,4 +382,76 @@ fn payment_multistep(g:u32,path:&str,plan:&Value,finalized:&Value){
     begin["observationSequence"]=json!("0");assert_eq!(payment(g,"payment_attempt_begin",begin).unwrap_err(),"RECOVERY_REQUIRED");
     assert_eq!(db.query_row("SELECT count(*) FROM ext_wallet_submission WHERE max_attempts=1 AND min_interval=500",[],|r|r.get::<_,i64>(0)).unwrap(),2);
     let state=payment(g,"payment_get",json!({"operationId":id})).unwrap();assert_eq!(state["state"]["steps"][0]["attempts"].as_array().unwrap().len(),1);assert_eq!(state["state"]["steps"][1]["attempts"].as_array().unwrap().len(),1);
+}
+
+#[test]
+#[ignore = "generates source-bound synthetic funding with canonical proving parameters"]
+fn generate_public_wallet_funding() {
+    let(path,g,mut input,token)=prepared_mode(true,true,false,false,"fixture");
+    let p=crate::Document::parse(PARAMS).unwrap();let seed=bip39::Mnemonic::parse(WORDS).unwrap().to_seed("");
+    let receiver=zcash_keys::keys::UnifiedSpendingKey::from_seed(&p,&seed,zip32::AccountId::try_from(1).unwrap()).unwrap().to_unified_full_viewing_key();
+    let ua=receiver.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap().0;
+    let t=json!({"address":zcash_keys::address::Address::Transparent(*ua.transparent().unwrap()).encode(&p)});
+    let s=json!({"address":zcash_keys::address::Address::Sapling(receiver.sapling().unwrap().default_address().1).encode(&p)});
+    let parent=input.as_object_mut().unwrap().remove("fundingParent").unwrap();
+    input.as_object_mut().unwrap().remove("kind");input.as_object_mut().unwrap().remove("threshold");
+    input["policy"]["spendPools"]=json!(["sapling","transparent"]);input["policy"]["transparent"]=json!("allow-owned");
+    input["payments"]=json!([{"to":t["address"],"amount":"40000"},{"to":s["address"],"amount":"40000"}]);
+    input["revision"]=serde_json::from_str::<Value>(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap()["revision"].clone();
+    let plan:Value=serde_json::from_str(&crate::wallet::proposal::proposal_call(g,"proposal_create",&input.to_string()).unwrap()).unwrap();
+    let root=std::env::var("PCZT_PROVING_PARAMETERS").unwrap();
+    let result:Value=serde_json::from_str(&crate::wallet::fused_send::fused_send_call(g,plan["operationId"].as_str().unwrap(),plan["proposalId"].as_str().unwrap(),plan["reviewCommitment"].as_str().unwrap(),token.unwrap(),&std::fs::read(format!("{root}/sapling-spend.params")).unwrap(),&std::fs::read(format!("{root}/sapling-output.params")).unwrap(),4194304).unwrap()).unwrap();
+    assert_eq!(result["transactions"].as_array().unwrap().len(),1);
+    let funding=json!({"warning":"SYNTHETIC TEST AUTHORITY ONLY","parent":parent,"raw":result["transactions"][0]["bytes"],"txid":result["transactions"][0]["txid"],"transparent":t["address"],"sapling":s["address"]});
+    std::fs::write(format!("{}/public-wallet-funding.json",std::env::var("WALLET_TEST_ROOT").unwrap()),funding.to_string()).unwrap();
+    crate::wallet::signer::signer_release(token.unwrap()).unwrap();crate::wallet::storage_close(g).unwrap();let _=path;
+    let _=public_wallet_funds(&funding);
+}
+
+pub(super) fn public_wallet_funds(funding:&Value)->Value {
+    use zcash_client_backend::proto::compact_formats::{CompactBlock,CompactTx,ChainMetadata};
+    let p=crate::Document::parse(PARAMS).unwrap();let raw=hex::decode(funding["raw"].as_str().unwrap()).unwrap();
+    let tx=zcash_primitives::transaction::Transaction::read(&raw[..],zcash_protocol::consensus::BranchId::for_height(&p,40001.into())).unwrap();
+    assert_eq!(tx.txid().to_string(),funding["txid"]);
+    let mut compact=CompactTx{index:1,txid:tx.txid().as_ref().to_vec(),..Default::default()};
+    if let Some(bundle)=tx.sapling_bundle(){compact.spends=bundle.shielded_spends().iter().map(Into::into).collect();compact.outputs=bundle.shielded_outputs().iter().map(Into::into).collect();}
+    assert!(tx.orchard_bundle().is_none()&&tx.ironwood_bundle().is_none());
+    let block=CompactBlock{height:40001,hash:vec![8;32],prev_hash:vec![7;32],time:1,chain_metadata:Some(ChainMetadata{sapling_commitment_tree_size:compact.outputs.len() as u32,orchard_commitment_tree_size:0,ironwood_commitment_tree_size:0}),vtx:vec![compact],..Default::default()};
+    let prior=TreeState{network:"regtest".into(),height:40000,hash:"07".repeat(32),time:1,sapling_tree:"000000".into(),orchard_tree:"000000".into(),ironwood_tree:"000000".into()};
+    let mut final_tree=prior.clone();final_tree.height=40001;final_tree.hash="08".repeat(32);
+    let mut sapling_tree=prior.sapling_tree().unwrap();for output in &block.vtx[0].outputs{let node=zcash_primitives::merkle_tree::HashSer::read(&output.cmu[..]).unwrap();sapling_tree.append(node).unwrap();}
+    let mut tree_bytes=vec![];zcash_primitives::merkle_tree::write_commitment_tree(&sapling_tree,&mut tree_bytes).unwrap();final_tree.sapling_tree=hex::encode(tree_bytes);
+    let mut import=scan_fixture(true,false)["import"].clone();let seed=bip39::Mnemonic::parse(WORDS).unwrap().to_seed("");import["viewingKey"]=json!(zcash_keys::keys::UnifiedSpendingKey::from_seed(&p,&seed,zip32::AccountId::try_from(1).unwrap()).unwrap().to_unified_full_viewing_key().encode(&p));import["birthday"]["firstScanHeight"]=json!(40001);import["birthday"]["priorTreeState"]=json!(hex::encode(prior.encode_to_vec()));
+    let(path,g)=open();let account=call(g,"account_import",import.clone()).unwrap();
+    for _ in 0..2 {call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"transparent"}})).unwrap();call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"unified","transparent":"omit","sapling":"require","ironwood":"omit"}})).unwrap();}
+    let target=json!({"height":40001,"hash":"08".repeat(32)});
+    let plan:Value=serde_json::from_str(&crate::wallet::scan::scan_call(g,"scan_plan",&json!({"target":target}).to_string()).unwrap()).unwrap();
+    crate::wallet::scan::scan_call(g,"scan_ingest_batch",&json!({"target":target,"revision":plan["revision"],"priorTreeState":hex::encode(prior.encode_to_vec()),"blocks":[hex::encode(block.encode_to_vec())]}).to_string()).unwrap();
+    for _ in 0..16 {
+        let pending:Value=serde_json::from_str(&crate::wallet::enhancement::enhancement_call(g,"enhancement_requests","{}").unwrap()).unwrap();
+        let Some(request)=pending["requests"].as_array().unwrap().first() else{break};
+        if request["kind"]=="address"&&request["outputStatus"]=="unspent"{break;}
+        let result=if request["kind"]=="enhancement" {let (raw,height)=if request["txid"]==funding["txid"]{(&funding["raw"],40001)}else{assert_eq!(request["txid"],funding["parent"]["txid"]);(&funding["parent"]["raw"],39900)};json!({"transactions":[{"bytes":raw,"minedHeight":height}]})}
+        else if request["kind"]=="address" {let end=request["endExclusive"].as_u64().unwrap_or_else(||panic!("unhandled funding request {request}"));let contains=request["start"].as_u64().unwrap_or(0)<=40001&&end>40001;json!({"transactions":if contains{json!([{"bytes":funding["raw"],"minedHeight":40001}])}else{json!([])},"complete":true,"asOfHeight":end-1})}
+        else{panic!("unexpected funding request {request}")};
+        crate::wallet::enhancement::enhancement_call(g,"enhancement_apply",&json!({"revision":pending["revision"],"request":request,"result":result}).to_string()).unwrap();
+    }
+    let pending:Value=serde_json::from_str(&crate::wallet::enhancement::enhancement_call(g,"enhancement_requests","{}").unwrap()).unwrap();assert!(pending["requests"].as_array().unwrap().iter().all(|r|r["kind"]=="address"&&r["outputStatus"]=="unspent"));
+    let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();assert_eq!(state["scanComplete"],true);assert_eq!(state["fullyScannedHeight"],40001);
+    crate::wallet::storage_close(g).unwrap();
+    json!({"database":hex::encode(std::fs::read(path).unwrap()),"accountId":account["id"],"accountIndex":1,"unspentAddresses":pending["requests"].as_array().unwrap().iter().map(|r|r["address"].clone()).collect::<Vec<_>>(),"target":target,"treeState":hex::encode(final_tree.encode_to_vec()),"block":hex::encode(block.encode_to_vec()),"import":import,"raw":funding["raw"],"txid":funding["txid"],"parent":funding["parent"],"tex":zcash_keys::address::Address::Tex([4;20]).encode(&p)})
+}
+
+#[test]
+fn public_wallet_funding_fixture(){
+    let data=public_wallet_funds(&serde_json::from_str(include_str!("../public-wallet-funding.json")).unwrap());
+    let(path,g)=open();crate::wallet::storage_close(g).unwrap();std::fs::write(&path,hex::decode(data["database"].as_str().unwrap()).unwrap()).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let balance=call(g,"account_balance",json!({"accountId":data["accountId"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":false}})).unwrap();assert_eq!(balance["amounts"]["transparent"]["regular"]["spendable"],"40000");assert_eq!(balance["amounts"]["sapling"]["spendable"],"40000");
+    let initial:Value=serde_json::from_str(&crate::wallet::enhancement::enhancement_call(g,"enhancement_requests","{}").unwrap()).unwrap();assert!(!initial["requests"].as_array().unwrap().is_empty());
+    for request in initial["requests"].as_array().unwrap(){
+        let current:Value=serde_json::from_str(&crate::wallet::enhancement::enhancement_call(g,"enhancement_requests","{}").unwrap()).unwrap();
+        crate::wallet::enhancement::enhancement_call(g,"enhancement_apply",&json!({"revision":current["revision"],"request":request,"result":{"transactions":[],"asOfHeight":40001,"asOfHash":"08".repeat(32),"complete":true}}).to_string()).unwrap();
+    }
+    let after:Value=serde_json::from_str(&crate::wallet::enhancement::enhancement_call(g,"enhancement_requests","{}").unwrap()).unwrap();assert!(after["requests"].as_array().unwrap().iter().all(|r|r["requestAt"].is_u64()));
+    crate::wallet::storage_close(g).unwrap();
 }
