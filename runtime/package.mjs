@@ -10,12 +10,12 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const nativeReceipt = '58a057e25844beb6f5fc3701ffd93485d734df8199b23c4ecaf517ac5724f60c';
 const overlayRevision = 'a396bb7';
 const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
-// Version 3 adds the durable creation snapshot and local-only account creation.
+// Version 4 adds retained PCZT artifacts and canonical proposal intent lookup.
 // The storage marker stays version 1; the Rust owner migrates legacy files.
 export const profile = {
   contractRevision: 'zakura-private-wallet/1', abiVersion: 'checked-bindgen-0.2.128/1',
-  schemas: { operations: { walletViews: '4', walletSigner: '2', walletProposals: '1', walletScan: '1', walletSync: '2', walletEnhancement: '1', walletQueries: '2', consensusContext: '1', decodeTransaction: '1' },
-    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/3',
+  schemas: { operations: { walletViews: '5', walletSigner: '2', walletProposals: '2', walletPczt: '1', walletScan: '1', walletSync: '2', walletEnhancement: '1', walletQueries: '2', consensusContext: '1', decodeTransaction: '1' },
+    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/4',
     hostServices: { nodeFilesystem: 'linux-flock/1', browserOpfs: 'sync-access-handle/1', storage: 'scalar-vfs/1' } },
 };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
