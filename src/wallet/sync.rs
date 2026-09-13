@@ -8,7 +8,8 @@ use zcash_client_sqlite::error::SqliteClientError;
 fn execute(generation: u32, operation: &str, input: &Value) -> Result<Value> {
     super::DOMAIN.with(|domain| {
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
-        let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
+        if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+        let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         match operation {
             "scan_complete" => {
                 fields(input,&["revision","target","treeState"])?;

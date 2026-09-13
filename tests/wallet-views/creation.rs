@@ -77,7 +77,7 @@ fn creation_scanned_frontiers_and_rewind_invalidation() {
     crate::wallet::sync::sync_call(g,"scan_complete",&populated.to_string()).unwrap();
     let historical=complete(g,99); // 99 is retained as a block, but native rewind needs checkpoint96.
     crate::wallet::sync::sync_call(g,"scan_complete",&historical.to_string()).unwrap();
-    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.as_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
+    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.first_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
         let (height,tree)=ext.query_row("SELECT height,tree FROM ext_wallet_creation_snapshot WHERE id=1",[],|r|Ok((r.get::<_,u32>(0)?,r.get::<_,Vec<u8>>(1)?)))?;
         assert_eq!(height,100);assert_eq!(hex::encode(tree),populated["treeState"].as_str().unwrap());Ok(())
     })).unwrap();
@@ -100,7 +100,7 @@ fn creation_scanned_frontiers_and_rewind_invalidation() {
 #[test]
 fn creation_completion_revision_failure_rolls_back_and_legacy_open_is_not_sync() {
     let (path,g)=open();let mut input=complete(g,99);
-    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.as_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
+    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.first_mut().unwrap().wallet.transactionally_with_extension(|_,ext|->Result<()> {
         ext.execute("UPDATE ext_wallet_revision SET sequence=9223372036854775807",[])?;Ok(())
     })).unwrap();
     let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();input["revision"]=state["revision"].clone();

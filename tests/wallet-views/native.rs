@@ -27,7 +27,7 @@ fn call(g: u32, op: &str, input: Value) -> std::result::Result<Value,String> {
 }
 fn native_scan_fixture() -> Value {
     crate::wallet::DOMAIN.with(|domain| {
-        let domain=domain.borrow(); let db=&domain.active.as_ref().unwrap().wallet;
+        let domain=domain.borrow(); let db=&domain.active.first().unwrap().wallet;
         json!({"tipHeight":db.chain_height().unwrap().map(u32::from),
             "fullyScannedHeight":db.block_fully_scanned().unwrap().map(|b|u32::from(b.block_height())),
             "maxScannedHeight":db.block_max_scanned().unwrap().map(|b|u32::from(b.block_height())),
@@ -60,7 +60,7 @@ fn account_balance_revision_commits_rolls_back_and_changes_owner() {
     call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"transparent"}})).unwrap();
     assert_eq!(call(g,"account_balance",args.clone()).unwrap()["scan"]["revision"],format!("{epoch}:2"));
     crate::wallet::DOMAIN.with(|domain| {
-        domain.borrow_mut().active.as_mut().unwrap().wallet.transactionally_with_extension(|_,ext| -> Result<()> {
+        domain.borrow_mut().active.first_mut().unwrap().wallet.transactionally_with_extension(|_,ext| -> Result<()> {
             ext.execute("UPDATE ext_wallet_revision SET sequence=9223372036854775807",[])?;
             Ok(())
         }).unwrap();
@@ -460,7 +460,7 @@ fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
         let orchard_commitments=scan.orchard().commitments().to_vec();
         let ironwood_commitments=scan.ironwood().commitments().to_vec();
         crate::wallet::DOMAIN.with(|domain| {
-            let mut domain=domain.borrow_mut();let db=&mut domain.active.as_mut().unwrap().wallet;
+            let mut domain=domain.borrow_mut();let db=&mut domain.active.first_mut().unwrap().wallet;
             db.update_chain_tip(100u32.into()).unwrap();
             db.put_blocks(birthday.prior_chain_state(),vec![scan]).unwrap();
             let address = *db.get_last_generated_address_matching(account_id,UnifiedAddressRequest::AllAvailableKeys).unwrap().unwrap().transparent().unwrap();
@@ -522,7 +522,7 @@ fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
         assert_eq!(call(g,"account_get",json!({"accountId":account["id"]})).unwrap(),account);
         assert_eq!(call(g,"account_get",json!({"accountId":other["id"]})).unwrap(),other);
         crate::wallet::DOMAIN.with(|domain| {
-            let mut domain=domain.borrow_mut();let db=&mut domain.active.as_mut().unwrap().wallet;
+            let mut domain=domain.borrow_mut();let db=&mut domain.active.first_mut().unwrap().wallet;
             let expected=usize::from(policy!=Some(true));
             let summary=db.get_wallet_summary(zcash_client_backend::data_api::wallet::ConfirmationsPolicy::MIN).unwrap().unwrap();
             let balance=&summary.account_balances()[&account_id];
@@ -560,7 +560,7 @@ fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
             let confirmations=json!({"trusted":trusted,"untrusted":untrusted,"allowZeroConfirmationShielding":zero});
             let args=json!({"accountId":account["id"],"confirmations":confirmations});
             let native=crate::wallet::DOMAIN.with(|domain| {
-                let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+                let d=domain.borrow();let db=&d.active.first().unwrap().wallet;
                 let policy=zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new(
                     std::num::NonZeroU32::new(trusted).unwrap(),std::num::NonZeroU32::new(untrusted).unwrap(),zero).unwrap();
                 let summary=db.get_wallet_summary(policy).unwrap().unwrap();
@@ -638,7 +638,7 @@ fn hd_gap_independent_seed_provenance_and_native_default() {
         let (ua,j)=key.default_address(UnifiedAddressRequest::AllAvailableKeys).unwrap();
         assert_eq!(call(g,"address_list",json!({"accountId":a["id"]})).unwrap(),json!([address_record(&p,&key.to_unified_incoming_viewing_key(),&ua,j).unwrap()]));
         super::super::DOMAIN.with(|domain| {
-            let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+            let d=domain.borrow();let db=&d.active.first().unwrap().wallet;
             let native=db.get_account(id(&json!({"accountId":a["id"]})).unwrap()).unwrap().unwrap();
             assert!(matches!(native.source(),zcash_client_backend::data_api::AccountSource::Derived{..}));
             assert_eq!(native.source().key_derivation().unwrap().seed_fingerprint(),&zip32::fingerprint::SeedFingerprint::from_seed(&[40;32]).unwrap());
@@ -814,7 +814,7 @@ fn mnemonic_native_provenance_boundaries_and_transaction_rollback() {
         for index in [0,3] {
             let a=mnemonic(g,hd_input(index),MNEMONIC.as_bytes(),b"").unwrap();
             super::super::DOMAIN.with(|domain| {
-                let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+                let d=domain.borrow();let db=&d.active.first().unwrap().wallet;
                 let native=db.get_account(id(&json!({"accountId":a["id"]})).unwrap()).unwrap().unwrap();
                 assert!(matches!(native.source(),zcash_client_backend::data_api::AccountSource::Derived{..}));
                 assert_eq!(native.source().key_derivation().unwrap().seed_fingerprint(),&zip32::fingerprint::SeedFingerprint::from_seed(&seed).unwrap());
@@ -864,7 +864,7 @@ fn mnemonic_passphrase_normalized_limit_and_nonpersistence() {
     for pass in ["", "TREZOR", "TREZOR ", "TREZOR\0"] {
         let a=mnemonic(g,hd_input(0),MNEMONIC.as_bytes(),pass.as_bytes()).unwrap();
         super::super::DOMAIN.with(|domain| {
-            let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+            let d=domain.borrow();let db=&d.active.first().unwrap().wallet;
             let native=db.get_account(id(&json!({"accountId":a["id"]})).unwrap()).unwrap().unwrap();
             assert!(fingerprints.insert(format!("{:?}",native.source().key_derivation().unwrap().seed_fingerprint())),"distinct passphrase authority");
         });
@@ -945,7 +945,7 @@ fn locked_balance_case(source:&Value)->Value {
     std::fs::write(&path,hex::decode(source["database"].as_str().unwrap()).unwrap()).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
     crate::wallet::DOMAIN.with(|domain| {
-        let mut d=domain.borrow_mut();let db=&mut d.active.as_mut().unwrap().wallet;
+        let mut d=domain.borrow_mut();let db=&mut d.active.first_mut().unwrap().wallet;
         db.lock_outputs(&[
             OutputRef::new(TxId::from_bytes([9;32]),PoolType::Shielded(ShieldedPool::Sapling),0),
             OutputRef::new(TxId::from_bytes([10;32]),PoolType::Transparent,0),
@@ -1035,7 +1035,7 @@ fn balance_scanner_edge_cases()->Vec<Value> {
             }
         }
         crate::wallet::DOMAIN.with(|domain| {
-            let mut d=domain.borrow_mut();let db=&mut d.active.as_mut().unwrap().wallet;
+            let mut d=domain.borrow_mut();let db=&mut d.active.first_mut().unwrap().wallet;
             db.update_chain_tip(tip.into()).unwrap();
             db.put_blocks(birthday.prior_chain_state(),scans).unwrap();
             if coinbase {
@@ -1052,7 +1052,7 @@ fn balance_scanner_edge_cases()->Vec<Value> {
         for trusted in [1,2] {
             let args=json!({"accountId":account["id"],"confirmations":{"trusted":trusted,"untrusted":trusted,"allowZeroConfirmationShielding":false}});
             let expected=crate::wallet::DOMAIN.with(|domain| {
-                let d=domain.borrow();let db=&d.active.as_ref().unwrap().wallet;
+                let d=domain.borrow();let db=&d.active.first().unwrap().wallet;
                 let policy=zcash_client_backend::data_api::wallet::ConfirmationsPolicy::new(
                     std::num::NonZeroU32::new(trusted).unwrap(),std::num::NonZeroU32::new(trusted).unwrap(),false).unwrap();
                 let summary=db.get_wallet_summary(policy).unwrap().expect("scanned summary available");
@@ -1146,7 +1146,7 @@ fn persistent_scan_ingestion_plan_rollback_revision_and_reopen() {
     }
     // Force the final revision write to fail after real native scan/put_blocks.
     crate::wallet::DOMAIN.with(|domain| {
-        let mut domain=domain.borrow_mut();let active=domain.active.as_mut().unwrap();
+        let mut domain=domain.borrow_mut();let active=domain.active.first_mut().unwrap();
         active.wallet.transactionally_with_extension(|_,ext| -> Result<()> {
             ext.execute("UPDATE ext_wallet_revision SET sequence=9223372036854775807",[])?;Ok(())
         }).unwrap();
@@ -1260,4 +1260,62 @@ fn wallet_memory_is_explicit_and_ephemeral() {
     let fresh = open();
     assert_eq!(call(fresh,"account_list",json!({})).unwrap(),json!([]));
     crate::wallet::storage_close(fresh).unwrap();
+}
+
+#[test]
+fn native_signer_outlives_wallet_and_binds_reopened_account() {
+    use crate::wallet::signer::*;
+    let (path,g)=open();
+    let input=hd_input(0).to_string();
+    let created:Value=serde_json::from_str(&signer_create_account(g,"account_import_hd",&input,MNEMONIC.as_bytes().to_vec(),vec![]).unwrap()).unwrap();
+    let token=created["signerToken"].as_u64().unwrap() as u32;
+    let id=created["account"]["id"].as_str().unwrap();
+    let description=signer_describe(token).unwrap();
+    assert_eq!(signer_bind(token,g,id).unwrap(),"ready");
+    assert_eq!(call(g,"account_get",json!({"accountId":id})).unwrap()["signerAttached"],true);
+    assert_eq!(signer_create_account(g,"account_import_hd",&input,MNEMONIC.as_bytes().to_vec(),vec![]).unwrap_err(),"ACCOUNT_COLLISION");
+    assert_eq!(signer_describe(token+1).unwrap_err(),"STALE_HANDLE");
+    crate::wallet::storage_close(g).unwrap();
+    assert_eq!(signer_describe(token).unwrap(),description);
+    let reopened=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(signer_bind(token,reopened,id).unwrap(),"ready");
+    signer_unbind(token,reopened,id).unwrap();
+    crate::wallet::storage_close(reopened).unwrap();
+    let (_other,g2)=open();
+    let mut viewing=fixture(11);
+    viewing["viewingKey"]=serde_json::from_str::<Value>(&description).unwrap()["viewingKey"].clone();
+    let second=call(g2,"account_import",viewing).unwrap();
+    assert_eq!(signer_bind(token,g2,second["id"].as_str().unwrap()).unwrap(),"ready");
+    let different=call(g2,"account_import",fixture(12)).unwrap();
+    assert_eq!(signer_bind(token,g2,different["id"].as_str().unwrap()).unwrap_err(),"SIGNER_MISMATCH");
+    crate::wallet::storage_close(g2).unwrap();
+    let (_partial,g2)=open();
+    let mut viewing=fixture(11);
+    viewing["viewingKey"]=serde_json::from_str::<Value>(&description).unwrap()["viewingKey"].clone();
+    viewing["enabledPools"]=json!(["sapling"]);
+    let second=call(g2,"account_import",viewing).unwrap();
+    assert_eq!(signer_bind(token,g2,second["id"].as_str().unwrap()).unwrap(),"ready");
+    signer_release(token).unwrap();
+    assert_eq!(signer_describe(token).unwrap_err(),"STALE_HANDLE");
+    assert_eq!(call(g2,"account_get",json!({"accountId":second["id"]})).unwrap()["signerAttached"],false);
+    assert_eq!(signer_bind(token,g2,second["id"].as_str().unwrap()).unwrap_err(),"STALE_HANDLE");
+    crate::wallet::storage_close(g2).unwrap();
+}
+
+#[test]
+fn native_signer_two_open_wallets_remain_independent() {
+    use crate::wallet::signer::*;
+    let (_p1,g1)=open(); let (_p2,g2)=open();
+    let created:Value=serde_json::from_str(&signer_create_account(g1,"account_import_hd",&hd_input(0).to_string(),MNEMONIC.as_bytes().to_vec(),vec![]).unwrap()).unwrap();
+    let token=created["signerToken"].as_u64().unwrap() as u32;
+    assert_eq!(call(g2,"account_list",json!({})).unwrap(),json!([]));
+    let mut viewing=fixture(13);
+    viewing["viewingKey"]=serde_json::from_str::<Value>(&signer_describe(token).unwrap()).unwrap()["viewingKey"].clone();
+    let imported=call(g2,"account_import",viewing).unwrap();
+    assert_eq!(signer_bind(token,g2,imported["id"].as_str().unwrap()).unwrap(),"ready");
+    crate::wallet::storage_close(g1).unwrap();
+    assert_eq!(call(g1,"account_list",json!({})).unwrap_err(),"STALE_HANDLE");
+    assert_eq!(call(g2,"account_list",json!({})).unwrap().as_array().unwrap().len(),1);
+    assert!(signer_describe(token).is_ok());
+    crate::wallet::storage_close(g2).unwrap(); signer_release(token).unwrap();
 }

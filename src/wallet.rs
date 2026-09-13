@@ -45,8 +45,8 @@ impl Drop for OwnedConnection {
 type Wallet = WalletDb<OwnedConnection, super::Document, HostClock, rand_core::UnwrapErr<getrandom::SysRng>>;
 struct Active { scan_plan: Option<(String,serde_json::Value)>, wallet: Wallet, bytes: Vec<u8>, generation: u32, receipt: Rc<RefCell<CloseReceipt>> }
 #[derive(Default)]
-struct Domain { active: Option<Active>, generation: u32, failed: Option<Rc<RefCell<CloseReceipt>>> }
-// ponytail: one active database per worker; no registry until multiple DBs are required.
+struct Domain { active: Vec<Active>, generation: u32, failed: Option<Rc<RefCell<CloseReceipt>>> }
+// One serialized native owner; bounded databases share its existing memory ceiling.
 thread_local! { static DOMAIN: RefCell<Domain> = RefCell::new(Domain::default()); }
 
 mod schema;
@@ -75,7 +75,8 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
     DOMAIN.with(|domain| {
         let mut domain = domain.try_borrow_mut().map_err(|_| "STORAGE_BUSY")?;
         if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
-        if domain.active.is_some() { return Err("STORAGE_BUSY".into()); }
+        if domain.active.len() >= 32 { return Err("RESOURCE_LIMIT".into()); }
+        domain.active.try_reserve(1).map_err(|_| "RESOURCE_LIMIT")?;
         let generation = domain.generation.checked_add(1).ok_or("DOMAIN_EXHAUSTED")?;
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         #[cfg(target_arch = "wasm32")]
@@ -122,7 +123,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
         }
         let wallet = WalletDb::from_connection(owned, document, HostClock, rand_core::UnwrapErr(getrandom::SysRng));
         domain.generation = generation;
-        domain.active = Some(Active { scan_plan:None, wallet, bytes: bytes.to_vec(), generation, receipt });
+        domain.active.push(Active { scan_plan:None, wallet, bytes: bytes.to_vec(), generation, receipt });
         Ok(generation)
     })
 }
@@ -156,7 +157,8 @@ pub fn storage_initialize_memory(format: &str, bytes: &[u8], genesis: &[u8]) -> 
 pub fn storage_binding(generation: u32) -> Result<Vec<u8>, String> {
     DOMAIN.with(|domain| {
         let domain = domain.try_borrow().map_err(|_| "STORAGE_BUSY")?;
-        let active = domain.active.as_ref().filter(|a| a.generation == generation).ok_or("STALE_HANDLE")?;
+        if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+        let active = domain.active.iter().find(|a| a.generation == generation).ok_or("STALE_HANDLE")?;
         Ok(active.bytes.clone())
     })
 }
@@ -165,8 +167,9 @@ pub fn storage_binding(generation: u32) -> Result<Vec<u8>, String> {
 pub fn storage_close(generation: u32) -> Result<(), String> {
     DOMAIN.with(|domain| {
         let mut domain = domain.try_borrow_mut().map_err(|_| "STORAGE_BUSY")?;
-        if !domain.active.as_ref().is_some_and(|a| a.generation == generation) { return Err("STALE_HANDLE".into()); }
-        let active = domain.active.take().ok_or("STALE_HANDLE")?;
+        let index = domain.active.iter().position(|a| a.generation == generation).ok_or("STALE_HANDLE")?;
+        let active = domain.active.remove(index);
+        signer::detach_wallet(generation);
         drop(active.wallet);
         let error = active.receipt.borrow().error.clone();
         if let Some(error) = error { domain.failed = Some(active.receipt); return Err(error); }
@@ -179,6 +182,7 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
 mod schema_prefix;
 
 mod accounts;
+pub mod signer;
 
 mod scan;
 mod sync;

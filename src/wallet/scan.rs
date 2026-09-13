@@ -20,7 +20,8 @@ const MAX_INPUT_BYTES: usize = 2 * MAX_BLOCK_BYTES + 140000;
 fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
     super::DOMAIN.with(|domain| {
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
-        let active=domain.active.as_mut().filter(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
+        if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+        let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         if !matches!(operation,"scan_plan"|"scan_ingest_batch") {return Err("INVALID_ARGUMENT".into());}
         fields(v,if operation=="scan_plan" {&["target"]} else {&["revision","target","priorTreeState","blocks"]})?;
         let target=v.get("target").ok_or(Failure::from("INVALID_ARGUMENT"))?;

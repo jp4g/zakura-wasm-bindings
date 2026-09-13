@@ -59,7 +59,7 @@ fn wallet_sync_rewind_atomic_revision_fork_replay_and_reopen() {
 
     // Force the final revision write to fail after native truncate; the whole rewind rolls back.
     crate::wallet::DOMAIN.with(|domain| {
-        domain.borrow_mut().active.as_mut().unwrap().wallet.transactionally_with_extension(|_,ext| -> Result<()> {
+        domain.borrow_mut().active.first_mut().unwrap().wallet.transactionally_with_extension(|_,ext| -> Result<()> {
             ext.execute("UPDATE ext_wallet_revision SET sequence=9223372036854775807",[])?;Ok(())
         }).unwrap();
     });
@@ -77,7 +77,7 @@ fn wallet_sync_rewind_atomic_revision_fork_replay_and_reopen() {
     // Native retained checkpoints require rewinding farther than the requested block99.
     assert_eq!(result["point"],checkpoint["point"]);assert_eq!(result["point"]["height"],96);
     assert_ne!(result["revision"],current["revision"]);
-    assert!(crate::wallet::DOMAIN.with(|domain|domain.borrow().active.as_ref().unwrap().scan_plan.is_none()));
+    assert!(crate::wallet::DOMAIN.with(|domain|domain.borrow().active.first().unwrap().scan_plan.is_none()));
     assert_eq!(sync(g,"scan_block_hash",json!({"height":100})).unwrap()["point"],Value::Null);
     assert_eq!(sync(g,"scan_state",json!({})).unwrap()["fullyScannedHeight"],96);
 

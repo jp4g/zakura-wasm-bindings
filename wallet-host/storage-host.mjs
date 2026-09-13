@@ -6,7 +6,14 @@ export const RC = { OK: 0, BUSY: 5, READONLY: 8, IOERR: 10, FULL: 13, CANTOPEN: 
 let memory, backend;
 const files = new Map();
 let next = 1;
-export const state = { last: '', lastCode: 0, closeError: false };
+export let state = { last: '', lastCode: 0, closeError: false };
+const backends = new WeakMap();
+export function withBackend(owner, fn) {
+  if (owner !== undefined && !backends.has(owner)) throw Error('host backend contract');
+  const previous = backend, previousState = state;
+  backend = owner; state = owner === undefined ? { last: '', lastCode: 0, closeError: false } : backends.get(owner);
+  try { return fn(); } finally { backend = previous; state = previousState; }
+}
 export function attach(mem, host) {
   attachMemory(mem);
   attachBackend(host);
@@ -16,8 +23,10 @@ export function attachMemory(mem) {
   memory = mem;
 }
 export function attachBackend(host) {
-  if (!memory || backend || !host) throw Error('host backend contract');
-  backend = host;
+  if (!memory || !host) throw Error('host backend contract');
+  if (backends.has(host)) throw Error('DOMAIN_USED');
+  backends.set(host, { last: '', lastCode: 0, closeError: false });
+  backend = host; state = backends.get(host);
 }
 function bytes(ptr, n) {
   ptr >>>= 0;
@@ -41,7 +50,7 @@ function offset(at) {
 }
 function int(ptr, n) { new DataView(bytes(ptr, 4).buffer).setInt32(ptr >>> 0, n, true); }
 function lease() { if (!backend?.owned) throw Object.assign(Error('owner lease absent'), { code: 'EBUSY' }); }
-function get(id) { lease(); const f = files.get(id); if (!f) throw Error('closed file'); return f; }
+function get(id) { lease(); const f = files.get(id); if (!f || f.backend !== backend) throw Error('closed or foreign file'); return f; }
 export function mapError(error, fallback) {
   // DOMException.code is a legacy numeric value; its name carries the category.
   const tag = typeof error.code === 'string' ? error.code : error.name;
@@ -68,20 +77,20 @@ export function file_open(ptr, flags, out) {
     const type = flags & (0x100 | 0x800 | 0x80000 | 0x4000 | 0x200 | 0x400 | 0x1000 | 0x2000);
     const readOnly = (flags & 3) === 1;
     if (type !== (path === 'wallet.db' ? 0x100 : 0x800) || ![1, 2].includes(flags & 3) || flags & (8 | 16) || (readOnly && (flags & 4))) return RC.CANTOPEN;
-    if ([...files.values()].some(f => f.path === path)) return RC.BUSY;
+    if ([...files.values()].some(f => f.path === path && f.backend === backend)) return RC.BUSY;
     const handle = backend.open(path, Boolean(flags & 4), readOnly);
-    const id = next++; files.set(id, { path, handle, level: 0, readOnly }); int(out, id); return RC.OK;
+    const id = next++; files.set(id, { path, handle, level: 0, readOnly, backend }); int(out, id); return RC.OK;
   });
 }
 export function file_close(id) {
   const f = get(id);
-  return attempt('close', f.path, RC.CLOSE, () => { backend.close(f.handle); files.delete(id); return RC.OK; });
+  return attempt('close', f.path, RC.CLOSE, () => { f.backend.close(f.handle); files.delete(id); return RC.OK; });
 }
 export function file_read(id, ptr, n, at) {
   const f = get(id);
   return attempt('read', f.path, RC.READ, () => {
     const target = bytes(ptr, n); target.fill(0);
-    const count = backend.read(f.handle, target, offset(at));
+    const count = f.backend.read(f.handle, target, offset(at));
     if (!Number.isInteger(count) || count < 0 || count > n) return RC.READ;
     return count === n ? RC.OK : RC.SHORT;
   });
@@ -92,7 +101,7 @@ export function file_write(id, ptr, n, at) {
     if (f.readOnly) return RC.READONLY;
     const source = bytes(ptr, n); let wrote = 0;
     while (wrote < n) {
-      const count = backend.write(f.handle, source.subarray(wrote), offset(at) + wrote);
+      const count = f.backend.write(f.handle, source.subarray(wrote), offset(at) + wrote);
       if (!Number.isInteger(count) || count <= 0 || count > n - wrote) return RC.WRITE;
       wrote += count;
     }
@@ -101,16 +110,16 @@ export function file_write(id, ptr, n, at) {
 }
 export function file_truncate(id, size) {
   const f = get(id);
-  return attempt('truncate', f.path, RC.TRUNCATE, () => { if (f.readOnly) return RC.READONLY; backend.truncate(f.handle, offset(size)); return RC.OK; });
+  return attempt('truncate', f.path, RC.TRUNCATE, () => { if (f.readOnly) return RC.READONLY; f.backend.truncate(f.handle, offset(size)); return RC.OK; });
 }
 export function file_sync(id, flags) {
   const f = get(id);
-  return attempt('sync', f.path, RC.FSYNC, () => { backend.sync(f.handle, flags); return RC.OK; });
+  return attempt('sync', f.path, RC.FSYNC, () => { f.backend.sync(f.handle, flags); return RC.OK; });
 }
 export function file_size(id, out) {
   const f = get(id);
   return attempt('size', f.path, RC.FSTAT, () => {
-    const n = backend.size(f.handle);
+    const n = f.backend.size(f.handle);
     if (!Number.isSafeInteger(n) || n < 0) return RC.FSTAT;
     new DataView(bytes(out, 8).buffer).setBigInt64(out >>> 0, BigInt(n), true); return RC.OK;
   });

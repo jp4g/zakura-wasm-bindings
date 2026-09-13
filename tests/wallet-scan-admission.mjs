@@ -12,7 +12,7 @@ await facade.link(async name=>{
   return new vm.SyntheticModule(Object.keys(exports),function(){for(const [key,value] of Object.entries(exports))this.setExport(key,value);},{context});
 });
 await facade.evaluate();
-const owner={},storage={generation:1,instance:owner,binding:(token,instance)=>{assert.equal(token,1);assert.equal(instance,owner);}};
+const owner={},storage={generation:1,instance:owner,run:fn=>fn(),binding:(token,instance)=>{assert.equal(token,1);assert.equal(instance,owner);}};
 const views=facade.namespace.viewsForStorage(storage);
 const target={height:7,hash:'03'.repeat(32)};
 const call=(operation,args)=>views.call(1,owner,operation,args);
