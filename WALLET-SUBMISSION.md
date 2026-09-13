@@ -34,4 +34,7 @@ consent, and exact-byte attempt records.
 Finalization reuses native extraction/storage and immutable finalized records. The
 already-finalized transparent-input limitation remains tracked by private SDK issue 102;
 this journal does not change the underlying finalizer or claim that edge is qualified.
-Actual combined Node/browser runtime qualification remains pending.
+The synthetic SDK baseline passed actual Node filesystem and Firefox OPFS public
+transfer, shielding, TEX, finalization, exact-byte retry, and reopen workflows
+(SDK `b25ea5c`, runtime package 03/native build 03). This is scoped runtime
+qualification, not complete SDK acceptance.
