@@ -168,7 +168,13 @@ pub fn signer_authorize(token:u32,parameters:&[u8],genesis:&[u8],height:u32,bran
             for (index,spend) in bundle.spends().iter().enumerate() {
                 if spend.proof_generation_key().is_some(){continue;}
                 match spend.verify_rk(Some(&signer.key.sapling().to_diversifiable_full_viewing_key().fvk())) {
-                    Ok(())=>own_sapling.push(index),
+                    Ok(())=>{
+                        let key=signer.key.sapling().to_diversifiable_full_viewing_key();
+                        let internal=if spend.verify_nullifier(Some(key.fvk())).is_ok(){false}
+                            else if spend.verify_nullifier(Some(&key.to_internal_fvk())).is_ok(){true}
+                            else{return Err(pczt::roles::verifier::SaplingError::Custom(()));};
+                        own_sapling.push((index,internal));
+                    },
                     Err(sapling::pczt::VerifyError::InvalidRandomizedVerificationKey)=>foreign_sapling.push(index),
                     Err(_)=>return Err(pczt::roles::verifier::SaplingError::Custom(())),
                 }
@@ -176,7 +182,10 @@ pub fn signer_authorize(token:u32,parameters:&[u8],genesis:&[u8],height:u32,bran
             Ok(())
         }).map_err(|_|"INVALID_PCZT")?.finish();
         let pczt=pczt::roles::updater::Updater::new(pczt).update_sapling_with(|mut bundle| {
-            for index in own_sapling {bundle.update_spend_with(index,|mut spend|spend.set_proof_generation_key(signer.key.sapling().expsk.proof_generation_key()))?;}
+            for (index,internal) in own_sapling {
+                let pgk=if internal{signer.key.sapling().derive_internal().expsk.proof_generation_key()}else{signer.key.sapling().expsk.proof_generation_key()};
+                bundle.update_spend_with(index,|mut spend|spend.set_proof_generation_key(pgk))?;
+            }
             Ok(())
         }).map_err(|_|"INVALID_PCZT")?.finish();
         let sapling=pczt.sapling().spends().len();

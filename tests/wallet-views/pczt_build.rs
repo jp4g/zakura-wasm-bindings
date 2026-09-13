@@ -3,8 +3,8 @@ fn invoke(g:u32,operation:&str,input:Value)->std::result::Result<Value,String> {
     crate::wallet::pczt_build::pczt_build_call(g,operation,&input.to_string()).map(|v|serde_json::from_str(&v).unwrap())
 }
 const WORDS:&str="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-fn prepared(post_zip212:bool)->(String,u32,Value) {let (path,g,plan,_)=prepared_signer(post_zip212,false);(path,g,plan)}
-fn prepared_signer(post_zip212:bool,with_signer:bool)->(String,u32,Value,Option<u32>) {
+fn prepared(post_zip212:bool)->(String,u32,Value) {let (path,g,plan,_)=prepared_signer(post_zip212,false,false);(path,g,plan)}
+fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32,Value,Option<u32>) {
     let fixture=if !post_zip212 { full_scan_fixture() } else {
         let p=crate::Document::parse(PARAMS).unwrap();let mut import=fixture(10);
         let key=if with_signer {
@@ -16,6 +16,13 @@ fn prepared_signer(post_zip212:bool,with_signer:bool)->(String,u32,Value,Option<
         import["birthday"]["firstScanHeight"]=json!(40000);import["birthday"].as_object_mut().unwrap().remove("recoverUntilExclusive");
         import["birthday"]["priorTreeState"]=json!(hex::encode(state.encode_to_vec()));
         let mut block=policy_block(&key);block.height=40000;
+        if internal {
+            use zcash_note_encryption::Domain;
+            let dfvk=key.sapling().unwrap();
+            let note=sapling::Note::from_parts(dfvk.change_address().1,sapling::value::NoteValue::from_raw(50000),sapling::Rseed::AfterZip212([42;32]));
+            let encryptor=sapling::note_encryption::sapling_note_encryption(Some(dfvk.to_internal_fvk().ovk),note.clone(),[0;512],&mut rand_core::UnwrapErr(getrandom::SysRng));
+            block.vtx[0].outputs[0]=zcash_client_backend::proto::compact_formats::CompactSaplingOutput{cmu:note.cmu().to_bytes().to_vec(),ephemeral_key:sapling::note_encryption::SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),ciphertext:encryptor.encrypt_note_plaintext()[..52].to_vec()};
+        }
         json!({"import":import,"target":{"height":40000,"hash":"08".repeat(32)},"batches":[{"priorTreeState":hex::encode(state.encode_to_vec()),"blocks":[hex::encode(block.encode_to_vec())]}]})
     };
     let (path,g)=open();
@@ -95,7 +102,8 @@ fn pczt_build_preserves_native_zip212_output_precondition() {
 
 #[test]
 fn pczt_build_real_retained_signer_authorizes_after_wallet_close() {
-    let (_path,g,plan,token)=prepared_signer(true,true);let token=token.unwrap();
+    for internal in [false,true] {
+    let (_path,g,plan,token)=prepared_signer(true,true,internal);let token=token.unwrap();
     let artifact=invoke(g,"pczt_build",request(&plan)).unwrap();
     let bytes=hex::decode(artifact["bytes"].as_str().unwrap()).unwrap();
     let original=pczt::Pczt::parse(&bytes).unwrap();
@@ -111,4 +119,5 @@ fn pczt_build_real_retained_signer_authorizes_after_wallet_close() {
     pczt::roles::verifier::Verifier::new(signed).with_sapling::<(),_>(|bundle|{for (index,spend) in bundle.spends().iter().enumerate(){role.apply_sapling_signature(index,spend.spend_auth_sig().clone().unwrap()).unwrap();}Ok(())}).unwrap();
     assert_eq!(original.serialize().unwrap(),bytes,"authorization does not mutate retained artifact");
     crate::wallet::signer::signer_release(token).unwrap();
+    }
 }
