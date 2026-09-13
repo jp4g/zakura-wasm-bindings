@@ -76,10 +76,11 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                     _=>return Err("INVALID_ARGUMENT".into()),
                 }
             }else{
-                fields(result,if matches!(request,TransactionDataRequest::TransactionsInvolvingAddress(_)){&["transactions","asOfHeight","complete"]}else{&["transactions"]})?;
+                fields(result,if matches!(request,TransactionDataRequest::TransactionsInvolvingAddress(_)){&["transactions","asOfHeight","asOfHash","complete"]}else{&["transactions"]})?;
                 let transactions=result.get("transactions").and_then(Value::as_array).ok_or(Failure::from("INVALID_ARGUMENT"))?;
-                if transactions.len()>16{return Err("RESOURCE_LIMIT".into());}
-                let total=transactions.iter().try_fold(0usize,|sum,v|->Result<usize>{Ok(sum+string(v,"bytes")?.len())})?;
+                let unspent=matches!(&request,TransactionDataRequest::TransactionsInvolvingAddress(r) if matches!(r.tx_status_filter(),TransactionStatusFilter::All)&&matches!(r.output_status_filter(),OutputStatusFilter::Unspent)&&r.block_range_end().is_none());
+                if transactions.len()>if unspent{1000}else{16}{return Err("RESOURCE_LIMIT".into());}
+                let total=transactions.iter().try_fold(0usize,|sum,v|->Result<usize>{let scripts=if let Some(outputs)=v.get("unspentOutputs"){outputs.as_array().ok_or(Failure::from("INVALID_ARGUMENT"))?.iter().try_fold(0usize,|n,o|->Result<usize>{Ok(n+string(o,"script")?.len())})?}else{0};Ok(sum+string(v,"bytes")?.len()+scripts)})?;
                 if total>4*1024*1024{return Err("RESOURCE_LIMIT".into());}
                 match request {
                     TransactionDataRequest::Enhancement(id)=>{
@@ -91,8 +92,38 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                         decrypt_and_store_transaction(&p,db,&tx,mined)?;
                     },
                     TransactionDataRequest::TransactionsInvolvingAddress(r)=>{
-                        // Current spend-search requests are mined/all with a finite range.
-                        // Ephemeral ZIP320 unspent discovery needs its own evidence path.
+                        if matches!(r.tx_status_filter(),TransactionStatusFilter::All)&&matches!(r.output_status_filter(),OutputStatusFilter::Unspent)&&r.block_range_end().is_none() {
+                            let as_of=height(result,"asOfHeight")?;let hash=string(result,"asOfHash")?;
+                            let expected=hex::decode(hash).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+                            if expected.len()!=32||hex::encode(&expected)!=hash{return Err("INVALID_ARGUMENT".into());}
+                            if tip.map(u32::from)!=Some(as_of)||db.get_block_hash(as_of.into())?.is_none_or(|h|h.0.as_slice()!=expected.as_slice()){return Err("CHAIN_MISMATCH".into());}
+                            let complete=result.get("complete").and_then(Value::as_bool).ok_or(Failure::from("INVALID_ARGUMENT"))?;
+                            if !complete{return Err("INVALID_ARGUMENT".into());}
+                            let mut count=0;let mut seen=std::collections::BTreeSet::new();
+                            for item in transactions {
+                                fields(item,&["txid","bytes","minedHeight","unspentOutputs"])?;
+                                let(tx,mined)=transaction(&json!({"bytes":item["bytes"],"minedHeight":item["minedHeight"]}),&p)?;
+                                if tx.txid().to_string()!=string(item,"txid")?{return Err("CHAIN_MISMATCH".into());}
+                                if mined.is_some_and(|h|h<r.block_range_start()||u32::from(h)>as_of){return Err("CHAIN_MISMATCH".into());}
+                                if let Some(known)=db.get_tx_height(tx.txid())?{if Some(known)!=mined{return Err("CHAIN_MISMATCH".into());}}
+                                let outputs=item["unspentOutputs"].as_array().ok_or(Failure::from("INVALID_ARGUMENT"))?;
+                                if outputs.is_empty(){return Err("INVALID_ARGUMENT".into());}count+=outputs.len();if count>1000{return Err("RESOURCE_LIMIT".into());}
+                                let mut positive=vec![];
+                                for output in outputs {
+                                    fields(output,&["outputIndex","script","value"])?;let index=height(output,"outputIndex")?;
+                                    if !seen.insert((tx.txid().to_string(),index)){return Err("INVALID_ARGUMENT".into());}
+                                    let native=tx.transparent_bundle().and_then(|b|b.vout.get(index as usize)).ok_or(Failure::from("CHAIN_MISMATCH"))?;
+                                    let value=string(output,"value")?;
+                                    if native.value().into_u64().to_string()!=value||hex::encode(&native.script_pubkey().0.0)!=string(output,"script")?||native.recipient_address()!=Some(r.address()){return Err("CHAIN_MISMATCH".into());}
+                                    let output=zcash_client_backend::wallet::WalletTransparentOutput::from_parts(zcash_transparent::bundle::OutPoint::new(*tx.txid().as_ref(),index),native.clone(),mined,None,None,None).ok_or(Failure::from("CHAIN_MISMATCH"))?;positive.push(output);
+                                }
+                                decrypt_and_store_transaction(&p,db,&tx,mined)?;
+                                for output in positive{db.put_received_transparent_utxo(&output)?;}
+                            }
+                            // This is scheduling, not a claim that omitted outputs were spent or unspent.
+                            db.schedule_next_check(&r.address(),24*60*60)?;
+                        } else {
+                        // Other supported spend-search requests are mined/all with a finite range.
                         if !matches!(r.tx_status_filter(),TransactionStatusFilter::Mined)||!matches!(r.output_status_filter(),OutputStatusFilter::All){return Err("METHOD_NOT_SUPPORTED".into());}
                         let end=r.block_range_end().ok_or(Failure::from("METHOD_NOT_SUPPORTED"))?;
                         let complete=result.get("complete").and_then(Value::as_bool).ok_or(Failure::from("INVALID_ARGUMENT"))?;
@@ -105,6 +136,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                             decrypt_and_store_transaction(&p,db,&tx,mined)?;
                         }
                         if complete {db.notify_address_checked(r,as_of.into())?;}
+                        }
                     },
                     _=>return Err("INVALID_ARGUMENT".into()),
                 }
@@ -117,7 +149,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
 #[wasm_bindgen]
 pub fn enhancement_call(generation:u32,operation:&str,input:&str)->std::result::Result<String,String> {
     if !matches!(operation,"enhancement_requests"|"enhancement_apply"){return Err("INVALID_ARGUMENT".into());}
-    if input.len()>4*1024*1024+65536{return Err("RESOURCE_LIMIT".into());}
+    if input.len()>4*1024*1024+262144{return Err("RESOURCE_LIMIT".into());}
     let value=serde_json::from_str(input).map_err(|_|"INVALID_ARGUMENT".to_string())?;
     execute(generation,operation,&value).map(|v|v.to_string()).map_err(|e|e.0)
 }

@@ -224,26 +224,36 @@ function lowerEnhancement(args, operation) {
     if (!['enhancement','status'].includes(request.kind)||typeof request.txid!=='string'||! /^[0-9a-f]{64}$/.test(request.txid)) throw TypeError('INVALID_ARGUMENT');
   }
   input.request=request;
-  const result=scanFields(input.result,['transactions','asOfHeight','complete','status','height']);
+  const result=scanFields(input.result,['transactions','asOfHeight','asOfHash','complete','status','height']);
   if (Object.hasOwn(result,'status')) {
     scanFields(input.result,['status','height']);
     if (!['notRecognized','notInMainChain','mined'].includes(result.status)) throw TypeError('INVALID_ARGUMENT');
     if(result.status==='mined')scanHeight(result.height);else if(Object.hasOwn(result,'height'))throw TypeError('INVALID_ARGUMENT');
   } else {
-    scanFields(input.result,request.kind==='address'?['transactions','asOfHeight','complete']:['transactions']);
+    scanFields(input.result,request.kind==='address'?['transactions','asOfHeight','asOfHash','complete']:['transactions']);
     if(request.kind==='address'&&typeof result.complete!=='boolean')throw TypeError('INVALID_ARGUMENT');
     if(Object.hasOwn(result,'asOfHeight'))scanHeight(result.asOfHeight);
+    if(Object.hasOwn(result,'asOfHash')&&(typeof result.asOfHash!=='string'||! /^[0-9a-f]{64}$/.test(result.asOfHash)))throw TypeError('INVALID_ARGUMENT');
+    const unspent=request.kind==='address'&&request.txStatus==='all'&&request.outputStatus==='unspent'&&request.endExclusive===null;
+    if(unspent&&result.complete!==true)throw TypeError('INVALID_ARGUMENT');
     const items=result.transactions;
-    if(!Array.isArray(items)||items.length>16||Reflect.ownKeys(items).length!==items.length+1)throw TypeError('RESOURCE_LIMIT');
-    let remaining=2*1024*1024;
+    if(!Array.isArray(items)||items.length>(unspent?1000:16)||Reflect.ownKeys(items).length!==items.length+1)throw TypeError('RESOURCE_LIMIT');
+    let remaining=2*1024*1024,outputCount=0;
     result.transactions=[];
     for(let i=0;i<items.length;i++) {
       const property=Object.getOwnPropertyDescriptor(items,String(i));
       if(!property||!('value'in property))throw TypeError('INVALID_ARGUMENT');
-      const item=scanFields(property.value,['bytes','minedHeight']);
+      const item=scanFields(property.value,['txid','bytes','minedHeight','unspentOutputs']);
       if(item.minedHeight!==null)scanHeight(item.minedHeight);
       const bytes=copyBytes(item.bytes,remaining,'RESOURCE_LIMIT');remaining-=bytes.length;
-      result.transactions.push({bytes:scanHex(bytes),minedHeight:item.minedHeight});
+      const lowered={bytes:scanHex(bytes),minedHeight:item.minedHeight};
+      if(Object.hasOwn(item,'txid')){if(typeof item.txid!=='string'||! /^[0-9a-f]{64}$/.test(item.txid))throw TypeError('INVALID_ARGUMENT');lowered.txid=item.txid;}
+      if(Object.hasOwn(item,'unspentOutputs')) {
+        const outputs=item.unspentOutputs;if(!Array.isArray(outputs)||(outputCount+=outputs.length)>1000||Reflect.ownKeys(outputs).length!==outputs.length+1)throw TypeError('RESOURCE_LIMIT');
+        lowered.unspentOutputs=[];
+        for(let j=0;j<outputs.length;j++){const field=Object.getOwnPropertyDescriptor(outputs,String(j));if(!field||!('value'in field))throw TypeError('INVALID_ARGUMENT');const output=scanFields(field.value,['outputIndex','script','value']);scanHeight(output.outputIndex);if(typeof output.value!=='bigint'||output.value<0n||output.value>2100000000000000n)throw TypeError('INVALID_ARGUMENT');const script=copyBytes(output.script,Math.min(remaining,10000),'RESOURCE_LIMIT');remaining-=script.length;lowered.unspentOutputs.push({outputIndex:output.outputIndex,script:scanHex(script),value:output.value.toString()});}
+      }
+      result.transactions.push(lowered);
     }
   }
   input.result=result;

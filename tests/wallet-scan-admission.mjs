@@ -66,6 +66,13 @@ for(const [operation,input] of [['scan_state',{}],['scan_block_hash',{height:7}]
   const controller=new AbortController();afterCall=()=>controller.abort();
   assert.throws(()=>call(operation,{...input,signal:controller.signal}),e=>e.message==='ABORTED'&&e.commit==='none');
 }
+afterCall=()=>{};
+
+const unspent={...enhancement,request:{kind:'address',address:'synthetic',start:0,endExclusive:null,requestAt:null,txStatus:'all',outputStatus:'unspent'},result:{transactions:[{txid:'04'.repeat(32),bytes:new Uint8Array([1,2]),minedHeight:null,unspentOutputs:[{outputIndex:1,script:new Uint8Array([0x51]),value:42n}]}],asOfHeight:7,asOfHash:'03'.repeat(32),complete:true}};
+call('enhancement_apply',unspent);assert.deepEqual(received.input.result.transactions[0],{txid:'04'.repeat(32),bytes:'0102',minedHeight:null,unspentOutputs:[{outputIndex:1,script:'51',value:'42'}]});
+for(const output of [{outputIndex:0,get script(){throw Error('getter');},value:1n},{outputIndex:0,script:new Uint8Array(10001),value:1n}]){const before=calls;assert.throws(()=>call('enhancement_apply',{...unspent,result:{...unspent.result,transactions:[{...unspent.result.transactions[0],unspentOutputs:[output]}]}}),e=>e.commit==='none');assert.equal(calls,before);}
+console.log('Positive unspent outputs retain owned script/value admission');
+
 afterCall=()=>{throw new WebAssembly.RuntimeError('trap');};
 assert.throws(()=>call('scan_plan',{target}),e=>e.message==='DOMAIN_INVALID'&&e.commit===undefined);
 afterCall=()=>{};
