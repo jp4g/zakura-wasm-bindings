@@ -85,3 +85,6 @@ pub mod viewing;
 
 #[cfg(any(feature = "birthday", feature = "wallet-storage"))]
 pub mod birthday;
+
+#[cfg(feature = "standalone-pczt")]
+pub mod standalone_pczt;
