@@ -117,6 +117,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
             proposal::initialize(conn)?;
             pczt_build::initialize(conn)?;
             pczt_import::initialize(conn)?;
+            pczt_finalize::initialize(conn)?;
             Ok(())
         })();
         if let Err(error) = prepared {
@@ -195,6 +196,7 @@ mod proposal;
 mod pczt_build;
 mod pczt_import;
 mod pczt_prove;
+mod pczt_finalize;
 mod enhancement;
 
 mod query;
