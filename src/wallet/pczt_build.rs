@@ -107,10 +107,16 @@ fn projection(value:&pczt::Pczt,p:&crate::Document,key:&UnifiedFullViewingKey,re
 pub fn pczt_build_call(generation:u32,operation:&str,input:&str)->std::result::Result<String,String> {
     if input.len()>4096{return Err("RESOURCE_LIMIT".into());}
     let input:Value=serde_json::from_str(input).map_err(|_|"INVALID_ARGUMENT")?;
-    execute(generation,operation,&input).map(|v|v.to_string()).map_err(|e|e.0)
+    execute(generation,operation,&input,None).map(|v|v.to_string()).map_err(|e|e.0)
 }
-fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
-    fields(input,match operation {"pczt_build"=>&["operationId","proposalId","reviewCommitment"][..],"pczt_get_artifact"=>&["operationId"],_=>return Err("INVALID_ARGUMENT".into())})?;
+#[wasm_bindgen]
+pub fn pczt_import_call(generation:u32,operation_id:&str,bytes:&[u8])->std::result::Result<String,String>{
+    if operation_id.len()!=64{return Err("INVALID_ARGUMENT".into());}
+    if bytes.len()>4194304{return Err("RESOURCE_LIMIT".into());}
+    execute(generation,"pczt_import",&json!({"operationId":operation_id}),Some(bytes)).map(|v|v.to_string()).map_err(|e|e.0)
+}
+fn execute(generation:u32,operation:&str,input:&Value,incoming:Option<&[u8]>)->Result<Value> {
+    fields(input,match operation {"pczt_build"=>&["operationId","proposalId","reviewCommitment"][..],"pczt_get_artifact"=>&["operationId","artifactId"],"pczt_import"=>&["operationId"],_=>return Err("INVALID_ARGUMENT".into())})?;
     let id=string(input,"operationId")?;let operation_bytes=hex::decode(id).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
     if operation_bytes.len()!=32||hex::encode(&operation_bytes)!=id{return Err("INVALID_ARGUMENT".into());}
     super::DOMAIN.with(|domain| {
@@ -119,23 +125,44 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();let parameters=active.bytes.clone();
         active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
-            let (encoded,policy,account,revision)=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,CASE WHEN length(policy)<=16384 THEN policy END,account,revision FROM ext_wallet_proposals WHERE operation=?1",[&operation_bytes],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,uuid::Uuid>(2)?,r.get::<_,String>(3)?))).optional()?.ok_or(Failure::from("STALE_PROPOSAL"))?;
+            let (encoded,policy,account,revision)=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,CASE WHEN length(policy)<=16384 THEN policy END,account,revision FROM ext_wallet_proposals WHERE operation=?1",[&operation_bytes],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,uuid::Uuid>(2)?,r.get::<_,String>(3)?))).optional()?.ok_or(Failure::from(if operation=="pczt_import"{"OPERATION_NOT_FOUND"}else{"STALE_PROPOSAL"}))?;
             let wire=wire::Proposal::decode(&encoded[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
             let policy:Value=serde_json::from_str(&policy).map_err(|_|Failure::from("STORAGE_ERROR"))?;
             let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
             let review=super::proposal::bind_review(super::proposal::review(&wire,&p,&account.to_string(),id,&policy,&revision)?,&encoded,&parameters,&genesis,&policy);
             if operation=="pczt_build"&&(review["proposalId"]!=string(input,"proposalId")?||review["reviewCommitment"]!=string(input,"reviewCommitment")?){return Err(bad());}
-            let retained=ext.query_row("SELECT artifact,CASE WHEN length(bytes)<=4194304 THEN bytes END FROM ext_wallet_pczt WHERE operation=?1",[&operation_bytes],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?))).optional()?;
+            let mut retained=ext.query_row("SELECT artifact,CASE WHEN length(bytes)<=4194304 THEN bytes END FROM ext_wallet_pczt WHERE operation=?1",[&operation_bytes],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?))).optional()?;
+            if operation!="pczt_build" {
+                let wanted=input.get("artifactId").map(|_|string(input,"artifactId")).transpose()?;
+                if let Some(wanted)=wanted {if wanted.len()!=64||!wanted.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b)){return Err("INVALID_ARGUMENT".into());}}
+                let newer=ext.query_row("SELECT artifact,CASE WHEN length(bytes)<=4194304 THEN bytes END FROM ext_wallet_pczt_artifacts WHERE operation=?1 AND (?2 IS NULL OR artifact=?2) ORDER BY sequence DESC LIMIT 1",rusqlite::params![operation_bytes,wanted],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?))).optional()?;
+                if newer.is_some(){retained=newer;}
+                else if let Some(wanted)=wanted {if retained.as_ref().is_none_or(|(id,_)|id!=wanted){return Err(bad());}}
+            }
             let account_id=zcash_client_sqlite::AccountUuid::from_uuid(account);
             let account=db.get_account(account_id)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?;
             let key=account.ufvk().ok_or(Failure::from("ACCOUNT_NOT_SPENDABLE"))?.clone();
             let (artifact,bytes,outputs)=if let Some((artifact,bytes))=retained {
                 if artifact!=super::proposal::digest(b"zakura-wallet-pczt/1",&[id.as_bytes(),&bytes]){return Err("STORAGE_ERROR".into());}
-                let value=pczt::Pczt::parse(&bytes).map_err(|_|Failure::from("STORAGE_ERROR"))?;
+                let mut value=pczt::Pczt::parse(&bytes).map_err(|_|Failure::from("STORAGE_ERROR"))?;
+                let (artifact,bytes)=if let Some(incoming)=incoming {
+                    let imported=crate::standalone_pczt::parse_standalone_pczt(&parameters,&genesis,wire.min_target_height,review["branchId"].as_u64().ok_or_else(bad)? as u32,incoming,4194304).map_err(Failure)?.into_value();
+                    value=super::pczt_import::combine(value,imported)?;
+                    let merged=value.clone().serialize().map_err(|_|bad())?;
+                    if merged.len()>4194304{return Err("RESOURCE_LIMIT".into());}
+                    let next=super::proposal::digest(b"zakura-wallet-pczt/1",&[id.as_bytes(),&merged]);
+                    if next!=artifact {
+                        // Keep every issued identity; repeated exact imports do not mutate revision.
+                        let original:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM ext_wallet_pczt WHERE operation=?1 AND artifact=?2)",rusqlite::params![operation_bytes,next],|r|r.get(0))?;
+                        if !original&&ext.execute("INSERT OR IGNORE INTO ext_wallet_pczt_artifacts(operation,artifact,bytes) VALUES(?1,?2,?3)",rusqlite::params![operation_bytes,next,merged])?!=0 {super::revision::advance(ext)?;}
+                    }
+                    (next,merged)
+                }else{(artifact,bytes)};
                 let outputs=projection(&value,&p,&key,&review)?;
                 (artifact,bytes,outputs)
             }else{
                 if operation=="pczt_get_artifact"{return Ok(Value::Null);}
+                if operation=="pczt_import"{return Err(bad());}
                 if wire.steps.len()!=1{return Err("PCZT_MULTI_STEP_UNSUPPORTED".into());}
                 if super::revision::read(ext)?!=revision||db.chain_height()?.map(u32::from).and_then(|h|h.checked_add(1))!=Some(wire.min_target_height){return Err("STALE_PROPOSAL".into());}
                 let plan=wire.try_into_standard_proposal(&p,db).map_err(|_|Failure::from("STALE_PROPOSAL"))?;
