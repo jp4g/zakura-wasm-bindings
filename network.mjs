@@ -1,6 +1,6 @@
 // Internal generated glue is only called after admission. Initialization must
 // receive already-verified WASM bytes; it is not host/runtime negotiation.
-import { initSync, consensus_branch, viewing_open, viewing_decode_address, viewing_select_receiver, validate_birthday } from './bindings.js';
+import { initSync, consensus_branch, viewing_open, viewing_decode_address, viewing_select_receiver, validate_birthday, parse_standalone_pczt } from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 
 export function initialize(wasmBytes) {
@@ -60,4 +60,37 @@ export function validateBirthday(parameters, genesis, firstScanHeight, priorTree
   if (chain.length !== 32) throw new TypeError('NETWORK_MISMATCH');
   validate_birthday(copyBytes(parameters, 256, 'INVALID_ARGUMENT'), chain, firstScanHeight,
     copyBytes(priorTreeState, 65536, 'INVALID_BIRTHDAY'), recoverUntilExclusive);
+}
+
+// Native PCZT values remain opaque; combine/redact return independently owned values.
+const pcztOwners = new WeakMap();
+function pcztHandle(native) {
+  const state = { native };
+  const use = () => { if (!state.native) throw new Error('CLOSED'); return state.native; };
+  const handle = Object.freeze({
+    serialize: () => use().serialize(),
+    inspect: () => JSON.parse(use().inspect()),
+    combine(other) {
+      const left = use(), right = pcztOwners.get(other);
+      if (!right) throw new TypeError('INVALID_ARGUMENT');
+      if (!right.native) throw new Error('CLOSED');
+      return pcztHandle(left.combine(right.native));
+    },
+    redact(profile) {
+      if (typeof profile !== 'string' || profile.length > 256) throw new TypeError('INVALID_ARGUMENT');
+      return pcztHandle(use().redact(profile));
+    },
+    dispose() { const value = state.native; state.native = undefined; value?.free(); },
+  });
+  pcztOwners.set(handle, state);
+  return handle;
+}
+export function parseStandalonePczt(parameters, genesis, height, branch, bytes, maximum) {
+  if (!Number.isInteger(height) || height < 0 || height > 0xffffffff
+    || !Number.isInteger(branch) || branch < 0 || branch > 0xffffffff
+    || !Number.isInteger(maximum) || maximum < 1 || maximum > 0xffffffff) throw new TypeError('INVALID_ARGUMENT');
+  const chain = copyBytes(genesis, 32, 'NETWORK_MISMATCH');
+  if (chain.length !== 32) throw new TypeError('NETWORK_MISMATCH');
+  return pcztHandle(parse_standalone_pczt(copyBytes(parameters, 256, 'INVALID_ARGUMENT'), chain,
+    height, branch, copyBytes(bytes, maximum, 'INVALID_PCZT'), maximum));
 }
