@@ -199,6 +199,7 @@ mod pczt_import;
 mod pczt_prove;
 mod pczt_finalize;
 mod payment;
+mod fused_send;
 mod enhancement;
 
 mod query;
