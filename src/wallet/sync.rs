@@ -41,9 +41,13 @@ fn execute(generation: u32, operation: &str, input: &Value) -> Result<Value> {
                     if current && db.block_fully_scanned()?.is_some() {
                         let height=target_height.into();
                         let state=birthday.prior_chain_state();
-                        let sapling=db.with_sapling_tree_mut(|tree|tree.root_at_checkpoint_id(&height)).map_err(|_|Failure::from("SYNC_REQUIRED"))?;
-                        let orchard=db.with_orchard_tree_mut(|tree|tree.root_at_checkpoint_id(&height)).map_err(|_|Failure::from("SYNC_REQUIRED"))?;
-                        let ironwood=db.with_ironwood_tree_mut(|tree|tree.root_at_checkpoint_id(&height)).map_err(|_|Failure::from("SYNC_REQUIRED"))?.flatten();
+                        // Empty blocks need not have upstream checkpoints. Verify the exact
+                        // scanned block's tree prefixes, excluding any later tree material.
+                        let metadata=db.block_metadata(height)?.ok_or(Failure::from("SYNC_REQUIRED"))?;
+                        use incrementalmerkletree::Address;
+                        let sapling=db.with_sapling_tree_mut(|tree|metadata.sapling_tree_size().map(|size|tree.root(Address::from_parts(sapling::NOTE_COMMITMENT_TREE_DEPTH.into(),0),u64::from(size).into())).transpose()).map_err(|_|Failure::from("SYNC_REQUIRED"))?;
+                        let orchard=db.with_orchard_tree_mut(|tree|metadata.orchard_tree_size().map(|size|tree.root(Address::from_parts((orchard::NOTE_COMMITMENT_TREE_DEPTH as u8).into(),0),u64::from(size).into())).transpose()).map_err(|_|Failure::from("SYNC_REQUIRED"))?;
+                        let ironwood=db.with_ironwood_tree_mut(|tree|metadata.ironwood_tree_size().map(|size|tree.root(Address::from_parts((orchard::NOTE_COMMITMENT_TREE_DEPTH as u8).into(),0),u64::from(size).into())).transpose()).map_err(|_|Failure::from("SYNC_REQUIRED"))?.flatten();
                         use zcash_protocol::consensus::{Parameters,NetworkUpgrade};
                         if [(p.is_nu_active(NetworkUpgrade::Sapling,height),sapling.map(|r|r==state.final_sapling_tree().root())),
                             (p.is_nu_active(NetworkUpgrade::Nu5,height),orchard.map(|r|r==state.final_orchard_tree().root())),

@@ -2268,6 +2268,7 @@ dependencies = [
  "bip39",
  "getrandom 0.4.3",
  "hex",
+ "incrementalmerkletree",
  "postcard",
  "prost",
  "rand_core 0.10.1",

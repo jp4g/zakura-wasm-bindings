@@ -7,7 +7,7 @@ use zcash_client_sqlite::AccountUuid;
 use zcash_keys::keys::UnifiedFullViewingKey;
 
 fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
-    fields(input,match operation {"account_check_key"=>&["accountId","viewingKey"][..],"account_remove"=>&["accountId","acknowledge"],_=>return Err("INVALID_ARGUMENT".into())})?;
+    fields(input,match operation {"account_viewing_key"=>&["accountId"][..],"account_check_key"=>&["accountId","viewingKey"][..],"account_remove"=>&["accountId","acknowledge"],_=>return Err("INVALID_ARGUMENT".into())})?;
     let text=string(input,"accountId")?;
     let uuid=uuid::Uuid::parse_str(text).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
     if uuid.to_string()!=text {return Err("INVALID_ARGUMENT".into());}
@@ -19,6 +19,11 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
         let p=active.wallet.params().clone();
         active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
             let account=db.get_account(id)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?;
+            if operation=="account_viewing_key" {
+                let key=account.ufvk().map(|key|key.encode(&p));
+                if key.as_ref().is_some_and(|key|key.len()>4096){return Err("RESOURCE_LIMIT".into());}
+                return Ok(json!(key));
+            }
             if operation=="account_check_key" {
                 let key=UnifiedFullViewingKey::decode(&p,string(input,"viewingKey")?).map_err(|_|Failure::from("INVALID_VIEWING_KEY"))?;
                 if !account.ufvk().is_some_and(|stored|key.subsumes_ufvk(stored)){return Err("SIGNER_MISMATCH".into());}
