@@ -1,0 +1,84 @@
+use super::*;
+fn invoke(g:u32,operation:&str,input:Value)->std::result::Result<Value,String> {
+    crate::wallet::pczt_build::pczt_build_call(g,operation,&input.to_string()).map(|v|serde_json::from_str(&v).unwrap())
+}
+fn prepared(post_zip212:bool)->(String,u32,Value) {
+    let fixture=if !post_zip212 { full_scan_fixture() } else {
+        let p=crate::Document::parse(PARAMS).unwrap();let mut import=fixture(10);
+        let key=UnifiedFullViewingKey::decode(&p,import["viewingKey"].as_str().unwrap()).unwrap();
+        let state=TreeState{network:"regtest".into(),height:39999,hash:"07".repeat(32),time:1,sapling_tree:"000000".into(),orchard_tree:"000000".into(),ironwood_tree:"000000".into()};
+        import["birthday"]["firstScanHeight"]=json!(40000);import["birthday"].as_object_mut().unwrap().remove("recoverUntilExclusive");
+        import["birthday"]["priorTreeState"]=json!(hex::encode(state.encode_to_vec()));
+        let mut block=policy_block(&key);block.height=40000;
+        json!({"import":import,"target":{"height":40000,"hash":"08".repeat(32)},"batches":[{"priorTreeState":hex::encode(state.encode_to_vec()),"blocks":[hex::encode(block.encode_to_vec())]}]})
+    };
+    let (path,g)=open();
+    let account=call(g,"account_import",fixture["import"].clone()).unwrap();
+    let scan=|operation:&str,input:Value|crate::wallet::scan::scan_call(g,operation,&input.to_string()).map(|s|serde_json::from_str::<Value>(&s).unwrap()).unwrap();
+    let mut revision=scan("scan_plan",json!({"target":fixture["target"]}))["revision"].clone();
+    for data in fixture["batches"].as_array().unwrap(){let mut input=data.clone();input["target"]=fixture["target"].clone();input["revision"]=revision;revision=scan("scan_ingest_batch",input)["revision"].clone();}
+    let t=call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"transparent"}})).unwrap();
+    let s=call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"unified","transparent":"omit","sapling":"require","ironwood":"omit"}})).unwrap();
+    let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();
+    let input=json!({"revision":state["revision"],"accountId":account["id"],"payments":[{"to":t["address"],"amount":"10000"},{"to":s["address"],"amount":"10000","memo":hex::encode(zcash_protocol::memo::MemoBytes::empty().as_array())}],
+        "policy":{"spendPools":["sapling"],"transparent":"disallow","changePool":"sapling","feeRule":"zip317-standard","confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":false},"expiry":{"kind":"offset","blocks":40},"lockExpiryBlocks":20}});
+    let plan:Value=serde_json::from_str(&crate::wallet::proposal::proposal_call(g,"proposal_create",&input.to_string()).unwrap()).unwrap();
+    (path,g,plan)
+}
+fn request(plan:&Value)->Value {json!({"operationId":plan["operationId"],"proposalId":plan["proposalId"],"reviewCommitment":plan["reviewCommitment"]})}
+#[test]
+fn pczt_build_atomic_exact_outputs_and_retained_reopen() {
+    let (path,g,plan)=prepared(true);let input=request(&plan);
+    let mut forged=input.clone();forged["reviewCommitment"]=json!("00".repeat(32));
+    assert_eq!(invoke(g,"pczt_build",forged).unwrap_err(),"PCZT_ASSOCIATION_MISMATCH");
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    let before=policy_rows(&conn,&["addresses","ext_wallet_pczt","ext_wallet_revision"]);
+    conn.execute_batch("CREATE TRIGGER build_fail BEFORE INSERT ON ext_wallet_pczt BEGIN SELECT RAISE(ABORT,'synthetic artifact failure'); END").unwrap();
+    assert_eq!(invoke(g,"pczt_build",input.clone()).unwrap_err(),"STORAGE_ERROR");
+    conn.execute_batch("DROP TRIGGER build_fail").unwrap();
+    assert_eq!(policy_rows(&conn,&["addresses","ext_wallet_pczt","ext_wallet_revision"]),before);
+    assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"]})).unwrap(),Value::Null);
+    let artifact=invoke(g,"pczt_build",input.clone()).unwrap();
+    assert_eq!(artifact["outputs"].as_array().unwrap().len(),3);
+    assert_eq!(artifact["outputs"][0]["address"],plan["steps"][0]["outputs"][0]["address"]);
+    assert_eq!(artifact["outputs"][1]["address"],plan["steps"][0]["outputs"][1]["address"]);
+    assert_eq!(artifact["outputs"][1]["memo"],Value::Null,"explicit empty memo is native empty semantics");
+    assert_eq!(artifact["outputs"][2]["kind"],"change");assert!(artifact["outputs"][2]["address"].as_str().is_some());
+    // Pinned decrypt_diversifier misses internal scope; native change derivation proves ownership.
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let key=UnifiedFullViewingKey::decode(&p,fixture(10)["viewingKey"].as_str().unwrap()).unwrap();
+    let zcash_keys::address::Address::Sapling(change)=zcash_keys::address::Address::decode(&p,artifact["outputs"][2]["address"].as_str().unwrap()).unwrap() else {panic!("Sapling change")};
+    assert_eq!(key.sapling().unwrap().diversified_change_address(*change.diversifier()),Some(change));
+    assert_eq!(artifact["proofsComplete"],false);assert_eq!(artifact["authorizationComplete"],false);
+    assert_eq!(invoke(g,"pczt_build",input.clone()).unwrap(),artifact,"idempotent build does not rebuild random effects");
+    drop(conn);crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"]})).unwrap(),artifact);
+    assert_eq!(invoke(g,"pczt_build",input).unwrap(),artifact,"retained bytes survive new owner revision");
+    crate::wallet::storage_close(g).unwrap();
+}
+#[test]
+fn pczt_build_rejects_stale_and_multistep_without_artifact() {
+    let (path,g,plan)=prepared(true);
+    call(g,"address_next",json!({"accountId":plan["accountId"],"request":{"format":"transparent"}})).unwrap();
+    assert_eq!(invoke(g,"pczt_build",request(&plan)).unwrap_err(),"STALE_PROPOSAL");
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    let encoded:Vec<u8>=conn.query_row("SELECT plan FROM ext_wallet_proposals",[],|r|r.get(0)).unwrap();
+    let mut wire=zcash_client_backend::proto::proposal::Proposal::decode(&encoded[..]).unwrap();wire.steps.push(wire.steps[0].clone());
+    let encoded=wire.encode_to_vec();conn.execute("UPDATE ext_wallet_proposals SET plan=?1",[&encoded]).unwrap();
+    let policy:String=conn.query_row("SELECT policy FROM ext_wallet_proposals",[],|r|r.get(0)).unwrap();let policy:Value=serde_json::from_str(&policy).unwrap();
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let review=crate::wallet::proposal::review(&wire,&p,plan["accountId"].as_str().unwrap(),plan["operationId"].as_str().unwrap(),&policy,plan["revision"].as_str().unwrap()).unwrap();
+    let bound=crate::wallet::proposal::bind_review(review,&encoded,PARAMS,&[3;32],&policy);
+    assert_eq!(invoke(g,"pczt_build",request(&bound)).unwrap_err(),"PCZT_MULTI_STEP_UNSUPPORTED");
+    assert_eq!(conn.query_row("SELECT count(*) FROM ext_wallet_pczt",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    drop(conn);crate::wallet::storage_close(g).unwrap();
+}
+
+#[test]
+fn pczt_build_preserves_native_zip212_output_precondition() {
+    let (_,g,plan)=prepared(false);
+    assert_eq!(invoke(g,"pczt_build",request(&plan)).unwrap_err(),"ROLE_PRECONDITION");
+    assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"]})).unwrap(),Value::Null);
+    crate::wallet::storage_close(g).unwrap();
+}

@@ -19,7 +19,7 @@ pub(super) fn initialize(conn: &mut Connection) -> std::result::Result<(),String
     Ok(())
 }
 // Each component has an explicit little-endian length; domains version both bindings.
-fn digest(domain:&[u8],parts:&[&[u8]])->String {
+pub(super) fn digest(domain:&[u8],parts:&[&[u8]])->String {
     use sha2::{Digest,Sha256};
     let mut hash=Sha256::new();
     for part in std::iter::once(domain).chain(parts.iter().copied()) {
@@ -50,7 +50,7 @@ fn money(value:&Value,name:&str)->Result<Zatoshis> {
     Zatoshis::from_u64(n).map_err(|_|"INVALID_ARGUMENT".into())
 }
 fn pool_name(pool:i32)->Result<&'static str> {match pool {1=>Ok("transparent"),2=>Ok("sapling"),4=>Ok("ironwood"),_=>Err("UNSUPPORTED_POOL".into())}}
-fn review(plan:&wire::Proposal,p:&crate::Document,account:&str,id:&str,policy:&Value,revision:&str)->Result<Value> {
+pub(super) fn review(plan:&wire::Proposal,p:&crate::Document,account:&str,id:&str,policy:&Value,revision:&str)->Result<Value> {
     let target=plan.min_target_height;
     let expiry=policy.get("expiry").ok_or(Failure::from("INVALID_ARGUMENT"))?;
     fields(expiry,&["kind","blocks"])?;
