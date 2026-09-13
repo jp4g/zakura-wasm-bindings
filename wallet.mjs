@@ -4,7 +4,7 @@ import { initSync } from './bindings.js';
 import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 import * as host from './wallet-host/storage-host.mjs';
-let attempted = false;
+let attempted = false, prepared;
 function uint(value) {
   if (!Number.isInteger(value) || value < 1 || value > 0xffffffff) throw TypeError('INVALID_ARGUMENT');
   return value;
@@ -28,15 +28,46 @@ export function initializeWalletRuntime(wasm) {
   const code = copyBytes(wasm, 32 * 1024 * 1024, 'invalid wasm bytes');
   if (attempted) throw Error('DOMAIN_USED');
   attempted = true;
-  const instance = crypto.randomUUID();
   const exports = initSync({ module: code });
-  host.attachMemory(exports.memory);
+  return runtime(exports, false);
+}
+export function prepareThreaded(wasm, count) {
+  const code = copyBytes(wasm, 32 * 1024 * 1024, 'invalid wasm bytes');
+  if (!Number.isInteger(count) || count < 1 || count > 8) throw TypeError('INVALID_ARGUMENT');
+  if (attempted) throw Error('DOMAIN_USED');
+  attempted = true;
+  const module = new WebAssembly.Module(code);
+  const exports = initSync({ module });
+  if (!(exports.memory.buffer instanceof SharedArrayBuffer)) throw Error('RUNTIME_UNAVAILABLE');
+  binding.wallet_threaded_prepare(count); prepared = exports;
+  return Object.freeze({ module, memory: exports.memory });
+}
+export function enterThreaded(module, memory, index, onLoaded) {
+  if (!(module instanceof WebAssembly.Module) || !(memory instanceof WebAssembly.Memory)
+    || !(memory.buffer instanceof SharedArrayBuffer) || !Number.isInteger(index) || index < 0 || index > 7 || typeof onLoaded !== 'function') throw TypeError('INVALID_ARGUMENT');
+  if (attempted) throw Error('DOMAIN_USED');
+  attempted = true;
+  const exports = initSync({ module, memory });
+  if (exports.memory.buffer !== memory.buffer) throw Error('RUNTIME_UNAVAILABLE');
+  host.attachMemory(exports.memory, true, false);
+  onLoaded(); binding.wallet_threaded_enter(index);
+  throw Error('RUNTIME_UNAVAILABLE');
+}
+export function finishThreaded() {
+  if (!prepared) throw Error('DOMAIN_NOT_READY');
+  const exports = prepared; prepared = undefined;
+  binding.wallet_threaded_build();
+  return runtime(exports, true);
+}
+function runtime(exports, shared) {
+  const instance = crypto.randomUUID();
+  host.attachMemory(exports.memory, shared);
   if (exports.wallet_pool_start() + exports.wallet_pool_size() > exports.__heap_base.value) throw Error('allocator overlap');
   if (exports.wallet_runtime_init() !== 0) throw Error('RUNTIME_UNAVAILABLE');
   let invalid = false;
   const run = (backend, fn) => {
     if (invalid) throw Error('DOMAIN_INVALID');
-    try { return host.withBackend(backend, fn); }
+    try { if (shared) binding.wallet_threaded_check(); return host.withBackend(backend, fn); }
     catch (error) { if (typeof error !== 'string' || error === 'STORAGE_CLOSE_FAILED') invalid = true; throw error; }
   };
   return Object.freeze({

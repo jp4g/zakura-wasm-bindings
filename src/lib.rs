@@ -88,3 +88,6 @@ pub mod birthday;
 
 #[cfg(feature = "standalone-pczt")]
 pub mod standalone_pczt;
+
+#[cfg(feature = "wallet-threaded")]
+mod wallet_threads;
