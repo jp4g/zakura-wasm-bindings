@@ -59,7 +59,10 @@ if (!isMainThread) {
         const finished=next(owner);owner.postMessage({build:true});const result=await finished;
         assert.equal(result.pass,true);
         if(create) first=result.result;else assert.deepEqual(result.result,first,'exact persisted scan/balance after fresh shared owner');
-      } finally {await Promise.all(workers.map(async w=>{await w.terminate();destroyed++;}));}
+      } finally {
+        const stopped=await Promise.allSettled(workers.map(async w=>{await w.terminate();destroyed++;}));
+        const failure=stopped.find(result=>result.status==='rejected');if(failure)throw failure.reason;
+      }
     }
     assert.equal(destroyed,6);
     console.log(JSON.stringify({pass:true,computeWorkersPerOwner:2,destroyed,scanAndReopen:true}));
