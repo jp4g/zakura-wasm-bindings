@@ -9,7 +9,7 @@ const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','w
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const scans = new Set(['scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
-const writes = new Set(['scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','address_next','address_at']);
+const writes = new Set(['scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -227,8 +227,14 @@ export function viewsForStorage(storage) {
         throw Object.assign(Error(error),scans.has(operation)?{commit:'none'}:{});
       }
       finally {ownedSeed?.fill(0);ownedMnemonic?.fill(0);ownedPassphrase?.fill(0);}
-      abort(signal,writes.has(operation)?'committed':'none');
       const value=lift(JSON.parse(result));
+      if (operation==='account_import_mnemonic_signer'||operation==='account_create_mnemonic_signer') {
+        if(signal!==undefined&&aborted.call(signal)) {
+          storage.run(()=>binding.signer_release(value.signerToken));
+          throw Object.assign(Error('ABORTED'),{commit:'committed',account:value.account});
+        }
+      }
+      abort(signal,writes.has(operation)?'committed':'none');
       if(operation==='account_balance')value.amounts=liftAmounts(value.amounts);
       if(queries.has(operation)&&value!==null) {
         for(const row of value.items??value.accounts)for(const key of operation==='wallet_notes'||operation==='wallet_utxos'?['value']:['balanceDelta','totalReceived','totalSpent','fee'])if(row[key]!==null)row[key]=BigInt(row[key]);

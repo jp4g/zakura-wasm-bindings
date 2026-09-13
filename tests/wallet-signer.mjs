@@ -46,6 +46,13 @@ if(isMainThread) {
   assert.equal(reopened.bindSigner(token,created.account.id),'ready');
   second.close(second.generation,second.instance);
   assert.equal(call(reopened,'account_list').length,1);
+  const controller=new AbortController();
+  const canceledStorage=runtime.openMemory('zcash-js-network/1',parameters,genesis);
+  const canceled=viewsForStorage({...canceledStorage,run:fn=>{const result=canceledStorage.run(fn);controller.abort();return result;}});
+  assert.throws(()=>canceled.call(canceled.generation,canceled.instance,'account_import_mnemonic_signer',{accountIndex:1,birthday:'fullScan',signal:controller.signal},undefined,mnemonic),error=>error.message==='ABORTED'&&error.commit==='committed'&&typeof error.account.id==='string');
+  assert.equal(call(canceled,'account_list').length,1);
+  assert.throws(()=>runtime.signers.describe(token+1),error=>error==='STALE_HANDLE');
+  canceled.close(canceled.generation,canceled.instance);
   runtime.signers.release(token);
   assert.throws(()=>runtime.signers.describe(token),error=>error==='STALE_HANDLE');
   assert.equal(call(reopened,'account_get',{accountId:created.account.id}).signerAttached,false);
