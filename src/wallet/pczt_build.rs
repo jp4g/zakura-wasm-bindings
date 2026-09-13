@@ -178,7 +178,8 @@ fn execute(generation:u32,operation:&str,input:&Value,incoming:Option<(&[u8],u32
             };
             let handle=crate::standalone_pczt::parse_standalone_pczt(&parameters,&genesis,wire.min_target_height,review["branchId"].as_u64().ok_or_else(bad)? as u32,&bytes,4194304).map_err(Failure)?;
             let inspection:Value=serde_json::from_str(&handle.inspect().map_err(Failure)?).map_err(|_|bad())?;
-            Ok(json!({"operationId":id,"artifactId":artifact,"accountId":review["accountId"],"outputs":outputs,"bytes":hex::encode(bytes),"proofsComplete":inspection["proofsComplete"],"authorizationComplete":inspection["authorizationComplete"]}))
+            let prover=pczt::roles::prover::Prover::new(handle.into_value());
+            Ok(json!({"operationId":id,"artifactId":artifact,"accountId":review["accountId"],"outputs":outputs,"bytes":hex::encode(bytes),"requiresSaplingProofs":prover.requires_sapling_proofs(),"requiresIronwoodProof":prover.requires_ironwood_proof(),"requiresOrchardProof":prover.requires_orchard_proof(),"proofsComplete":inspection["proofsComplete"],"authorizationComplete":inspection["authorizationComplete"]}))
         })
     })
 }

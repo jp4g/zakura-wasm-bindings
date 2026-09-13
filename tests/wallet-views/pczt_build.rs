@@ -27,7 +27,8 @@ fn scan_fixture(with_signer:bool,internal:bool)->Value {
 pub(super) fn pczt_fixture()->Value {
     json!({"mnemonic":WORDS,"accountIndex":0,"external":scan_fixture(true,false),"internal":scan_fixture(true,true)})
 }
-fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32,Value,Option<u32>) {
+fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32,Value,Option<u32>) {prepared_proving(post_zip212,with_signer,internal,false)}
+fn prepared_proving(post_zip212:bool,with_signer:bool,internal:bool,ironwood:bool)->(String,u32,Value,Option<u32>) {
     let fixture=if post_zip212{scan_fixture(with_signer,internal)}else{full_scan_fixture()};
     let (path,g)=open();
     let (account,token)=if with_signer {
@@ -39,10 +40,10 @@ fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32
     let mut revision=scan("scan_plan",json!({"target":fixture["target"]}))["revision"].clone();
     for data in fixture["batches"].as_array().unwrap(){let mut input=data.clone();input["target"]=fixture["target"].clone();input["revision"]=revision;revision=scan("scan_ingest_batch",input)["revision"].clone();}
     let t=call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"transparent"}})).unwrap();
-    let s=call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"unified","transparent":"omit","sapling":"require","ironwood":"omit"}})).unwrap();
+    let s=call(g,"address_next",json!({"accountId":account["id"],"request":{"format":"unified","transparent":"omit","sapling":if ironwood{"omit"}else{"require"},"ironwood":if ironwood{"require"}else{"omit"}}})).unwrap();
     let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();
     let input=json!({"revision":state["revision"],"accountId":account["id"],"payments":[{"to":t["address"],"amount":"10000"},{"to":s["address"],"amount":"10000","memo":hex::encode(zcash_protocol::memo::MemoBytes::empty().as_array())}],
-        "policy":{"spendPools":["sapling"],"transparent":"disallow","changePool":"sapling","feeRule":"zip317-standard","confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":false},"expiry":{"kind":"offset","blocks":40},"lockExpiryBlocks":20}});
+        "policy":{"spendPools":["sapling"],"transparent":"disallow","changePool":if ironwood{"ironwood"}else{"sapling"},"feeRule":"zip317-standard","confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":false},"expiry":{"kind":"offset","blocks":40},"lockExpiryBlocks":20}});
     let plan:Value=serde_json::from_str(&crate::wallet::proposal::proposal_call(g,"proposal_create",&input.to_string()).unwrap()).unwrap();
     (path,g,plan,token)
 }
@@ -160,4 +161,40 @@ fn pczt_import_retains_versions_and_rolls_back_invalid_returns() {
     assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"]})).unwrap(),accepted);
     for artifact in [original,accepted]{assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"],"artifactId":artifact["artifactId"]})).unwrap(),artifact);}
     crate::wallet::storage_close(g).unwrap();
+}
+
+#[test]
+#[ignore = "requires locally qualified canonical Sapling parameters and real proving"]
+fn pczt_prove_real_sapling_retains_and_verifies() { prove_retained(false); }
+#[test]
+#[ignore = "requires locally qualified parameters and real Sapling/Ironwood proving"]
+fn pczt_prove_real_ironwood_retains_and_verifies() { prove_retained(true); }
+fn prove_retained(ironwood:bool) {
+    let root=std::env::var("PCZT_PROVING_PARAMETERS").unwrap();
+    let spend=std::fs::read(format!("{root}/sapling-spend.params")).unwrap();
+    let output=std::fs::read(format!("{root}/sapling-output.params")).unwrap();
+    let(path,g,plan,token)=prepared_proving(true,true,false,ironwood);let token=token.unwrap();
+    let original=invoke(g,"pczt_build",request(&plan)).unwrap();
+    let bytes=hex::decode(original["bytes"].as_str().unwrap()).unwrap();
+    let signed=crate::wallet::signer::signer_authorize(token,PARAMS,&[3;32],40001,plan["branchId"].as_u64().unwrap() as u32,&bytes,4194304).unwrap();
+    let retained:Value=serde_json::from_str(&crate::wallet::pczt_build::pczt_import_call(g,plan["operationId"].as_str().unwrap(),&signed,4194304).unwrap()).unwrap();
+    let prove=|spend:&[u8],output:&[u8]|crate::wallet::pczt_prove::pczt_prove_call(g,plan["operationId"].as_str().unwrap(),retained["artifactId"].as_str().unwrap(),spend,output,4194304);
+    let conn=rusqlite::Connection::open(&path).unwrap();let before=policy_rows(&conn,&["ext_wallet_pczt","ext_wallet_pczt_artifacts","ext_wallet_revision"]);
+    assert_eq!(prove(&spend[..spend.len()-1],&output).unwrap_err(),"ASSET_INTEGRITY");
+    assert_eq!(prove(&[],&output).unwrap_err(),"PROVING_MATERIAL_REQUIRED");
+    let mut corrupt=output.clone();corrupt[0]^=1;assert_eq!(prove(&spend,&corrupt).unwrap_err(),"ASSET_INTEGRITY");
+    assert_eq!(retained["requiresSaplingProofs"],true);assert_eq!(retained["requiresIronwoodProof"],ironwood);
+    assert_eq!(policy_rows(&conn,&["ext_wallet_pczt","ext_wallet_pczt_artifacts","ext_wallet_revision"]),before);
+    let proven:Value=serde_json::from_str(&prove(&spend,&output).unwrap()).unwrap();
+    assert_eq!(proven["proofsComplete"],true);assert_eq!(proven["requiresSaplingProofs"],false);assert_eq!(proven["requiresIronwoodProof"],false);assert_ne!(proven["artifactId"],retained["artifactId"]);
+    let value=pczt::Pczt::parse(&hex::decode(proven["bytes"].as_str().unwrap()).unwrap()).unwrap();
+    assert!(!value.sapling().spends().is_empty());assert!(!value.sapling().outputs().is_empty());
+    assert_eq!(!value.ironwood().actions().is_empty(),ironwood);
+    let spend_vk=sapling::circuit::SpendParameters::read(&spend[..],false).unwrap().verifying_key();
+    let output_vk=sapling::circuit::OutputParameters::read(&output[..],false).unwrap().verifying_key();
+    pczt::roles::tx_extractor::TransactionExtractor::new(value).with_sapling(&spend_vk,&output_vk).extract().unwrap();
+    assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"],"artifactId":original["artifactId"]})).unwrap(),original);
+    drop(conn);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(invoke(g,"pczt_get_artifact",json!({"operationId":plan["operationId"]})).unwrap(),proven);
+    crate::wallet::storage_close(g).unwrap();crate::wallet::signer::signer_release(token).unwrap();
 }
