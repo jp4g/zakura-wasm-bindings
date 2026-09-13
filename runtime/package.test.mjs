@@ -32,7 +32,7 @@ assert.equal(api.runtimeIdentity.schemas.operations.walletSync, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletEnhancement, '1');
 assert.equal(api.runtimeIdentity.schemas.operations.walletQueries, '2');
 assert.equal(api.runtimeIdentity.schemas.database, 'wallet-storage/5');
-assert.deepEqual(api.runtimeIdentity.memory, { initialPages: 308, maximumPages: 4096, shared: false });
+assert.deepEqual(api.runtimeIdentity.memory, { initialPages: 307, maximumPages: 4096, shared: false });
 assert.equal(result.manifestSha256, digest(readFileSync(join(options.output, 'manifest.json'))));
 await assert.rejects(buildWalletPackage(options), { code: 'EEXIST' });
 const bad = join(scratch, 'bad-native'); mkdirSync(bad);
