@@ -102,6 +102,10 @@ pub(super) fn validate(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Resul
         expected.insert(super::proposal::TABLE.into(), ("table".into(), super::proposal::TABLE.into(), Some(super::proposal::SQL.into())));
         expected.insert("sqlite_autoindex_ext_wallet_proposals_1".into(), ("index".into(), super::proposal::TABLE.into(), None));
     }
+    if actual.contains_key(super::pczt_import::TABLE) {
+        expected.insert(super::pczt_import::TABLE.into(), ("table".into(), super::pczt_import::TABLE.into(), Some(super::pczt_import::SQL.into())));
+        expected.insert("sqlite_autoindex_ext_wallet_pczt_artifacts_1".into(), ("index".into(), super::pczt_import::TABLE.into(), None));
+    }
     if actual.contains_key(super::pczt_build::TABLE) {
         expected.insert(super::pczt_build::TABLE.into(), ("table".into(), super::pczt_build::TABLE.into(), Some(super::pczt_build::SQL.into())));
         expected.insert("sqlite_autoindex_ext_wallet_pczt_1".into(), ("index".into(), super::pczt_build::TABLE.into(), None));
