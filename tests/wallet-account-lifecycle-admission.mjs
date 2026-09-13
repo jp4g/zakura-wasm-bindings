@@ -15,7 +15,7 @@ const owner=facade.namespace.viewsForStorage(storage),call=(op,args)=>owner.call
 assert.equal(call('account_viewing_key',{accountId:'account'}),'ufvk-canonical');
 assert.equal(call('account_check_key',{accountId:'account',viewingKey:'native'}),'ready');
 assert.throws(()=>call('account_remove',{accountId:'account',get acknowledge(){throw Error('getter');}}),{message:'INVALID_ARGUMENT',commit:'none'});
-assert.equal(called,1);fail=true;
+assert.equal(called,2);fail=true;
 assert.throws(()=>call('account_remove',{accountId:'account',acknowledge:'deletes-local-history'}),{message:'INPUT_LOCKED',commit:'none'});
 fail=false;const controller=new AbortController();after=()=>controller.abort();
 assert.throws(()=>call('account_remove',{accountId:'account',acknowledge:'deletes-local-history',signal:controller.signal}),{message:'ABORTED',commit:'committed'});
