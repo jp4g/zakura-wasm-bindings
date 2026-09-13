@@ -9,9 +9,10 @@ const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','w
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const proposals = new Set(['proposal_create','proposal_get','proposal_list']);
+const pczt = new Set(['pczt_build','pczt_get_artifact']);
 const lifecycle = new Set(['account_remove','account_check_key']);
-const scans = new Set([...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
-const writes = new Set(['account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
+const scans = new Set([...pczt,...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
+const writes = new Set(['pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -102,6 +103,12 @@ function lowerProposal(args, operation) {
   scanHeight(policy.lockExpiryBlocks);input.policy=policy;return input;
 }
 function lowerScan(args, operation) {
+  if(pczt.has(operation)) {
+    const keys=operation==='pczt_build'?['operationId','proposalId','reviewCommitment']:['operationId'];
+    const input=scanFields(args,[...keys,'signal']);delete input.signal;
+    for(const key of keys)if(typeof input[key]!=='string'||! /^[0-9a-f]{64}$/.test(input[key]))throw TypeError('INVALID_ARGUMENT');
+    return input;
+  }
   if(lifecycle.has(operation)){
     const input=scanFields(args,operation==='account_remove'?['accountId','acknowledge','signal']:['accountId','viewingKey','signal']);
     delete input.signal;
@@ -256,7 +263,7 @@ export function viewsForStorage(storage) {
           result=storage.run(()=>binding.views_seed_call(token,operation,input,ownedSeed));
         } else {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
-          result=storage.run(()=>lifecycle.has(operation)?binding.account_lifecycle_call(token,operation,input):proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
+          result=storage.run(()=>pczt.has(operation)?binding.pczt_build_call(token,operation,input):lifecycle.has(operation)?binding.account_lifecycle_call(token,operation,input):proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
             scans.has(operation)?binding.scan_call(token,operation,input):binding.views_call(token,operation,input));
         }
       }
@@ -274,6 +281,14 @@ export function viewsForStorage(storage) {
         }
       }
       abort(signal,writes.has(operation)?'committed':'none');
+      if(pczt.has(operation)&&value!==null) {
+        const hex=value.bytes;value.bytes=new Uint8Array(hex.length/2);
+        for(let i=0;i<value.bytes.length;i++)value.bytes[i]=parseInt(hex.slice(2*i,2*i+2),16);
+        for(const output of value.outputs) {
+          output.amount=BigInt(output.amount);
+          if(output.memo!==null)output.memo=Uint8Array.from(output.memo.match(/../g)??[],hex=>parseInt(hex,16));
+        }
+      }
       if(proposals.has(operation)&&operation!=='proposal_list'&&value!==null) {
         value.totalFee=BigInt(value.totalFee);
         for(const step of value.steps) {step.fee=BigInt(step.fee);for(const input of step.inputs)input.value=BigInt(input.value);for(const output of step.outputs) {output.amount=BigInt(output.amount);if(output.memo!==null)output.memo=Uint8Array.from(output.memo.match(/../g)??[],hex=>parseInt(hex,16));}}
