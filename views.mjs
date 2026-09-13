@@ -9,10 +9,10 @@ const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','w
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const proposals = new Set(['proposal_create','proposal_get','proposal_list','proposal_lookup_intent']);
-const pczt = new Set(['pczt_build','pczt_get_artifact','pczt_import']);
+const pczt = new Set(['pczt_prove','pczt_build','pczt_get_artifact','pczt_import']);
 const lifecycle = new Set(['account_remove','account_check_key']);
 const scans = new Set([...pczt,...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
-const writes = new Set(['pczt_import','pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
+const writes = new Set(['pczt_prove','pczt_import','pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -114,9 +114,17 @@ function lowerProposal(args, operation) {
 }
 function lowerScan(args, operation) {
   if(pczt.has(operation)) {
-    const keys=operation==='pczt_build'?['operationId','proposalId','reviewCommitment']:operation==='pczt_import'?['operationId','bytes','maximum']:['operationId','artifactId'];
+    const keys=operation==='pczt_build'?['operationId','proposalId','reviewCommitment']:operation==='pczt_import'?['operationId','bytes','maximum']:operation==='pczt_prove'?['operationId','artifactId','spend','output','maximum']:['operationId','artifactId'];
     const input=scanFields(args,[...keys,'signal']);delete input.signal;
-    for(const key of keys)if(!['bytes','maximum'].includes(key)&&(key!=='artifactId'||Object.hasOwn(input,key))&&(typeof input[key]!=='string'||! /^[0-9a-f]{64}$/.test(input[key])))throw TypeError('INVALID_ARGUMENT');
+    for(const key of keys)if(!['bytes','maximum','spend','output'].includes(key)&&(key!=='artifactId'||operation!=='pczt_get_artifact'||Object.hasOwn(input,key))&&(typeof input[key]!=='string'||! /^[0-9a-f]{64}$/.test(input[key])))throw TypeError('INVALID_ARGUMENT');
+    if(operation==='pczt_prove') {
+      if(!Number.isInteger(input.maximum)||input.maximum<1||input.maximum>4194304)throw TypeError('RESOURCE_LIMIT');
+      for(const [key,size] of [['spend',47958396],['output',3592860]]) {
+        let length;try{length=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),'byteLength').get.call(input[key]);}catch{throw TypeError('INVALID_ARGUMENT');}
+        if(length!==0&&length!==size)throw TypeError('INVALID_ARGUMENT');
+        input[key]=copyBytes(input[key],size,'INVALID_ARGUMENT',0);
+      }
+    }
     if(operation==='pczt_import') {
       if(!Number.isInteger(input.maximum)||input.maximum<1||input.maximum>4194304)throw TypeError('RESOURCE_LIMIT');
       let length;try{length=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),'byteLength').get.call(input.bytes);}catch{throw TypeError('INVALID_PCZT');}
@@ -247,7 +255,7 @@ export function viewsForStorage(storage) {
     bindSigner: storage.bindSigner, unbindSigner: storage.unbindSigner,
     call(token,owner,operation,args={},seed,mnemonic,passphrase) {
       if(poisoned)throw Error('DOMAIN_INVALID');
-      let signal,input,ownedPczt,pcztOperationId,pcztMaximum;
+      let signal,input,ownedPczt,pcztOperationId,pcztMaximum,proof;
       try {
         storage.binding(token,owner); // actual Rust generation + owned JS instance
         if(!operations.has(operation)&&!scans.has(operation))throw TypeError('INVALID_ARGUMENT');
@@ -257,6 +265,7 @@ export function viewsForStorage(storage) {
         abort(signal,'none');
         const lowered=scans.has(operation)?lowerScan(args,operation):lower(args);
         if(operation==='pczt_import'){ownedPczt=lowered.bytes;pcztOperationId=lowered.operationId;pcztMaximum=lowered.maximum;delete lowered.bytes;}
+        if(operation==='pczt_prove'){proof={...lowered};delete lowered.spend;delete lowered.output;}
         input=JSON.stringify(lowered);
         abort(signal,'none');
       } catch(error) {
@@ -281,7 +290,7 @@ export function viewsForStorage(storage) {
           result=storage.run(()=>binding.views_seed_call(token,operation,input,ownedSeed));
         } else {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
-          result=storage.run(()=>operation==='pczt_import'?binding.pczt_import_call(token,pcztOperationId,ownedPczt,pcztMaximum):pczt.has(operation)?binding.pczt_build_call(token,operation,input):lifecycle.has(operation)?binding.account_lifecycle_call(token,operation,input):proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
+          result=storage.run(()=>operation==='pczt_prove'?binding.pczt_prove_call(token,proof.operationId,proof.artifactId,proof.spend,proof.output,proof.maximum):operation==='pczt_import'?binding.pczt_import_call(token,pcztOperationId,ownedPczt,pcztMaximum):pczt.has(operation)?binding.pczt_build_call(token,operation,input):lifecycle.has(operation)?binding.account_lifecycle_call(token,operation,input):proposals.has(operation)?binding.proposal_call(token,operation,input):queries.has(operation)?binding.query_call(token,operation,input):enhancements.has(operation)?binding.enhancement_call(token,operation,input):syncs.has(operation)?binding.sync_call(token,operation,input):
             scans.has(operation)?binding.scan_call(token,operation,input):binding.views_call(token,operation,input));
         }
       }

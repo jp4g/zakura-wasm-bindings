@@ -12,6 +12,9 @@ await facade.link(async name=>{
     calls++;assert.equal(g,1);assert.deepEqual(JSON.parse(input),op==='pczt_build'?request:{operationId:request.operationId,...(getArtifactId?{artifactId:getArtifactId}:{})});
     if(failure)throw failure;after();
     return nativeResult();
+  },pczt_prove_call(g,operationId,artifactId,spend,output,maximum){
+    calls++;assert.equal(g,1);assert.equal(operationId,request.operationId);assert.equal(artifactId,'04'.repeat(32));assert.equal(maximum,16);
+    assert.equal(spend.byteLength,0);assert.equal(output.byteLength,0);if(failure)throw failure;after();return nativeResult();
   },pczt_import_call(g,operationId,bytes,maximum){
     calls++;assert.equal(g,1);assert.equal(operationId,request.operationId);assert.equal(maximum,16);
     assert.deepEqual(bytes,new Uint8Array([1,2]));if(failure)throw failure;after();return nativeResult();
@@ -48,3 +51,14 @@ const importedAbort=new AbortController();after=()=>importedAbort.abort();
 assert.throws(()=>call('pczt_import',{operationId:request.operationId,bytes:new Uint8Array([1,2]),maximum:16,signal:importedAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
 assert.equal(call('pczt_get_artifact',{operationId:request.operationId}).outputs[0].amount,10000n);
 console.log('PCZT import owned bytes, maximum admission, retained lookup and commit receipts passed');
+
+const proof={operationId:request.operationId,artifactId:'04'.repeat(32),spend:new Uint8Array(),output:new Uint8Array(),maximum:16};
+for(const input of [{...proof,artifactId:undefined},{...proof,spend:new Uint8Array(1)},{...proof,maximum:0},{...proof,get output(){throw Error('getter');}}]) {
+  const before=calls;assert.throws(()=>call('pczt_prove',input),error=>error.commit==='none');assert.equal(calls,before);
+}
+assert.equal(call('pczt_prove',proof).outputs[0].amount,10000n);
+failure='ROLE_PRECONDITION';assert.throws(()=>call('pczt_prove',proof),{message:'ROLE_PRECONDITION',commit:'none'});failure=undefined;
+const proofAbort=new AbortController();after=()=>proofAbort.abort();
+assert.throws(()=>call('pczt_prove',{...proof,signal:proofAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
+assert.equal(call('pczt_prove',proof).outputs[0].amount,10000n);
+console.log('PCZT prove asset admission, exact artifact binding and commit receipts passed');

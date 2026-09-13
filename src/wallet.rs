@@ -194,6 +194,7 @@ mod creation;
 mod proposal;
 mod pczt_build;
 mod pczt_import;
+mod pczt_prove;
 mod enhancement;
 
 mod query;
