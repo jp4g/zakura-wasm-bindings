@@ -1,6 +1,6 @@
 // Internal generated glue is only called after admission. Initialization must
 // receive already-verified WASM bytes; it is not host/runtime negotiation.
-import { initSync, consensus_branch, viewing_open, viewing_decode_address, viewing_select_receiver } from './bindings.js';
+import { initSync, consensus_branch, viewing_open, viewing_decode_address, viewing_select_receiver, validate_birthday } from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 
 export function initialize(wasmBytes) {
@@ -50,4 +50,14 @@ export function selectViewingReceiver(parameters, encoded, pool, height, branch)
   if (typeof encoded !== 'string' || encoded.length > 16384 || typeof pool !== 'string' || !Number.isInteger(height) || height < 0 || height > 0xffffffff || !Number.isInteger(branch) || branch < 0 || branch > 0xffffffff) throw new TypeError('INVALID_ARGUMENT');
   const result = JSON.parse(viewing_select_receiver(copyBytes(parameters, 256, 'invalid parameters'), encoded, pool, height, branch));
   return { ...result, bytes: Uint8Array.from(result.bytes.match(/../g), byte => parseInt(byte, 16)) };
+}
+
+// One checked native birthday operation; no account allocation or storage owner.
+export function validateBirthday(parameters, genesis, firstScanHeight, priorTreeState, recoverUntilExclusive) {
+  if (!Number.isInteger(firstScanHeight) || firstScanHeight < 1 || firstScanHeight > 0xffffffff
+    || (recoverUntilExclusive !== undefined && (!Number.isInteger(recoverUntilExclusive) || recoverUntilExclusive < firstScanHeight || recoverUntilExclusive > 0xffffffff))) throw new TypeError('INVALID_BIRTHDAY');
+  const chain = copyBytes(genesis, 32, 'NETWORK_MISMATCH');
+  if (chain.length !== 32) throw new TypeError('NETWORK_MISMATCH');
+  validate_birthday(copyBytes(parameters, 256, 'INVALID_ARGUMENT'), chain, firstScanHeight,
+    copyBytes(priorTreeState, 65536, 'INVALID_BIRTHDAY'), recoverUntilExclusive);
 }
