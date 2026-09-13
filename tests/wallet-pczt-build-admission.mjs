@@ -15,6 +15,13 @@ await facade.link(async name=>{
   },pczt_prove_call(g,operationId,artifactId,spend,output,maximum){
     calls++;assert.equal(g,1);assert.equal(operationId,request.operationId);assert.equal(artifactId,'04'.repeat(32));assert.equal(maximum,16);
     assert.equal(spend.byteLength,0);assert.equal(output.byteLength,0);if(failure)throw failure;after();return nativeResult();
+  },pczt_finalize_call(g,operationId,artifactId,spend,output,maximum){
+    calls++;assert.equal(g,1);assert.equal(operationId,request.operationId);assert.equal(artifactId,'04'.repeat(32));assert.equal(maximum,16);assert.equal(spend.length,0);assert.equal(output.length,0);if(failure)throw failure;after();return JSON.stringify({bytes:'0001',txid:'05'.repeat(32)});
+  },finalized_get(g,operationId){calls++;assert.equal(operationId,request.operationId);return JSON.stringify({bytes:'0001'});
+  },payment_call(g,op,text){
+    calls++;assert.equal(g,1);const input=JSON.parse(text);assert.equal(input.operationId,request.operationId);
+    if(op==='payment_attempt_begin'){assert.equal(input.policy.minIntervalMs,100);assert.equal(input.maximum,2097152);}
+    if(failure)throw failure;after();return op==='payment_attempt_begin'?JSON.stringify({attemptId:'06'.repeat(32),bytes:'0001',txid:'05'.repeat(32)}):JSON.stringify({state:{operationId:request.operationId},observationSequence:'1'});
   },pczt_import_call(g,operationId,bytes,maximum){
     calls++;assert.equal(g,1);assert.equal(operationId,request.operationId);assert.equal(maximum,16);
     assert.deepEqual(bytes,new Uint8Array([1,2]));if(failure)throw failure;after();return nativeResult();
@@ -62,3 +69,19 @@ const proofAbort=new AbortController();after=()=>proofAbort.abort();
 assert.throws(()=>call('pczt_prove',{...proof,signal:proofAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
 assert.equal(call('pczt_prove',proof).outputs[0].amount,10000n);
 console.log('PCZT prove asset admission, exact artifact binding and commit receipts passed');
+
+assert.deepEqual(call('pczt_finalize',proof).bytes,new Uint8Array([0,1]));
+assert.deepEqual(call('finalized_get',{operationId:request.operationId}).bytes,new Uint8Array([0,1]));
+const finalAbort=new AbortController();after=()=>finalAbort.abort();
+assert.throws(()=>call('pczt_finalize',{...proof,signal:finalAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
+const attempt={operationId:request.operationId,stepIndex:0,sourceId:'fixture',mode:'automatic',routeBinding:'07'.repeat(32),wallTimeMs:1000,monotonicElapsedMs:100,observationSequence:'1',policy:{maxAttempts:1,minIntervalMs:100},maximum:2097152};
+const attemptPolicy=attempt.policy;beforeRun=()=>{attemptPolicy.minIntervalMs=999;};
+assert.deepEqual(call('payment_attempt_begin',attempt).bytes,new Uint8Array([0,1]));beforeRun=()=>{};attemptPolicy.minIntervalMs=100;
+for(const args of [{...attempt,maximum:0},{...attempt,maximum:2097153},{...attempt,policy:{get minIntervalMs(){throw Error('getter');},maxAttempts:1}}]){
+  const before=calls;assert.throws(()=>call('payment_attempt_begin',args),error=>error.commit==='none');assert.equal(calls,before);
+}
+failure='RECOVERY_REQUIRED';assert.throws(()=>call('payment_attempt_begin',attempt),{message:'RECOVERY_REQUIRED',commit:'none'});failure=undefined;
+const startAbort=new AbortController();after=()=>startAbort.abort();
+assert.throws(()=>call('payment_attempt_begin',{...attempt,signal:startAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
+assert.equal(call('payment_get',{operationId:request.operationId}).observationSequence,'1');
+console.log('Finalization and submission facade owned metadata, exact binary routes, bounds and commit receipts passed');

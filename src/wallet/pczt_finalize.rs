@@ -21,21 +21,25 @@ fn project(operation:&str,row:Row,revision:String,branch:BranchId)->Result<Value
     if !reader.is_empty()||transaction.consensus_branch_id()!=branch||transaction.txid().as_ref()!=txid.as_slice(){return Err("STORAGE_ERROR".into());}
     Ok(json!({"operationId":operation,"stepIndex":0,"artifactId":artifact,"txid":zcash_protocol::TxId::from_bytes(txid.try_into().map_err(|_|Failure::from("STORAGE_ERROR"))?).to_string(),"bytes":hex::encode(bytes),"exactBytesSha256":hex::encode(digest),"revision":revision}))
 }
+pub(super) fn read(ext:&zcash_client_sqlite::ExtensionTransaction<'_>,parameters:&crate::Document,operation_id:&str)->Result<Value>{
+    let operation=id(operation_id)?;
+    let row=ext.query_row("SELECT artifact,txid,CASE WHEN length(bytes)<=4194304 THEN bytes END,digest FROM ext_wallet_finalized WHERE operation=?1 AND step=0",[&operation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    if let Some(row)=row {
+        let plan:Vec<u8>=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END FROM ext_wallet_proposals WHERE operation=?1",[&operation],|r|r.get(0))?;
+        let plan=zcash_client_backend::proto::proposal::Proposal::decode(&plan[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
+        project(operation_id,row,super::revision::read(ext)?,BranchId::for_height(parameters,plan.min_target_height.into()))
+    }else{Ok(Value::Null)}
+}
 #[wasm_bindgen]
 pub fn finalized_get(generation:u32,operation_id:&str)->std::result::Result<String,String>{
-    let operation=id(operation_id).map_err(|e|e.0)?;
+    id(operation_id).map_err(|e|e.0)?;
     super::DOMAIN.with(|domain|->Result<Value>{
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
         if domain.failed.is_some(){return Err("DOMAIN_INVALID".into());}
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let parameters=active.wallet.params().clone();
         active.wallet.transactionally_with_extension(|_,ext|->Result<Value>{
-            let row=ext.query_row("SELECT artifact,txid,CASE WHEN length(bytes)<=4194304 THEN bytes END,digest FROM ext_wallet_finalized WHERE operation=?1 AND step=0",[&operation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-            if let Some(row)=row {
-                let plan:Vec<u8>=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END FROM ext_wallet_proposals WHERE operation=?1",[&operation],|r|r.get(0))?;
-                let plan=zcash_client_backend::proto::proposal::Proposal::decode(&plan[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
-                project(operation_id,row,super::revision::read(ext)?,BranchId::for_height(&parameters,plan.min_target_height.into()))
-            }else{Ok(Value::Null)}
+            read(ext,&parameters,operation_id)
         })
     }).map(|v|v.to_string()).map_err(|e|e.0)
 }

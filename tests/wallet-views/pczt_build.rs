@@ -214,6 +214,7 @@ fn prove_retained(ironwood:bool,finalize:bool) {
         conn.execute("UPDATE ext_wallet_finalized SET txid=zeroblob(32)",[]).unwrap();
         assert_eq!(crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap_err(),"STORAGE_ERROR");
         conn.execute("UPDATE ext_wallet_finalized SET txid=?1",[txid]).unwrap();
+        if !ironwood{payment_real_journal(g,&path,&plan,&serde_json::from_str(&finalized).unwrap());}
         Some(finalized)
     }else{None};
     drop(conn);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
@@ -222,6 +223,76 @@ fn prove_retained(ironwood:bool,finalize:bool) {
         let mut old:Value=serde_json::from_str(&finalized).unwrap();let mut reopened:Value=serde_json::from_str(&crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap()).unwrap();
         let current:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();assert_eq!(reopened["revision"],current["revision"]);
         old.as_object_mut().unwrap().remove("revision");reopened.as_object_mut().unwrap().remove("revision");assert_eq!(reopened,old);
+        if !ironwood {let state=payment(g,"payment_reconcile",json!({"operationId":plan["operationId"],"wallTimeMs":3000000})).unwrap();assert_eq!(state["state"]["steps"][0]["attempts"].as_array().unwrap().len(),2);let conn=rusqlite::Connection::open(&path).unwrap();assert_eq!(conn.query_row("SELECT automatic_count FROM ext_wallet_submission",[],|r|r.get::<_,i64>(0)).unwrap(),1);assert_eq!(conn.query_row("SELECT max_attempts FROM ext_wallet_submission",[],|r|r.get::<_,i64>(0)).unwrap(),1);}
     }
     crate::wallet::storage_close(g).unwrap();crate::wallet::signer::signer_release(token).unwrap();
+}
+
+fn payment(g:u32,command:&str,input:Value)->std::result::Result<Value,String>{
+    crate::wallet::payment::payment_call(g,command,&input.to_string()).map(|s|serde_json::from_str(&s).unwrap())
+}
+#[test]
+fn payment_migration_enumerates_unfinalized_and_preserves_identity(){
+    let(path,g,plan)=prepared(true);
+    let id=&plan["operationId"];
+    let state=payment(g,"payment_get",json!({"operationId":id})).unwrap();
+    assert_eq!(state["state"]["phase"],"proposed");assert_eq!(state["state"]["missing"],json!(["artifact","finalizedBytes"]));
+    assert_eq!(state["state"]["steps"][0]["expiry"]["height"],40041);assert_eq!(state["state"]["steps"][0]["expiry"]["reached"],Value::Null);
+    let conn=rusqlite::Connection::open(&path).unwrap();let original_policy:String=conn.query_row("SELECT policy FROM ext_wallet_proposals",[],|r|r.get(0)).unwrap();let mut disabled:Value=serde_json::from_str(&original_policy).unwrap();disabled["expiry"]=json!({"kind":"disabled"});conn.execute("UPDATE ext_wallet_proposals SET policy=?1",[disabled.to_string()]).unwrap();
+    let disabled=payment(g,"payment_get",json!({"operationId":id})).unwrap();assert_eq!(disabled["state"]["steps"][0]["expiry"],json!({"height":null,"reached":false,"confirmedUnminedAt":null}));conn.execute("UPDATE ext_wallet_proposals SET policy=?1",[original_policy]).unwrap();drop(conn);
+    let page=payment(g,"payment_list",json!({"afterSequence":"0","limit":1})).unwrap();assert_eq!(page["items"][0]["operationId"],*id);
+    let high=page["highWater"].clone();payment(g,"payment_recovery_position",json!({"afterSequence":high})).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();let identity:Vec<u8>=conn.query_row("SELECT identity FROM ext_wallet_submission_meta",[],|r|r.get(0)).unwrap();drop(conn);
+    crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();assert_eq!(conn.query_row("SELECT identity FROM ext_wallet_submission_meta",[],|r|r.get::<_,Vec<u8>>(0)).unwrap(),identity);drop(conn);
+    assert_eq!(payment(g,"payment_list",json!({"afterSequence":"0","limit":200})).unwrap()["observationPosition"],high);
+    crate::wallet::storage_close(g).unwrap();
+    // An older database has no submission records: migration must not invent consent.
+    let conn=rusqlite::Connection::open(&path).unwrap();conn.execute_batch("DROP TABLE ext_wallet_attempts; DROP TABLE ext_wallet_submission; DROP TABLE ext_wallet_submission_meta;").unwrap();
+    // Closed-DB inventory fixture: native retained plan shape, no txid/artifact/consent.
+    for sequence in 2u32..=205 {
+        let mut operation=[0;32];operation[..4].copy_from_slice(&sequence.to_le_bytes());
+        conn.execute("INSERT INTO ext_wallet_proposals SELECT ?1,?2,account,plan,policy,revision FROM ext_wallet_proposals WHERE sequence=1",rusqlite::params![sequence,operation]).unwrap();
+    }
+    drop(conn);
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let migrated=payment(g,"payment_reconcile",json!({"operationId":id,"wallTimeMs":1000})).unwrap();assert!(migrated["state"]["steps"][0]["attempts"].as_array().unwrap().is_empty());
+    let first=payment(g,"payment_list",json!({"afterSequence":"0","limit":200})).unwrap();assert_eq!(first["items"].as_array().unwrap().len(),200);
+    for row in first["items"].as_array().unwrap(){payment(g,"payment_reconcile",json!({"operationId":row["operationId"],"wallTimeMs":1000})).unwrap();}
+    payment(g,"payment_recovery_position",json!({"afterSequence":"200"})).unwrap();
+    let tail=payment(g,"payment_list",json!({"afterSequence":"200","highWater":first["highWater"],"limit":200})).unwrap();assert_eq!(tail["items"].as_array().unwrap().len(),5);
+    for row in tail["items"].as_array().unwrap(){payment(g,"payment_reconcile",json!({"operationId":row["operationId"],"wallTimeMs":1000})).unwrap();}
+    crate::wallet::storage_close(g).unwrap();
+}
+fn payment_real_journal(g:u32,path:&str,plan:&Value,finalized:&Value){
+    let operation=&plan["operationId"];
+    let observe=|g|payment(g,"payment_observe",json!({"operationId":operation,"stepIndex":0,"wallTimeMs":1000,"observation":{"sourceId":"fixture","observedAt":"2026-09-13T00:00:00.000Z","txid":finalized["txid"],"state":"notSeen","inclusion":null,"tip":{"height":40000,"hash":"08".repeat(32)},"priorInclusion":null}})).unwrap();
+    let mut begin=json!({"operationId":operation,"stepIndex":0,"sourceId":"fixture","routeBinding":"01".repeat(32),"mode":"automatic","wallTimeMs":1000,"monotonicElapsedMs":1000,"observationSequence":observe(g)["observationSequence"],"policy":{"maxAttempts":2,"minIntervalMs":100},"maximum":2097152});
+    assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap(),Value::Null,"finalization does not grant consent");
+    begin["mode"]=json!("explicit");begin["origin"]=json!("broadcast");
+    let conn=rusqlite::Connection::open(path).unwrap();let tables=["ext_wallet_submission","ext_wallet_attempts","ext_wallet_revision"];let before=policy_rows(&conn,&tables);
+    let mut too_small=begin.clone();too_small["maximum"]=json!(1);assert_eq!(payment(g,"payment_attempt_begin",too_small).unwrap_err(),"RESOURCE_LIMIT");assert_eq!(policy_rows(&conn,&tables),before);
+    conn.execute_batch("CREATE TRIGGER attempt_fail BEFORE INSERT ON ext_wallet_attempts BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+    assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap_err(),"STORAGE_ERROR");assert_eq!(policy_rows(&conn,&tables),before);
+    conn.execute_batch("DROP TRIGGER attempt_fail").unwrap();
+    let started=payment(g,"payment_attempt_begin",begin.clone()).unwrap();assert_eq!(started["bytes"],finalized["bytes"]);assert_eq!(started["txid"],finalized["txid"]);
+    let reconciled=payment(g,"payment_reconcile",json!({"operationId":operation,"wallTimeMs":1001})).unwrap();assert_eq!(reconciled["state"]["steps"][0]["attempts"][0]["outcome"],"unknown");
+    begin["mode"]=json!("automatic");begin.as_object_mut().unwrap().remove("origin");begin["observationSequence"]=observe(g)["observationSequence"].clone();begin["wallTimeMs"]=json!(1000000);begin["monotonicElapsedMs"]=json!(99);
+    assert!(payment(g,"payment_attempt_begin",begin.clone()).unwrap().is_null(),"wall clock jump cannot bypass monotonic interval");
+    begin["monotonicElapsedMs"]=json!(100);let mut foreign=begin.clone();foreign["routeBinding"]=json!("02".repeat(32));assert!(payment(g,"payment_attempt_begin",foreign).unwrap().is_null());
+    let retry=payment(g,"payment_attempt_begin",begin.clone()).unwrap();assert_eq!(retry["bytes"],started["bytes"]);
+    assert_eq!(payment(g,"payment_attempt_finish",json!({"operationId":operation,"attemptId":retry["attemptId"],"outcome":"acknowledged","txid":"00".repeat(32),"wallTimeMs":1000001})).unwrap_err(),"PROTOCOL_MISMATCH");
+    payment(g,"payment_attempt_finish",json!({"operationId":operation,"attemptId":retry["attemptId"],"outcome":"acknowledged","txid":finalized["txid"],"wallTimeMs":1000001})).unwrap();
+    begin["observationSequence"]=observe(g)["observationSequence"].clone();begin["wallTimeMs"]=json!(2000000);begin["policy"]["maxAttempts"]=json!(1);
+    assert!(payment(g,"payment_attempt_begin",begin.clone()).unwrap().is_null());begin["policy"]["maxAttempts"]=json!(100);assert!(payment(g,"payment_attempt_begin",begin).unwrap().is_null(),"later policy cannot replenish lifetime budget");
+    let latest=payment(g,"payment_get",json!({"operationId":operation})).unwrap();assert_eq!(latest["state"]["phase"],"observing","ack is not inclusion");assert_eq!(latest["state"]["steps"][0]["attempts"].as_array().unwrap().len(),2);
+    let mut mined=json!({"operationId":operation,"stepIndex":0,"wallTimeMs":2000001,"observation":{"sourceId":"fixture","observedAt":"2026-09-13T00:00:00.000Z","txid":finalized["txid"],"state":"mined","inclusion":{"height":40000,"blockHash":"08".repeat(32),"confirmations":1},"tip":{"height":40000,"hash":"08".repeat(32)},"priorInclusion":null}});
+    let included=payment(g,"payment_observe",mined.clone()).unwrap();assert_eq!(included["state"]["phase"],"complete");
+    mined["observation"]["inclusion"]["height"]=json!(40001);assert_eq!(payment(g,"payment_observe",mined).unwrap_err(),"PROTOCOL_MISMATCH");
+    let uncertain=observe(g);assert_eq!(uncertain["state"]["phase"],"observing");assert_eq!(uncertain["state"]["steps"][0]["observation"]["priorInclusion"]["height"],40000);
+    // A retained endpoint observation is rechecked against current native block identity.
+    let original_hash:Vec<u8>=conn.query_row("SELECT hash FROM blocks WHERE height=40000",[],|r|r.get(0)).unwrap();conn.execute("UPDATE blocks SET hash=zeroblob(32) WHERE height=40000",[]).unwrap();
+    let uncertain=payment(g,"payment_get",json!({"operationId":operation})).unwrap();assert_eq!(uncertain["state"]["steps"][0]["expiry"]["reached"],Value::Null);
+    conn.execute("UPDATE blocks SET hash=?1 WHERE height=40000",[original_hash]).unwrap();
+    drop(conn);
 }

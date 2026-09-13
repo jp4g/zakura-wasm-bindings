@@ -114,6 +114,14 @@ pub(super) fn validate(conn: &Connection, bytes: &[u8], genesis: &[u8]) -> Resul
         expected.insert(super::pczt_finalize::TABLE.into(), ("table".into(), super::pczt_finalize::TABLE.into(), Some(super::pczt_finalize::SQL.into())));
         expected.insert("sqlite_autoindex_ext_wallet_finalized_1".into(), ("index".into(), super::pczt_finalize::TABLE.into(), None));
     }
+    for (table,sql) in super::payment::DEFINITIONS {
+        if actual.contains_key(table) {
+            expected.insert(table.into(),("table".into(),table.into(),Some(sql.into())));
+            if table!="ext_wallet_submission_meta" {
+                expected.insert(format!("sqlite_autoindex_{table}_1"),("index".into(),table.into(),None));
+            }
+        }
+    }
     if actual.contains_key(super::proposal::INTENTS) {
         expected.insert(super::proposal::INTENTS.into(), ("table".into(), super::proposal::INTENTS.into(), Some(super::proposal::INTENTS_SQL.into())));
         for index in [1,2] {expected.insert(format!("sqlite_autoindex_ext_wallet_proposal_intents_{index}"), ("index".into(), super::proposal::INTENTS.into(), None));}
