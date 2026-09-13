@@ -26,7 +26,7 @@ assert.deepEqual(api.runtimeIdentity.schemas, result.manifest.schemas);
 assert.equal(api.runtimeIdentity.schemas.operations.walletViews, '5');
 assert.equal(api.runtimeIdentity.schemas.operations.walletSigner, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletProposals, '2');
-assert.equal(api.runtimeIdentity.schemas.operations.walletPczt, '2');
+assert.equal(api.runtimeIdentity.schemas.operations.walletPczt, '3');
 assert.equal(api.runtimeIdentity.schemas.operations.walletScan, '1');
 assert.equal(api.runtimeIdentity.schemas.operations.walletSync, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletEnhancement, '1');
