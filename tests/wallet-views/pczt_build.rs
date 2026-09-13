@@ -4,8 +4,7 @@ fn invoke(g:u32,operation:&str,input:Value)->std::result::Result<Value,String> {
 }
 const WORDS:&str="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 fn prepared(post_zip212:bool)->(String,u32,Value) {let (path,g,plan,_)=prepared_signer(post_zip212,false,false);(path,g,plan)}
-fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32,Value,Option<u32>) {
-    let fixture=if !post_zip212 { full_scan_fixture() } else {
+fn scan_fixture(with_signer:bool,internal:bool)->Value {
         let p=crate::Document::parse(PARAMS).unwrap();let mut import=fixture(10);
         let key=if with_signer {
             let seed=bip39::Mnemonic::parse(WORDS).unwrap().to_seed("");
@@ -24,7 +23,12 @@ fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32
             block.vtx[0].outputs[0]=zcash_client_backend::proto::compact_formats::CompactSaplingOutput{cmu:note.cmu().to_bytes().to_vec(),ephemeral_key:sapling::note_encryption::SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),ciphertext:encryptor.encrypt_note_plaintext()[..52].to_vec()};
         }
         json!({"import":import,"target":{"height":40000,"hash":"08".repeat(32)},"batches":[{"priorTreeState":hex::encode(state.encode_to_vec()),"blocks":[hex::encode(block.encode_to_vec())]}]})
-    };
+}
+pub(super) fn pczt_fixture()->Value {
+    json!({"mnemonic":WORDS,"accountIndex":0,"external":scan_fixture(true,false),"internal":scan_fixture(true,true)})
+}
+fn prepared_signer(post_zip212:bool,with_signer:bool,internal:bool)->(String,u32,Value,Option<u32>) {
+    let fixture=if post_zip212{scan_fixture(with_signer,internal)}else{full_scan_fixture()};
     let (path,g)=open();
     let (account,token)=if with_signer {
         let input=json!({"accountIndex":0,"birthday":fixture["import"]["birthday"]});
