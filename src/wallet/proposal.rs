@@ -1,21 +1,26 @@
 //! Retained native proposals and their native input locks, before construction/signing.
-//! This private transfer policy omits host catch-up and shielding defaults.
+//! Effective policy and shielding defaults are supplied by the host; selection stays native.
 use super::accounts::{fields, height, string, Failure, Result};
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use zcash_client_backend::{data_api::{WalletRead, locking::{LockOwner, LockRequest},
-    wallet::{propose_transfer, ConfirmationsPolicy, input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy}}},
+    wallet::{propose_transfer, propose_shielding, ConfirmationsPolicy, input_selection::{GreedyInputSelector, SpendPolicy, TransparentSpendPolicy}}},
     fees::{StandardFeeRule, DustOutputPolicy, standard::SingleOutputChangeStrategy}, proto::proposal as wire};
 use zcash_protocol::{ShieldedPool, consensus::BranchId, value::Zatoshis};
 
 pub(super) const TABLE: &str = "ext_wallet_proposals";
 pub(super) const SQL: &str = "CREATE TABLE ext_wallet_proposals(sequence INTEGER PRIMARY KEY CHECK(sequence>0),operation BLOB NOT NULL UNIQUE CHECK(typeof(operation)='blob' AND length(operation)=32),account BLOB NOT NULL CHECK(typeof(account)='blob' AND length(account)=16),plan BLOB NOT NULL CHECK(typeof(plan)='blob' AND length(plan)>0 AND length(plan)<=2097152),policy TEXT NOT NULL CHECK(typeof(policy)='text' AND length(policy)<=16384),revision TEXT NOT NULL CHECK(typeof(revision)='text' AND length(revision)<=64))";
 
+pub(super) const INTENTS: &str = "ext_wallet_proposal_intents";
+pub(super) const INTENTS_SQL: &str = "CREATE TABLE ext_wallet_proposal_intents(key TEXT PRIMARY KEY NOT NULL CHECK(length(key)=64),intent TEXT NOT NULL CHECK(length(intent)=64),operation BLOB NOT NULL UNIQUE REFERENCES ext_wallet_proposals(operation) CHECK(typeof(operation)='blob' AND length(operation)=32))";
+
 pub(super) fn initialize(conn: &mut Connection) -> std::result::Result<(),String> {
     let exists=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",[TABLE],|r|r.get::<_,bool>(0)).map_err(|_|"STORAGE_INIT_FAILED")?;
     if !exists { conn.execute_batch(SQL).map_err(|_|"STORAGE_INIT_FAILED")?; }
+    let exists=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",[INTENTS],|r|r.get::<_,bool>(0)).map_err(|_|"STORAGE_INIT_FAILED")?;
+    if !exists { conn.execute_batch(INTENTS_SQL).map_err(|_|"STORAGE_INIT_FAILED")?; }
     Ok(())
 }
 // Each component has an explicit little-endian length; domains version both bindings.
@@ -129,7 +134,7 @@ fn payments(input:&Value,p:&crate::Document)->Result<zcash_client_backend::zip32
 }
 
 fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
-    fields(input,match operation {"proposal_create"=>&["revision","accountId","payments","policy","maxFee"][..],"proposal_get"=>&["operationId"],"proposal_list"=>&["afterSequence","highWater","limit"],_=>return Err("INVALID_ARGUMENT".into())})?;
+    fields(input,match operation {"proposal_create"|"proposal_lookup_intent"=>&["revision","accountId","payments","policy","maxFee","kind","threshold","fromAddresses","idempotencyKey"][..],"proposal_get"=>&["operationId"],"proposal_list"=>&["afterSequence","highWater","limit"],_=>return Err("INVALID_ARGUMENT".into())})?;
     super::DOMAIN.with(|domain|{
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
         if domain.failed.is_some(){return Err("STORAGE_ERROR".into());}
@@ -160,7 +165,6 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                     Ok(bind_review(review(&plan,&p,&account.to_string(),id,&policy,&revision)?,&encoded,&parameters,&genesis,&policy))
                 }};
             }
-            if super::revision::read(ext)?!=string(input,"revision")? {return Err("STALE_REVISION".into());}
             let account_text=string(input,"accountId")?;
             let uuid=uuid::Uuid::parse_str(account_text).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
             if uuid.to_string()!=account_text{return Err("INVALID_ARGUMENT".into());}
@@ -182,26 +186,81 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
             let c=policy.get("confirmations").ok_or(Failure::from("INVALID_ARGUMENT"))?;
             fields(c,&["trusted","untrusted","allowZeroConfirmationShielding"])?;
             let confirmations=ConfirmationsPolicy::new(height(c,"trusted")?.try_into().map_err(|_|Failure::from("INVALID_ARGUMENT"))?,height(c,"untrusted")?.try_into().map_err(|_|Failure::from("INVALID_ARGUMENT"))?,c.get("allowZeroConfirmationShielding").and_then(Value::as_bool).ok_or(Failure::from("INVALID_ARGUMENT"))?).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+            let shielding=match input.get("kind") {None=>false,Some(Value::String(s)) if s=="shield"=>true,_=>return Err("INVALID_ARGUMENT".into())};
+            if shielding&&(!transparent||string(policy,"transparent")?!="allow-owned"){return Err("UNSUPPORTED_POOL".into());}
+            let request=if shielding {if input.get("payments").is_some(){return Err("INVALID_ARGUMENT".into());}None}else{
+                if input.get("threshold").is_some()||input.get("fromAddresses").is_some(){return Err("INVALID_ARGUMENT".into());}Some(payments(input,&p)?)};
+            let threshold=if shielding {money(input,"threshold")?}else{Zatoshis::ZERO};
+            let mut sources=std::collections::BTreeMap::new();
+            if let Some(value)=input.get("fromAddresses") {
+                let list=value.as_array().ok_or(Failure::from("INVALID_ARGUMENT"))?;
+                if list.len()>256{return Err("RESOURCE_LIMIT".into());}
+                for value in list {
+                    let address=value.as_str().ok_or(Failure::from("INVALID_ARGUMENT"))?;
+                    if address.len()>2048{return Err("RESOURCE_LIMIT".into());}
+                    let Some(zcash_keys::address::Address::Transparent(t))=zcash_keys::address::Address::decode(&p,address) else{return Err("INVALID_ARGUMENT".into());};
+                    sources.insert(zcash_keys::address::Address::Transparent(t).encode(&p),t);
+                }
+            }
+            let max_fee=input.get("maxFee").map(|_|money(input,"maxFee")).transpose()?;
+            // Canonical intent describes requested work, never current inputs, target,
+            // revision or the random lock owner. Omitted sources stay an all-owned selector.
+            let mut canonical_policy=policy.clone();
+            canonical_policy["spendPools"].as_array_mut().unwrap().sort_by(|a,b|a.as_str().cmp(&b.as_str()));
+            let genesis:Vec<u8>=ext.query_row("SELECT genesis FROM ext_wallet_storage WHERE id=1",[],|r|r.get(0))?;
+            let intent=json!([account_text,if shielding{"shield"}else{"transfer"},request.as_ref().map(|r|r.to_uri()),
+                if shielding{Some(u64::from(threshold).to_string())}else{None},
+                if input.get("fromAddresses").is_some(){Some(sources.keys().cloned().collect::<Vec<_>>())}else{None},
+                canonical_policy,max_fee.map(|v|u64::from(v).to_string())]).to_string();
+            let identity=if let Some(value)=input.get("idempotencyKey") {
+                let key=value.as_str().ok_or(Failure::from("INVALID_ARGUMENT"))?;
+                if key.is_empty()||key.len()>1024{return Err("INVALID_ARGUMENT".into());}
+                Some((digest(b"zakura-wallet-idempotency-key/1",&[key.as_bytes()]),digest(b"zakura-wallet-intent/1",&[&parameters,&genesis,intent.as_bytes()])))
+            }else{None};
+            if let Some((key,intent))=&identity {
+                let found=ext.query_row("SELECT intent,operation FROM ext_wallet_proposal_intents WHERE key=?1",[key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?))).optional()?;
+                if let Some((stored,id))=found {
+                    if stored!=*intent{return Err("IDEMPOTENCY_CONFLICT".into());}
+                    let (encoded,policy,revision):(Vec<u8>,String,String)=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,policy,revision FROM ext_wallet_proposals WHERE operation=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+                    let plan=wire::Proposal::decode(&encoded[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
+                    let policy=serde_json::from_str(&policy).map_err(|_|Failure::from("STORAGE_ERROR"))?;
+                    return Ok(bind_review(review(&plan,&p,account_text,&hex::encode(id),&policy,&revision)?,&encoded,&parameters,&genesis,&policy));
+                }
+            }
+            if operation=="proposal_lookup_intent" {if identity.is_none(){return Err("INVALID_ARGUMENT".into());}return Ok(Value::Null);}
+            if super::revision::read(ext)?!=string(input,"revision")? {return Err("STALE_REVISION".into());}
             if !db.get_wallet_summary_in_transaction(confirmations)?.is_some_and(|s|s.is_synced()){return Err("SYNC_REQUIRED".into());}
             let target=u32::from(db.chain_height()?.ok_or(Failure::from("SYNC_REQUIRED"))?).checked_add(1).ok_or(Failure::from("RESOURCE_LIMIT"))?;
             let lock_blocks=height(policy,"lockExpiryBlocks")?;
             if lock_blocks==0{return Err("INVALID_ARGUMENT".into());}
             target.checked_add(lock_blocks).ok_or(Failure::from("INVALID_ARGUMENT"))?;
-            let request=payments(input,&p)?;
             let mut id=[0;32];getrandom::fill(&mut id).map_err(|_|Failure::from("ENTROPY_UNAVAILABLE"))?;
             let selector=GreedyInputSelector::new();
             let strategy=SingleOutputChangeStrategy::new(StandardFeeRule::Zip317,None,change_pool,DustOutputPolicy::default());
             let version=zcash_primitives::transaction::TxVersion::suggested_for_branch(BranchId::for_height(&p,target.into()));
-            let plan=propose_transfer::<_,_,_,_,rusqlite::Error>(db,&p,account,&selector,&strategy,request,confirmations,&spend,Some(LockRequest::new(LockOwner::new(id),lock_blocks)),Some(version))
-                .map_err(|e|Failure::from(match e {zcash_client_backend::data_api::error::Error::InsufficientFunds{..}=>"INSUFFICIENT_FUNDS",zcash_client_backend::data_api::error::Error::ScanRequired=>"SYNC_REQUIRED",_=>"BACKEND_ERROR"}))?;
-            if plan.steps().len()>16{return Err("RESOURCE_LIMIT".into());}
+            let wire=if shielding {
+                let owned=db.get_transparent_receivers(account,true,false)?;
+                let addresses=if input.get("fromAddresses").is_none(){owned.keys().copied().collect::<Vec<_>>()}else{
+                    if sources.values().any(|a|!owned.contains_key(a)){return Err("INVALID_ARGUMENT".into());}
+                    sources.values().copied().collect::<Vec<_>>()};
+                if addresses.is_empty(){return Err("NOTHING_TO_SHIELD".into());}
+                let plan=propose_shielding::<_,_,_,_,rusqlite::Error>(db,&p,&selector,&strategy,threshold,&addresses,account,confirmations,
+                    zcash_client_backend::data_api::CoinbaseFilter::AllTransparentOutputs,Some(LockRequest::new(LockOwner::new(id),lock_blocks)))
+                    .map_err(|e|Failure::from(match e {zcash_client_backend::data_api::error::Error::InsufficientFunds{..}=>"NOTHING_TO_SHIELD",zcash_client_backend::data_api::error::Error::ScanRequired=>"SYNC_REQUIRED",_=>"BACKEND_ERROR"}))?;
+                wire::Proposal::from_standard_proposal(&plan.with_proposed_version(Some(version)))
+            }else{
+                let plan=propose_transfer::<_,_,_,_,rusqlite::Error>(db,&p,account,&selector,&strategy,request.unwrap(),confirmations,&spend,Some(LockRequest::new(LockOwner::new(id),lock_blocks)),Some(version))
+                    .map_err(|e|Failure::from(match e {zcash_client_backend::data_api::error::Error::InsufficientFunds{..}=>"INSUFFICIENT_FUNDS",zcash_client_backend::data_api::error::Error::ScanRequired=>"SYNC_REQUIRED",_=>"BACKEND_ERROR"}))?;
+                wire::Proposal::from_standard_proposal(&plan)
+            };
+            if wire.steps.len()>16{return Err("RESOURCE_LIMIT".into());}
             let mut total=0u64;
-            for step in plan.steps().iter() {
-                for change in step.balance().proposed_change() {if !change.is_ephemeral()&&change.output_pool()!=zcash_protocol::PoolType::Shielded(change_pool){return Err("UNSUPPORTED_POOL".into());}}
-                let fee=u64::from(step.balance().fee_required());total=total.checked_add(fee).ok_or(Failure::from("RESOURCE_LIMIT"))?;
+            for step in &wire.steps {
+                let balance=step.balance.as_ref().ok_or(Failure::from("BACKEND_ERROR"))?;
+                for change in &balance.proposed_change {if !change.is_ephemeral&&pool_name(change.value_pool)?!=string(policy,"changePool")?{return Err("UNSUPPORTED_POOL".into());}}
+                total=total.checked_add(balance.fee_required).ok_or(Failure::from("RESOURCE_LIMIT"))?;
             }
-            if input.get("maxFee").is_some()&&total>u64::from(money(input,"maxFee")?){return Err("FEE_LIMIT_EXCEEDED".into());}
-            let wire=wire::Proposal::from_standard_proposal(&plan);
+            if max_fee.is_some_and(|max|total>u64::from(max)){return Err("FEE_LIMIT_EXCEEDED".into());}
             let encoded=wire.encode_to_vec();
             if encoded.len()>2097152{return Err("RESOURCE_LIMIT".into());}
             super::revision::advance(ext)?;
@@ -210,6 +269,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
             let review=bind_review(review(&wire,&p,account_text,&hex::encode(id),policy,&revision)?,&encoded,&parameters,&genesis,policy);
             let sequence=ext.query_row("SELECT COALESCE(MAX(sequence),0) FROM ext_wallet_proposals",[],|r|r.get::<_,i64>(0))?.checked_add(1).ok_or(Failure::from("RESOURCE_LIMIT"))?;
             ext.execute("INSERT INTO ext_wallet_proposals VALUES(?1,?2,?3,?4,?5,?6)",rusqlite::params![sequence,&id[..],uuid,encoded,policy.to_string(),revision])?;
+            if let Some((key,intent))=identity {ext.execute("INSERT INTO ext_wallet_proposal_intents VALUES(?1,?2,?3)",rusqlite::params![key,intent,&id[..]])?;}
             Ok(review)
         })
     })

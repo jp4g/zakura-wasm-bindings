@@ -23,6 +23,11 @@ for(const payments of [[],Array(17),[{get to(){throw Error('getter');},amount:1n
   const before=calls;assert.throws(()=>call('proposal_create',{...input,payments}),e=>e.commit==='none');assert.equal(calls,before);
 }
 call('proposal_create',{...input,payments:new Proxy(input.payments,{get(target,key){if(key==='length')throw Error('length getter');return Reflect.get(target,key);}})});
+const shield={...input,kind:'shield',threshold:20n,fromAddresses:[],idempotencyKey:'shield-1'};delete shield.payments;
+call('proposal_create',shield);assert.equal(received.threshold,'20');assert.equal(received.idempotencyKey,'shield-1');assert.deepEqual(received.fromAddresses,[]);
+for(const change of [{payments:input.payments},{threshold:20},{idempotencyKey:''}]) {
+  const before=calls;assert.throws(()=>call('proposal_create',{...shield,...change}),e=>e.commit==='none');assert.equal(calls,before);
+}
 after=()=>{throw 'STALE_REVISION';};assert.throws(()=>call('proposal_create',input),e=>e.message==='STALE_REVISION'&&e.commit==='none');
 const controller=new AbortController();after=()=>controller.abort();assert.throws(()=>call('proposal_create',{...input,signal:controller.signal}),e=>e.message==='ABORTED'&&e.commit==='committed');
 after=()=>{throw new WebAssembly.RuntimeError('trap');};assert.throws(()=>call('proposal_list',{afterSequence:'0',limit:1}),e=>e.message==='DOMAIN_INVALID'&&e.commit===undefined);
