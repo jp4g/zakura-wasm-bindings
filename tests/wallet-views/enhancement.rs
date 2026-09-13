@@ -14,7 +14,7 @@ pub(super) fn enhancement_fixture() -> Value {
     // Seed a closed synthetic fixture database with upstream retrieval intent.
     // The extension transaction authorizer remains unchanged in production.
     use zcash_client_backend::data_api::WalletWrite;
-    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.as_mut().unwrap().wallet.update_chain_tip(100.into())).unwrap();
+    crate::wallet::DOMAIN.with(|d|d.borrow_mut().active.first_mut().unwrap().wallet.update_chain_tip(100.into())).unwrap();
     crate::wallet::storage_close(g).unwrap();
     let conn=rusqlite::Connection::open(&path).unwrap();
     conn.execute("INSERT INTO tx_retrieval_queue(txid,query_type) VALUES(?1,1)",[id.as_ref()]).unwrap();drop(conn);
@@ -31,7 +31,7 @@ pub(super) fn enhancement_fixture() -> Value {
     let remaining=enhance(g,"enhancement_requests",json!({})).unwrap();
     let balance=call(g,"account_balance",json!({"accountId":account["id"],"confirmations":{"trusted":1,"untrusted":1,"allowZeroConfirmationShielding":true}})).unwrap();
     assert!(!remaining["requests"].as_array().unwrap().iter().any(|r|r["kind"]=="enhancement"&&r["txid"]==id.to_string()));
-    crate::wallet::DOMAIN.with(|d|assert!(d.borrow().active.as_ref().unwrap().wallet.get_transaction(id).unwrap().is_some()));
+    crate::wallet::DOMAIN.with(|d|assert!(d.borrow().active.first().unwrap().wallet.get_transaction(id).unwrap().is_some()));
     crate::wallet::scan::scan_call(g,"scan_plan",&json!({"target":{"height":101,"hash":"04".repeat(32)}}).to_string()).unwrap();
     let pending=enhance(g,"enhancement_requests",json!({})).unwrap();
     let address_request=pending["requests"].as_array().unwrap().iter().find(|r|r["kind"]=="address"&&r["txStatus"]=="mined"&&r["outputStatus"]=="all").expect("real transparent spend-search request").clone();
@@ -41,7 +41,7 @@ pub(super) fn enhancement_fixture() -> Value {
     assert!(enhance(g,"enhancement_requests",json!({})).unwrap()["requests"].as_array().unwrap().contains(&address_request));
     crate::wallet::storage_close(g).unwrap();
     let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
-    crate::wallet::DOMAIN.with(|d|assert!(d.borrow().active.as_ref().unwrap().wallet.get_transaction(id).unwrap().is_some()));
+    crate::wallet::DOMAIN.with(|d|assert!(d.borrow().active.first().unwrap().wallet.get_transaction(id).unwrap().is_some()));
     let reopened=enhance(g,"enhancement_requests",json!({})).unwrap();
     assert_ne!(reopened["revision"],applied["revision"]);
     assert!(reopened["requests"].as_array().unwrap().contains(&address_request));
