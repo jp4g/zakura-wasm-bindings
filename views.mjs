@@ -10,7 +10,7 @@ const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_comple
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const proposals = new Set(['proposal_create','proposal_get','proposal_list','proposal_lookup_intent']);
 const pczt = new Set(['fused_send','pczt_finalize','finalized_get','pczt_prove','pczt_build','pczt_get_artifact','pczt_import']);
-const lifecycle = new Set(['account_remove','account_check_key']);
+const lifecycle = new Set(['account_remove','account_check_key','account_viewing_key']);
 const payments = new Set(['payment_get','payment_list','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position']);
 const scans = new Set([...payments,...pczt,...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
 const writes = new Set(['fused_send','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position','pczt_finalize','pczt_prove','pczt_import','pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
@@ -155,7 +155,7 @@ function lowerScan(args, operation) {
     return input;
   }
   if(lifecycle.has(operation)){
-    const input=scanFields(args,operation==='account_remove'?['accountId','acknowledge','signal']:['accountId','viewingKey','signal']);
+    const input=scanFields(args,operation==='account_remove'?['accountId','acknowledge','signal']:operation==='account_viewing_key'?['accountId','signal']:['accountId','viewingKey','signal']);
     delete input.signal;
     for(const value of Object.values(input))if(typeof value!=='string'||value.length>140000)throw TypeError('INVALID_ARGUMENT');
     return input;
