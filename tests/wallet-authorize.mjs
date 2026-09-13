@@ -23,6 +23,8 @@ if(isMainThread) {
   const sign=(bytes,height,branch,max=caps.maxPcztBytes)=>runtime.signers.authorize(token,'zcash-js-network/1',parameters,genesis,height,branch,bytes,max);
   assert.throws(()=>sign(new Uint8Array([1]),-1,0),/INVALID_ARGUMENT/);
   assert.throws(()=>sign(new Uint8Array([1]),100,0,caps.maxPcztBytes+1),/RESOURCE_LIMIT/);
+  assert.throws(()=>sign(new Uint8Array(2),100,0,1),/RESOURCE_LIMIT/);
+  assert.throws(()=>sign([],100,0),/INVALID_PCZT/);
   assert.equal(runtime.invalid,false);
   let count=0;
   for(const vector of fixture.vectors) for(const field of ['bytes','wire2']) {

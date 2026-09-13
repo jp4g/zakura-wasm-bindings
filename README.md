@@ -180,9 +180,13 @@ The builder runs actual native migrations, unchanged primitive Node tests, actua
 
 The worker-local signer table survives database close and signs through the pinned
 native PCZT Signer role. The zakura-memory-signer/1 capability revision is bounded
-to 4 MiB input/output, application review, and zakura-signer-full/1 disclosure.
-That existing Full profile retains the Sapling proof-generation key and alpha,
-Ironwood FVK and alpha, and transparent BIP44 derivations needed by the roles.
+to 4 MiB input/output, application review, and zakura-native-role-input/1 inputs.
+This required-fields profile retains transparent BIP44 derivations, scripts and
+public-key preimages; Sapling proof-generation key, alpha, note components and
+witness; and Ironwood FVK, alpha and any supplied note components. Native checks
+govern correspondence and consistency. It is not a redaction operation: the
+existing zakura-signer-full/1 redactor removes Sapling witnesses and is insufficient
+for signing a populated Sapling note with this pinned native role.
 Account IDs are routing hints; native key correspondence is authoritative.
 
 Qualified source fixtures cover transparent and Sapling V5 on Nu5, Nu6, Nu6_1,

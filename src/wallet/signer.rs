@@ -68,7 +68,7 @@ pub fn signer_capabilities(token:u32)->Result<String,String> {
             let circuits=match *pool { "sapling"=>vec!["sapling-groth16/1"],"ironwood"=>vec!["ironwood-post-nu6_3/1"],_=>vec![] };
             authorizations.push(json!({"pool":pool,"txVersion":version,"branchIds":branches.iter().map(|b|u32::from(*b)).collect::<Vec<_>>(),
                 "circuitVersions":circuits,"pcztVersions":pczt_versions,"proofState":"not-required",
-                "requiredFields":["zakura-signer-full/1"],"review":"application"}));
+                "requiredFields":["zakura-native-role-input/1"],"review":"application"}));
         }
     }
     Ok(json!({"revision":"zakura-memory-signer/1","parameters":identity["parameters"],"genesis":identity["genesis"],
@@ -204,10 +204,17 @@ mod authorization_tests {
         let base=Creator::new(branch.into(),140,1,Some([0;32]),Some([0;32])).unwrap().build().unwrap();
         let mut value=serde_json::to_value(pczt::v2::Pczt::try_from(base).unwrap()).unwrap();
         let alpha={let mut a=[0u8;32];a[0]=1;a};
+        let recipient=key.sapling().default_address().1;
+        let note=recipient.create_note(sapling::value::NoteValue::from_raw(1),sapling::Rseed::AfterZip212([7;32]));
+        // Native MerklePath constructs the synthetic checkpoint; no tree/hash algorithm here.
+        let path=sapling::MerklePath::from_parts(vec![sapling::Node::from_bytes([0;32]).unwrap();32],0u64.into()).unwrap();
+        let anchor=path.root(sapling::Node::from_cmu(&note.cmu())).to_bytes();
+        let nullifier=note.nf(&key.sapling().to_diversifiable_full_viewing_key().fvk().vk.nk,0).0;
+        let witness=path.path_elems().iter().map(|node|node.to_bytes()).collect::<Vec<_>>();
         let rcv=sapling::value::ValueCommitTrapdoor::from_bytes(alpha).unwrap();
-        let cv=sapling::value::ValueCommitment::derive(sapling::value::NoteValue::from_raw(0),rcv).to_bytes();
+        let cv=sapling::value::ValueCommitment::derive(sapling::value::NoteValue::from_raw(1),rcv).to_bytes();
         let rk:[u8;32]=sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).randomize(&1u64.into()).into();
-        value["sapling"]=json!({"spends":[{"cv":cv,"nullifier":vec![0u8;32],"rk":rk,"alpha":alpha,"proof_generation_key":[sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).to_bytes(),key.sapling().expsk.nsk.to_bytes()],"proprietary":{}}],"outputs":[],"value_sum":0,"anchor":vec![0u8;32]});
+        value["sapling"]=json!({"spends":[{"cv":cv,"nullifier":nullifier,"recipient":recipient.to_bytes().to_vec(),"value":1,"rseed":vec![7u8;32],"rcv":alpha,"witness":[0,witness],"rk":rk,"alpha":alpha,"proof_generation_key":[sapling::keys::SpendValidatingKey::from(&key.sapling().expsk.ask).to_bytes(),key.sapling().expsk.nsk.to_bytes()],"proprietary":{}}],"outputs":[],"value_sum":1,"anchor":anchor});
         let ask=orchard::keys::SpendAuthorizingKey::from(key.orchard());
         let rk:[u8;32]=orchard::keys::SpendValidatingKey::from(&ask).randomize(&1u64.into()).into();
         let cv=orchard::value::ValueCommitment::derive(orchard::value::NoteValue::from_raw(0)-orchard::value::NoteValue::from_raw(0),orchard::value::ValueCommitTrapdoor::from_bytes(alpha).unwrap()).to_bytes();
@@ -225,12 +232,15 @@ mod authorization_tests {
     fn fixture(key:&UnifiedSpendingKey)->Pczt { fixture_for(key,BranchId::Nu6_3) }
     #[test]
     fn native_signer_authorizes_three_pools_with_verified_signatures() {
+        assert_eq!(super::super::accounts::mnemonic_account(0,"account_import_hd","{}",SecretVec::new(b"abandon ".repeat(12)),SecretVec::new(vec![])).err().unwrap().0,"INVALID_MNEMONIC");
         let authority=key(61);let unsigned=fixture(&authority);
         let token=SIGNERS.with(|table|{let mut t=table.borrow_mut();t.push(Some(Signer{key:authority,parameters:PARAMS.to_vec(),genesis:vec![3;32],account_index:0,bindings:vec![]}));t.len() as u32});
         let caps:serde_json::Value=serde_json::from_str(&signer_capabilities(token).unwrap()).unwrap();
         assert_eq!(caps["authorizations"].as_array().unwrap().len(),5);
         assert_eq!(caps["maxPcztBytes"],MAX_PCZT_BYTES);
         let raw=unsigned.clone().serialize().unwrap();
+        let full=crate::standalone_pczt::parse_standalone_pczt(PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap().redact("zakura-signer-full/1").unwrap().serialize().unwrap();
+        assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&full,65536).unwrap_err(),"INVALID_PCZT");
         assert_eq!(signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,MAX_PCZT_BYTES+1).unwrap_err(),"RESOURCE_LIMIT");
         let output=signer_authorize(token,PARAMS,&[3;32],100,BranchId::Nu6_3.into(),&raw,65536).unwrap();
         let signed=Pczt::parse(&output).unwrap();

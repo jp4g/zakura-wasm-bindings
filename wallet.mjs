@@ -47,7 +47,11 @@ export function initializeWalletRuntime(wasm) {
         uint(token); const { params, identity } = network(format, parameters, genesis);
         if (!Number.isInteger(height) || height < 0 || height > 0xffffffff || !Number.isInteger(branch) || branch < 0 || branch > 0xffffffff) throw TypeError("INVALID_ARGUMENT");
         if (!Number.isInteger(maximum) || maximum < 1 || maximum > 4 * 1024 * 1024) throw TypeError("RESOURCE_LIMIT");
-        const input = copyBytes(bytes, maximum, "invalid PCZT");
+        let length;
+        try { length = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), "byteLength").get.call(bytes); }
+        catch { throw TypeError("INVALID_PCZT"); }
+        if (length > maximum) throw TypeError("RESOURCE_LIMIT");
+        const input = copyBytes(bytes, maximum, "INVALID_PCZT");
         return run(undefined, () => binding.signer_authorize(token, params, identity, height, branch, input, maximum));
       },
       describe(token) { uint(token); return JSON.parse(run(undefined, () => binding.signer_describe(token))); },
