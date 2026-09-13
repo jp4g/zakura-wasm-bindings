@@ -4,6 +4,8 @@ use super::*;
 mod creation;
 #[path = "sync.rs"]
 mod sync;
+#[path = "account_lifecycle.rs"]
+mod account_lifecycle;
 #[path = "proposal.rs"]
 mod proposal;
 use serde_json::{json, Value};

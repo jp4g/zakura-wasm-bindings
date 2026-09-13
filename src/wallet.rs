@@ -183,6 +183,7 @@ pub fn storage_close(generation: u32) -> Result<(), String> {
 mod schema_prefix;
 
 mod accounts;
+mod account_lifecycle;
 pub mod signer;
 
 mod scan;
