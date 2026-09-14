@@ -418,7 +418,14 @@ fn balance_block(key: &UnifiedFullViewingKey, sapling_value:u64, orchard_value:u
 fn native_policy_real_scan_retention_selection_and_reopen() { policy_scan_matrix(false); }
 
 #[test]
-fn native_policy_legacy_marks_migrate_on_open() { policy_scan_matrix(true); }
+fn native_policy_legacy_marks_migrate_on_open() {
+    let cases = policy_scan_matrix(true);
+    if let Ok(path) = std::env::var("WALLET_LEGACY_FIXTURE") {
+        use std::io::Write;
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path).unwrap()
+            .write_all(&serde_json::to_vec(&cases).unwrap()).unwrap();
+    }
+}
 
 // Read native rows verbatim for preservation/rollback assertions; never synthesize
 // serialized tree data. ORDER BY rowid makes repeat-open comparisons deterministic.
@@ -522,6 +529,7 @@ fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
             reader.execute_batch("ROLLBACK").unwrap();
         }
         conn.close().unwrap();
+        let legacy_database = legacy.then(|| hex::encode(std::fs::read(&path).unwrap()));
         let mut migrated=None;
         for reopen in 0..2 {
         let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
@@ -586,7 +594,11 @@ fn policy_scan_matrix(legacy: bool) -> Vec<Value> {
             queries.push(json!({"args":args,"expected":native,"scan":native_scan_fixture()}));
         }
         crate::wallet::storage_close(g).unwrap();
-        if reopen==1 {cases.push(json!({"viewOnly":policy,"database":hex::encode(std::fs::read(&path).unwrap()),"queries":queries}));}
+        if reopen==1 {
+            let mut case=json!({"viewOnly":policy,"database":hex::encode(std::fs::read(&path).unwrap()),"queries":queries});
+            if let Some(bytes)=&legacy_database { case["legacyDatabase"]=json!(bytes); }
+            cases.push(case);
+        }
         let conn=rusqlite::Connection::open(&path).unwrap();
         assert_eq!(policy_rows(&conn,&preserved_tables),preserved,"history/authority/checkpoints preserved on open {reopen}");
         let after=policy_rows(&conn,&tree_tables);
