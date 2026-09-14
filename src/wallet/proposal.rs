@@ -155,6 +155,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                 let id=string(input,"operationId")?;
                 let bytes=hex::decode(id).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
                 if bytes.len()!=32||hex::encode(&bytes)!=id{return Err("INVALID_ARGUMENT".into());}
+                super::payment::require_active(ext,&bytes)?;
                 let row=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,CASE WHEN length(policy)<=16384 THEN policy END,account,revision FROM ext_wallet_proposals WHERE operation=?1",[bytes],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,uuid::Uuid>(2)?,r.get::<_,String>(3)?))).optional()?;
                 return match row {None=>Ok(Value::Null),Some((plan,policy,account,revision))=>{
                     let encoded=plan;
@@ -221,6 +222,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                 let found=ext.query_row("SELECT intent,operation FROM ext_wallet_proposal_intents WHERE key=?1",[key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Vec<u8>>(1)?))).optional()?;
                 if let Some((stored,id))=found {
                     if stored!=*intent{return Err("IDEMPOTENCY_CONFLICT".into());}
+                    super::payment::require_active(ext,&id)?;
                     let (encoded,policy,revision):(Vec<u8>,String,String)=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,policy,revision FROM ext_wallet_proposals WHERE operation=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
                     let plan=wire::Proposal::decode(&encoded[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
                     let policy=serde_json::from_str(&policy).map_err(|_|Failure::from("STORAGE_ERROR"))?;

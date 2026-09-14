@@ -16,8 +16,8 @@ const overlays = ['wallet.mjs', 'views.mjs', 'wallet-host/storage-host.mjs'];
 // The storage marker stays version 1; the Rust owner migrates legacy files.
 export const profile = {
   contractRevision: 'zakura-private-wallet/1', abiVersion: 'checked-bindgen-0.2.128/1',
-  schemas: { operations: { walletViews: '6', walletSigner: '2', walletProposals: '2', walletPczt: '4', walletPayments: '1', walletFused: '1', walletScan: '1', walletSync: '2', walletEnhancement: '2', walletQueries: '2', consensusContext: '1', decodeTransaction: '1' },
-    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/6',
+  schemas: { operations: { walletViews: '6', walletSigner: '2', walletProposals: '2', walletPczt: '4', walletPayments: '2', walletFused: '1', walletScan: '1', walletSync: '2', walletEnhancement: '2', walletQueries: '2', consensusContext: '1', decodeTransaction: '1' },
+    protobuf: 'not-used', networkParameters: 'zcash-js-network/1', database: 'wallet-storage/7',
     hostServices: { nodeFilesystem: 'linux-flock/1', browserOpfs: 'sync-access-handle/1', storage: 'scalar-vfs/1' } },
 };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');

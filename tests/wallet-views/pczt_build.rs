@@ -485,3 +485,63 @@ fn public_wallet_funding_fixture(){
     let after:Value=serde_json::from_str(&crate::wallet::enhancement::enhancement_call(g,"enhancement_requests","{}").unwrap()).unwrap();assert!(after["requests"].as_array().unwrap().iter().all(|r|r["requestAt"].is_u64()));
     crate::wallet::storage_close(g).unwrap();
 }
+
+#[test]
+fn payment_abandon_releases_only_owned_unbuilt_inputs() {
+    let (path,g,plan)=prepared(true);let operation=&plan["operationId"];
+    let conn=rusqlite::Connection::open(&path).unwrap();
+    let owner=hex::decode(operation.as_str().unwrap()).unwrap();
+    assert!(conn.query_row("SELECT count(*) FROM sapling_received_notes WHERE lock_owner=?1",[&owner],|r|r.get::<_,u32>(0)).unwrap()>0);
+    // An unrelated native note lock remains owned by its distinct operation.
+    assert!(conn.execute("UPDATE orchard_received_notes SET lock_owner=?1,lock_expiry_height=50000",[vec![99u8;32]]).unwrap()>0);
+    let other=policy_rows(&conn,&["orchard_received_notes"]);
+    let tables=["sapling_received_notes","ext_wallet_abandoned","ext_wallet_revision","ext_wallet_proposals"];
+    let before=policy_rows(&conn,&tables);
+    conn.execute_batch("CREATE TRIGGER abandon_failure BEFORE INSERT ON ext_wallet_abandoned BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
+    assert_eq!(payment(g,"payment_abandon",json!({"operationId":operation})).unwrap_err(),"STORAGE_ERROR");
+    assert_eq!(policy_rows(&conn,&tables),before,"marker failure rolls back native unlocks");
+    conn.execute_batch("DROP TRIGGER abandon_failure").unwrap();
+    // Change the revision without rebuilding the original retained plan.
+    call(g,"address_next",json!({"accountId":plan["accountId"],"request":{"format":"transparent"}})).unwrap();
+    let abandoned=payment(g,"payment_abandon",json!({"operationId":operation})).unwrap();
+    assert_eq!(abandoned["state"]["phase"],"abandoned");assert_eq!(abandoned["state"]["missing"],json!([]));
+    assert_eq!(conn.query_row("SELECT count(*) FROM sapling_received_notes WHERE lock_owner=?1",[&owner],|r|r.get::<_,u32>(0)).unwrap(),0);
+    assert_eq!(policy_rows(&conn,&["orchard_received_notes"]),other);
+    assert_eq!(payment(g,"payment_abandon",json!({"operationId":operation})).unwrap(),abandoned,"repeat is a revision-stable no-op");
+    assert_eq!(crate::wallet::proposal::proposal_call(g,"proposal_get",&json!({"operationId":operation}).to_string()).unwrap_err(),"ROLE_PRECONDITION");
+    assert_eq!(invoke(g,"pczt_build",json!({"operationId":operation,"proposalId":plan["proposalId"],"reviewCommitment":plan["reviewCommitment"]})).unwrap_err(),"ROLE_PRECONDITION");
+    assert_eq!(payment(g,"payment_abandon",json!({"operationId":"00".repeat(32)})).unwrap_err(),"OPERATION_NOT_FOUND");
+    drop(conn);crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(payment(g,"payment_get",json!({"operationId":operation})).unwrap()["state"]["phase"],"abandoned");
+    assert_eq!(payment(g,"payment_reconcile",json!({"operationId":operation,"wallTimeMs":1000})).unwrap()["state"]["missing"],json!([]));
+    crate::wallet::storage_close(g).unwrap();
+}
+
+#[test]
+fn payment_abandon_rejects_retained_pczt() {
+    let(path,g,plan)=prepared(true);let operation=&plan["operationId"];
+    invoke(g,"pczt_build",json!({"operationId":operation,"proposalId":plan["proposalId"],"reviewCommitment":plan["reviewCommitment"]})).unwrap();
+    let conn=rusqlite::Connection::open(&path).unwrap();let tables=["ext_wallet_pczt","ext_wallet_abandoned","ext_wallet_revision","sapling_received_notes"];
+    let before=policy_rows(&conn,&tables);
+    assert_eq!(payment(g,"payment_abandon",json!({"operationId":operation})).unwrap_err(),"ROLE_PRECONDITION");
+    assert_eq!(policy_rows(&conn,&tables),before);drop(conn);crate::wallet::storage_close(g).unwrap();
+}
+
+#[test]
+fn payment_abandon_keeps_idempotency_terminal() {
+    let(path,g,mut input,token)=prepared_mode(true,true,false,false,"fixture");input.as_object_mut().unwrap().remove("fundingParent");input["idempotencyKey"]=json!("abandoned-shield");
+    let create=|g,op,input:&Value|crate::wallet::proposal::proposal_call(g,op,&input.to_string()).map(|s|serde_json::from_str::<Value>(&s).unwrap());
+    let plan=create(g,"proposal_create",&input).unwrap();
+    payment(g,"payment_abandon",json!({"operationId":plan["operationId"]})).unwrap();
+    assert_eq!(create(g,"proposal_create",&input).unwrap_err(),"ROLE_PRECONDITION");
+    let mut lookup=input.clone();lookup.as_object_mut().unwrap().remove("revision");
+    assert_eq!(create(g,"proposal_lookup_intent",&lookup).unwrap_err(),"ROLE_PRECONDITION");
+    let operation=plan["operationId"].as_str().unwrap();
+    assert_eq!(crate::wallet::pczt_build::pczt_import_call(g,operation,&[0],1).unwrap_err(),"ROLE_PRECONDITION");
+    assert_eq!(crate::wallet::fused_send::fused_send_call(g,operation,plan["proposalId"].as_str().unwrap(),plan["reviewCommitment"].as_str().unwrap(),0,&[],&[],4194304).unwrap_err(),"ROLE_PRECONDITION");
+    let state:Value=serde_json::from_str(&crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap()).unwrap();
+    input["revision"]=state["revision"].clone();input["idempotencyKey"]=json!("new-shield");
+    assert_ne!(create(g,"proposal_create",&input).unwrap()["operationId"],plan["operationId"],"released funds remain selectable for new work");
+    crate::wallet::storage_close(g).unwrap();crate::wallet::signer::signer_release(token.unwrap()).unwrap();let _=path;
+}

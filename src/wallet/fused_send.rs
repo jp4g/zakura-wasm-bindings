@@ -18,6 +18,7 @@ pub fn fused_send_call(generation:u32,operation_id:&str,proposal_id:&str,review_
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();let parameters=active.bytes.clone();
         active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
+            super::payment::require_active(ext,&operation)?;
             let (encoded,policy,account,revision)=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,CASE WHEN length(policy)<=16384 THEN policy END,account,revision FROM ext_wallet_proposals WHERE operation=?1",[&operation],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,uuid::Uuid>(2)?,r.get::<_,String>(3)?))).optional()?.ok_or(Failure::from("OPERATION_NOT_FOUND"))?;
             let wire=wire::Proposal::decode(&encoded[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
             if wire.steps.is_empty()||wire.steps.len()>16{return Err("RESOURCE_LIMIT".into());}
