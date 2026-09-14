@@ -5,6 +5,11 @@ import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 import * as host from './wallet-host/storage-host.mjs';
 let attempted = false, prepared;
+function threaded(name, ...args) {
+  const fn = Reflect.get(binding, name);
+  if (typeof fn !== 'function') throw Error('RUNTIME_UNAVAILABLE');
+  return fn(...args);
+}
 function uint(value) {
   if (!Number.isInteger(value) || value < 1 || value > 0xffffffff) throw TypeError('INVALID_ARGUMENT');
   return value;
@@ -39,7 +44,7 @@ export function prepareThreaded(wasm, count) {
   const module = new WebAssembly.Module(code);
   const exports = initSync({ module });
   if (!(exports.memory.buffer instanceof SharedArrayBuffer)) throw Error('RUNTIME_UNAVAILABLE');
-  binding.wallet_threaded_prepare(count); prepared = exports;
+  threaded('wallet_threaded_prepare', count); prepared = exports;
   return Object.freeze({ module, memory: exports.memory });
 }
 export function enterThreaded(module, memory, index, onLoaded) {
@@ -50,13 +55,13 @@ export function enterThreaded(module, memory, index, onLoaded) {
   const exports = initSync({ module, memory });
   if (exports.memory.buffer !== memory.buffer) throw Error('RUNTIME_UNAVAILABLE');
   host.attachMemory(exports.memory, true, false);
-  onLoaded(); binding.wallet_threaded_enter(index);
+  onLoaded(); threaded('wallet_threaded_enter', index);
   throw Error('RUNTIME_UNAVAILABLE');
 }
 export function finishThreaded() {
   if (!prepared) throw Error('DOMAIN_NOT_READY');
   const exports = prepared; prepared = undefined;
-  binding.wallet_threaded_build();
+  threaded('wallet_threaded_build');
   return runtime(exports, true);
 }
 function runtime(exports, shared) {
@@ -67,7 +72,7 @@ function runtime(exports, shared) {
   let invalid = false;
   const run = (backend, fn) => {
     if (invalid) throw Error('DOMAIN_INVALID');
-    try { if (shared) binding.wallet_threaded_check(); return host.withBackend(backend, fn); }
+    try { if (shared) threaded('wallet_threaded_check'); return host.withBackend(backend, fn); }
     catch (error) { if (typeof error !== 'string' || error === 'STORAGE_CLOSE_FAILED') invalid = true; throw error; }
   };
   return Object.freeze({
