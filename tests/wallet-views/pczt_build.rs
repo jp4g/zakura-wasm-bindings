@@ -245,6 +245,7 @@ fn prove_retained(ironwood:bool,finalize:bool) {
         if !ironwood {let state=payment(g,"payment_reconcile",json!({"operationId":plan["operationId"],"wallTimeMs":3000000})).unwrap();assert_eq!(state["state"]["steps"][0]["attempts"].as_array().unwrap().len(),2);let conn=rusqlite::Connection::open(&path).unwrap();assert_eq!(conn.query_row("SELECT automatic_count FROM ext_wallet_submission",[],|r|r.get::<_,i64>(0)).unwrap(),1);assert_eq!(conn.query_row("SELECT max_attempts FROM ext_wallet_submission",[],|r|r.get::<_,i64>(0)).unwrap(),1);}
     }
     crate::wallet::storage_close(g).unwrap();crate::wallet::signer::signer_release(token).unwrap();
+    if finalize && !ironwood { payment_expiry_branch_edges(&path,&plan); }
 }
 
 fn payment(g:u32,command:&str,input:Value)->std::result::Result<Value,String>{
@@ -282,6 +283,31 @@ fn payment_migration_enumerates_unfinalized_and_preserves_identity(){
     let tail=payment(g,"payment_list",json!({"afterSequence":"200","highWater":first["highWater"],"limit":200})).unwrap();assert_eq!(tail["items"].as_array().unwrap().len(),5);
     for row in tail["items"].as_array().unwrap(){payment(g,"payment_reconcile",json!({"operationId":row["operationId"],"wallTimeMs":1000})).unwrap();}
     crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    assert_eq!(payment(g,"payment_list",json!({"afterSequence":"0","limit":1})).unwrap()["observationPosition"],"200","recovery rotation survives native database reopen");
+    crate::wallet::storage_close(g).unwrap();
+}
+// Reuse real finalized bytes; only the isolated synthetic chain-evidence tables
+// change. No transaction/proof is edited or regenerated for these dispatch gates.
+fn payment_expiry_branch_edges(path:&str,plan:&Value) {
+    for (tip,expected) in [(40041u32,"TRANSACTION_EXPIRED"),(98u32,"PAYMENT_BLOCKED")] {
+        let fork=format!("{path}-edge-{tip}");std::fs::copy(path,&fork).unwrap();
+        let conn=rusqlite::Connection::open(&fork).unwrap();
+        conn.execute("INSERT INTO blocks SELECT ?1,hash,time,sapling_tree,sapling_commitment_tree_size,orchard_commitment_tree_size,sapling_output_count,orchard_action_count,ironwood_commitment_tree_size,ironwood_action_count FROM blocks WHERE height=40000",[tip]).unwrap();
+        conn.execute("DELETE FROM scan_queue",[]).unwrap();
+        conn.execute("INSERT INTO scan_queue(block_range_start,block_range_end,priority) VALUES(20,?1,0)",[tip+1]).unwrap();drop(conn);
+        let g=crate::wallet::initialize_path(&fork,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+        let conn=rusqlite::Connection::open(&fork).unwrap();
+        let stored:Value=serde_json::from_str(&crate::wallet::pczt_finalize::finalized_get(g,plan["operationId"].as_str().unwrap()).unwrap()).unwrap();
+        // Clear only old observation evidence, retaining original bytes, consent,
+        // retry counters and attempts; the new observation is natively checked.
+        conn.execute("UPDATE ext_wallet_submission SET observation=NULL",[]).unwrap();
+        let observed=payment(g,"payment_observe",json!({"operationId":plan["operationId"],"stepIndex":0,"wallTimeMs":3000001,"observation":{"sourceId":"fixture","observedAt":"2026-09-13T00:00:00.000Z","txid":stored["transactions"][0]["txid"],"state":"notSeen","inclusion":null,"tip":{"height":tip,"hash":"08".repeat(32)},"priorInclusion":null}})).unwrap();
+        let tables=["ext_wallet_submission","ext_wallet_attempts","ext_wallet_revision","ext_wallet_finalized"];let before=policy_rows(&conn,&tables);
+        assert_eq!(payment(g,"payment_attempt_begin",json!({"operationId":plan["operationId"],"stepIndex":0,"sourceId":"fixture","routeBinding":"01".repeat(32),"mode":"explicit","origin":"broadcast","wallTimeMs":3000002,"monotonicElapsedMs":1000,"observationSequence":observed["observationSequence"],"maximum":2097152})).unwrap_err(),expected);
+        assert_eq!(policy_rows(&conn,&tables),before,"unsafe dispatch leaves exact bytes and attempt state untouched");
+        drop(conn);crate::wallet::storage_close(g).unwrap();std::fs::remove_file(fork).unwrap();
+    }
 }
 fn payment_real_journal(g:u32,path:&str,plan:&Value,finalized:&Value){
     let operation=&plan["operationId"];
@@ -290,10 +316,12 @@ fn payment_real_journal(g:u32,path:&str,plan:&Value,finalized:&Value){
     assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap(),Value::Null,"finalization does not grant consent");
     begin["mode"]=json!("explicit");begin["origin"]=json!("broadcast");
     let conn=rusqlite::Connection::open(path).unwrap();let tables=["ext_wallet_submission","ext_wallet_attempts","ext_wallet_revision"];let before=policy_rows(&conn,&tables);
-    let mut too_small=begin.clone();too_small["maximum"]=json!(1);assert_eq!(payment(g,"payment_attempt_begin",too_small).unwrap_err(),"RESOURCE_LIMIT");assert_eq!(policy_rows(&conn,&tables),before);
+    let exact_size=finalized["bytes"].as_str().unwrap().len()/2;
+    let mut too_small=begin.clone();too_small["maximum"]=json!(exact_size-1);assert_eq!(payment(g,"payment_attempt_begin",too_small).unwrap_err(),"RESOURCE_LIMIT");assert_eq!(policy_rows(&conn,&tables),before);
     conn.execute_batch("CREATE TRIGGER attempt_fail BEFORE INSERT ON ext_wallet_attempts BEGIN SELECT RAISE(ABORT,'fixture'); END").unwrap();
     assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap_err(),"STORAGE_ERROR");assert_eq!(policy_rows(&conn,&tables),before);
     conn.execute_batch("DROP TRIGGER attempt_fail").unwrap();
+    begin["maximum"]=json!(exact_size);
     let started=payment(g,"payment_attempt_begin",begin.clone()).unwrap();assert_eq!(started["bytes"],finalized["bytes"]);assert_eq!(started["txid"],finalized["txid"]);
     let reconciled=payment(g,"payment_reconcile",json!({"operationId":operation,"wallTimeMs":1001})).unwrap();assert_eq!(reconciled["state"]["steps"][0]["attempts"][0]["outcome"],"unknown");
     begin["mode"]=json!("automatic");begin.as_object_mut().unwrap().remove("origin");begin["observationSequence"]=observe(g)["observationSequence"].clone();begin["wallTimeMs"]=json!(1000000);begin["monotonicElapsedMs"]=json!(99);
@@ -366,6 +394,8 @@ fn payment_multistep(g:u32,path:&str,plan:&Value,finalized:&Value){
     assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap_err(),"PAYMENT_BLOCKED");
     begin["stepIndex"]=json!(0);begin["observationSequence"]=state["observationSequences"][0].clone();
     let parent=payment(g,"payment_attempt_begin",begin.clone()).unwrap();
+    let mut child_request=begin.clone();child_request["stepIndex"]=json!(1);child_request["observationSequence"]=state["observationSequences"][1].clone();
+    assert_eq!(payment(g,"payment_attempt_begin",child_request.clone()).unwrap_err(),"PAYMENT_BLOCKED","outstanding parent cannot release child");
     payment(g,"payment_attempt_finish",json!({"operationId":id,"attemptId":parent["attemptId"],"outcome":"acknowledged","txid":txs[0]["txid"],"wallTimeMs":1001})).unwrap();
     begin["stepIndex"]=json!(1);begin["observationSequence"]=state["observationSequences"][1].clone();
     assert_eq!(payment(g,"payment_attempt_begin",begin.clone()).unwrap_err(),"PAYMENT_BLOCKED","ack does not unlock child");
