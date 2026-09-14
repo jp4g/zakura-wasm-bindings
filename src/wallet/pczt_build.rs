@@ -125,6 +125,7 @@ fn execute(generation:u32,operation:&str,input:&Value,incoming:Option<(&[u8],u32
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();let parameters=active.bytes.clone();
         active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
+            super::payment::require_active(ext,&operation_bytes)?;
             let (encoded,policy,account,revision)=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END,CASE WHEN length(policy)<=16384 THEN policy END,account,revision FROM ext_wallet_proposals WHERE operation=?1",[&operation_bytes],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?,r.get::<_,uuid::Uuid>(2)?,r.get::<_,String>(3)?))).optional()?.ok_or(Failure::from(if operation=="pczt_import"{"OPERATION_NOT_FOUND"}else{"STALE_PROPOSAL"}))?;
             let wire=wire::Proposal::decode(&encoded[..]).map_err(|_|Failure::from("STORAGE_ERROR"))?;
             let policy:Value=serde_json::from_str(&policy).map_err(|_|Failure::from("STORAGE_ERROR"))?;

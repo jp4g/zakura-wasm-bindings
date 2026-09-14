@@ -95,3 +95,6 @@ failure='STALE_HANDLE';assert.throws(()=>call('fused_send',fused),{message:'STAL
 const fusedAbort=new AbortController();after=()=>fusedAbort.abort();assert.throws(()=>call('fused_send',{...fused,signal:fusedAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
 call('payment_reconcile',{operationId:request.operationId,wallTimeMs:1000,policy:{maxAttempts:1,minIntervalMs:100}});
 console.log('Fused multi-step owned result, authority token admission, and committed cancellation passed');
+const abandonAbort=new AbortController();after=()=>abandonAbort.abort();
+assert.throws(()=>call('payment_abandon',{operationId:request.operationId,signal:abandonAbort.signal}),{message:'ABORTED',commit:'committed'});after=()=>{};
+assert.equal(call('payment_abandon',{operationId:request.operationId}).state.operationId,request.operationId);

@@ -11,9 +11,9 @@ const enhancements = new Set(['enhancement_requests','enhancement_apply']);
 const proposals = new Set(['proposal_create','proposal_get','proposal_list','proposal_lookup_intent']);
 const pczt = new Set(['fused_send','pczt_finalize','finalized_get','pczt_prove','pczt_build','pczt_get_artifact','pczt_import']);
 const lifecycle = new Set(['account_remove','account_check_key','account_viewing_key']);
-const payments = new Set(['payment_get','payment_list','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position']);
+const payments = new Set(['payment_abandon','payment_get','payment_list','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position']);
 const scans = new Set([...payments,...pczt,...lifecycle,...proposals,'scan_plan','scan_ingest_batch',...syncs,...enhancements,...queries]);
-const writes = new Set(['fused_send','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position','pczt_finalize','pczt_prove','pczt_import','pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
+const writes = new Set(['payment_abandon','fused_send','payment_reconcile','payment_observe','payment_attempt_begin','payment_attempt_finish','payment_recovery_position','pczt_finalize','pczt_prove','pczt_import','pczt_build','account_remove','proposal_create','scan_plan','scan_ingest_batch','scan_rewind','scan_complete','enhancement_apply','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','address_next','address_at']);
 function abort(signal, commit) {
   if (signal !== undefined && aborted.call(signal)) throw Object.assign(Error('ABORTED'), { commit });
 }
@@ -114,7 +114,7 @@ function lowerProposal(args, operation) {
   scanHeight(policy.lockExpiryBlocks);input.policy=policy;return input;
 }
 function lowerPayment(args, operation) {
-  const keys={payment_get:['operationId'],payment_list:['afterSequence','highWater','limit','accountId'],payment_reconcile:['operationId','wallTimeMs','policy'],payment_observe:['operationId','stepIndex','observation','wallTimeMs'],payment_attempt_begin:['operationId','stepIndex','sourceId','routeBinding','mode','origin','wallTimeMs','monotonicElapsedMs','observationSequence','policy','maximum'],payment_attempt_finish:['operationId','attemptId','outcome','txid','wallTimeMs','diagnosticCode'],payment_recovery_position:['afterSequence']}[operation];
+  const keys={payment_abandon:['operationId'],payment_get:['operationId'],payment_list:['afterSequence','highWater','limit','accountId'],payment_reconcile:['operationId','wallTimeMs','policy'],payment_observe:['operationId','stepIndex','observation','wallTimeMs'],payment_attempt_begin:['operationId','stepIndex','sourceId','routeBinding','mode','origin','wallTimeMs','monotonicElapsedMs','observationSequence','policy','maximum'],payment_attempt_finish:['operationId','attemptId','outcome','txid','wallTimeMs','diagnosticCode'],payment_recovery_position:['afterSequence']}[operation];
   const input=scanFields(args,[...keys,'signal']);delete input.signal;
   const owned=(value,depth=0)=>{
     if(depth>3)throw TypeError('INVALID_ARGUMENT');

@@ -4,23 +4,26 @@ use prost::Message;
 use rusqlite::{params,OptionalExtension};
 use serde_json::{json,Value};
 use wasm_bindgen::prelude::*;
-use zcash_client_backend::data_api::WalletRead;
+use zcash_client_backend::data_api::{WalletRead,locking::{OutputLockStore,LockOwner}};
 use zcash_client_sqlite::ExtensionTransaction;
 
-pub(super) const DEFINITIONS:[(&str,&str);3]=[
+pub(super) const ABANDONED:&str="ext_wallet_abandoned";
+pub(super) const ABANDONED_SQL:&str="CREATE TABLE ext_wallet_abandoned(operation BLOB PRIMARY KEY NOT NULL REFERENCES ext_wallet_proposals(operation) CHECK(typeof(operation)='blob' AND length(operation)=32))";
+pub(super) const DEFINITIONS:[(&str,&str);4]=[
 ("ext_wallet_submission_meta","CREATE TABLE ext_wallet_submission_meta(id INTEGER PRIMARY KEY CHECK(id=1),identity BLOB NOT NULL CHECK(typeof(identity)='blob' AND length(identity)=32),retry_epoch INTEGER NOT NULL CHECK(retry_epoch>=0),position INTEGER NOT NULL CHECK(position>=0))"),
 ("ext_wallet_submission","CREATE TABLE ext_wallet_submission(operation BLOB NOT NULL,step INTEGER NOT NULL,consent TEXT CHECK(consent IS NULL OR (json_valid(consent) AND length(consent)<=4096)),max_attempts INTEGER CHECK(max_attempts>0 AND max_attempts<=9007199254740991),min_interval INTEGER CHECK(min_interval>0 AND min_interval<=9007199254740991),automatic_count INTEGER NOT NULL DEFAULT 0 CHECK(automatic_count>=0),last_start INTEGER,next_eligible INTEGER,observation TEXT CHECK(observation IS NULL OR (json_valid(observation) AND length(observation)<=8192)),observation_sequence INTEGER NOT NULL DEFAULT 0 CHECK(observation_sequence>=0),used_observation INTEGER NOT NULL DEFAULT 0 CHECK(used_observation>=0),PRIMARY KEY(operation,step),FOREIGN KEY(operation,step) REFERENCES ext_wallet_finalized(operation,step))"),
-("ext_wallet_attempts","CREATE TABLE ext_wallet_attempts(sequence INTEGER PRIMARY KEY CHECK(sequence>0),attempt BLOB NOT NULL UNIQUE CHECK(typeof(attempt)='blob' AND length(attempt)=32),operation BLOB NOT NULL,step INTEGER NOT NULL,automatic INTEGER NOT NULL CHECK(automatic IN (0,1)),source TEXT NOT NULL CHECK(length(source)>0 AND length(source)<=256),started INTEGER NOT NULL CHECK(started>=0 AND started<=8640000000000000),completed INTEGER CHECK(completed IS NULL OR (completed>=0 AND completed<=8640000000000000)),outcome TEXT NOT NULL CHECK(outcome IN ('started','acknowledged','rejected','unknown')),diagnostic TEXT CHECK(diagnostic IS NULL OR length(diagnostic)<=64),FOREIGN KEY(operation,step) REFERENCES ext_wallet_submission(operation,step))")];
+("ext_wallet_attempts","CREATE TABLE ext_wallet_attempts(sequence INTEGER PRIMARY KEY CHECK(sequence>0),attempt BLOB NOT NULL UNIQUE CHECK(typeof(attempt)='blob' AND length(attempt)=32),operation BLOB NOT NULL,step INTEGER NOT NULL,automatic INTEGER NOT NULL CHECK(automatic IN (0,1)),source TEXT NOT NULL CHECK(length(source)>0 AND length(source)<=256),started INTEGER NOT NULL CHECK(started>=0 AND started<=8640000000000000),completed INTEGER CHECK(completed IS NULL OR (completed>=0 AND completed<=8640000000000000)),outcome TEXT NOT NULL CHECK(outcome IN ('started','acknowledged','rejected','unknown')),diagnostic TEXT CHECK(diagnostic IS NULL OR length(diagnostic)<=64),FOREIGN KEY(operation,step) REFERENCES ext_wallet_submission(operation,step))"),(ABANDONED,ABANDONED_SQL)];
 
 pub(super) fn initialize(conn:&mut rusqlite::Connection)->std::result::Result<(),String>{
     (||->Result<()>{
         let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ext_wallet_submission_meta')",[],|r|r.get(0))?;
         if !exists {
-            for (_,sql) in DEFINITIONS {tx.execute_batch(sql)?;}
+            for (_,sql) in &DEFINITIONS[..3] {tx.execute_batch(sql)?;}
             let mut identity=[0;32];getrandom::fill(&mut identity).map_err(|_|Failure("ENTROPY_UNAVAILABLE".into()))?;
             tx.execute("INSERT INTO ext_wallet_submission_meta VALUES(1,?1,0,0)",[identity])?;
         }
+        if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",[ABANDONED],|r|r.get::<_,bool>(0))? {tx.execute_batch(ABANDONED_SQL)?;}
         for (name,sql) in DEFINITIONS {
             let actual:String=tx.query_row("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",[name],|r|r.get(0))?;
             if actual!=sql{return Err("SCHEMA_MISMATCH".into());}
@@ -28,6 +31,12 @@ pub(super) fn initialize(conn:&mut rusqlite::Connection)->std::result::Result<()
         let valid:bool=tx.query_row("SELECT count(*)=1 AND min(length(identity))=32 AND min(retry_epoch)>=0 AND min(position)>=0 FROM ext_wallet_submission_meta",[],|r|r.get(0))?;
         if !valid{return Err("STORAGE_ERROR".into());}tx.commit()?;Ok(())
     })().map_err(|e|e.0)
+}
+pub(super) fn abandoned(ext:&ExtensionTransaction<'_>,operation:&[u8])->Result<bool>{
+    Ok(ext.query_row("SELECT EXISTS(SELECT 1 FROM ext_wallet_abandoned WHERE operation=?1)",[operation],|r|r.get(0))?)
+}
+pub(super) fn require_active(ext:&ExtensionTransaction<'_>,operation:&[u8])->Result<()>{
+    if abandoned(ext,operation)?{return Err("ROLE_PRECONDITION".into());}Ok(())
 }
 fn number(v:&Value,name:&str)->Result<i64>{let n=v[name].as_u64().filter(|n|*n<=9007199254740991).ok_or(Failure("INVALID_ARGUMENT".into()))?;Ok(n as i64)}
 fn wall_time(v:&Value)->Result<i64>{let n=number(v,"wallTimeMs")?;if n>8640000000000000{return Err("INVALID_ARGUMENT".into());}Ok(n)}
@@ -104,8 +113,9 @@ fn state<D:WalletRead>(db:&D,ext:&ExtensionTransaction<'_>,p:&crate::Document,op
         steps.push(json!({"index":index,"dependsOn":step["dependsOn"],"txid":if stored{finalized["txid"].clone()}else{Value::Null},"exactBytesSha256":if stored{finalized["exactBytesSha256"].clone()}else{Value::Null},"attempts":history,"inclusion":inclusion,"observation":observation,"expiry":{"height":if expiry==0{Value::Null}else{json!(expiry)},"reached":reached,"confirmedUnminedAt":null},"blockedBy":blocked}));
     }
     let complete_bytes=finalized["transactions"].as_array().is_some_and(|t|!t.is_empty()&&t.len()==steps.len());
-    let mut missing=vec![];if !artifact&&!complete_bytes{missing.push("artifact");}if !complete_bytes{missing.push("finalizedBytes");}
-    Ok(json!({"state":{"operationId":operation,"revision":super::revision::read(ext)?,"accountIds":[review["accountId"]],"phase":if mined{"complete"}else if has_attempt{"observing"}else if complete_bytes{"ready"}else if facts["authorizationComplete"]==false{"awaitingAuthorization"}else{"proposed"},"missing":missing,"steps":steps},"observationSequence":position.to_string(),"observationSequences":sequences,"artifactFacts":facts}))
+    let is_abandoned=abandoned(ext,&raw)?;
+    let mut missing=vec![];if !artifact&&!complete_bytes{missing.push("artifact");}if !complete_bytes{missing.push("finalizedBytes");}if is_abandoned{missing.clear();}
+    Ok(json!({"state":{"operationId":operation,"revision":super::revision::read(ext)?,"accountIds":[review["accountId"]],"phase":if is_abandoned{"abandoned"}else if mined{"complete"}else if has_attempt{"observing"}else if complete_bytes{"ready"}else if facts["authorizationComplete"]==false{"awaitingAuthorization"}else{"proposed"},"missing":missing,"steps":steps},"observationSequence":position.to_string(),"observationSequences":sequences,"artifactFacts":facts}))
 }
 fn observation(input:&Value,txid:&Value)->Result<Value>{
     let v=input.get("observation").ok_or(Failure("INVALID_ARGUMENT".into()))?;
@@ -211,7 +221,7 @@ pub fn payment_call(generation:u32,command:&str,input:&str)->std::result::Result
         if input.len()>16384{return Err("RESOURCE_LIMIT".into());}
         let input:Value=serde_json::from_str(input).map_err(|_|Failure("INVALID_ARGUMENT".into()))?;
         fields(&input,match command{
-            "payment_get"=>&["operationId"][..],
+            "payment_get"|"payment_abandon"=>&["operationId"][..],
             "payment_list"=>&["afterSequence","highWater","limit","accountId"],
             "payment_recovery_position"=>&["afterSequence"],
             "payment_reconcile"=>&["operationId","wallTimeMs","policy"],
@@ -235,6 +245,24 @@ pub fn payment_call(generation:u32,command:&str,input:&str)->std::result::Result
                 }
                 let operation=string(&input,"operationId")?;let raw=id(operation)?;
                 if command=="payment_get"{return state(db,ext,&p,operation);}
+                if command=="payment_abandon"{
+                    let encoded:Vec<u8>=ext.query_row("SELECT CASE WHEN length(plan)<=2097152 THEN plan END FROM ext_wallet_proposals WHERE operation=?1",[&raw],|r|r.get(0)).optional()?.ok_or(Failure("OPERATION_NOT_FOUND".into()))?;
+                    if abandoned(ext,&raw)?{return state(db,ext,&p,operation);}
+                    let used:bool=ext.query_row("SELECT EXISTS(SELECT 1 FROM ext_wallet_pczt WHERE operation=?1 UNION ALL SELECT 1 FROM ext_wallet_pczt_artifacts WHERE operation=?1 UNION ALL SELECT 1 FROM ext_wallet_finalized WHERE operation=?1 UNION ALL SELECT 1 FROM ext_wallet_attempts WHERE operation=?1)",[&raw],|r|r.get(0))?;
+                    if used{return Err("ROLE_PRECONDITION".into());}
+                    let plan=zcash_client_backend::proto::proposal::Proposal::decode(&encoded[..]).map_err(|_|Failure("STORAGE_ERROR".into()))?;
+                    let lock_owner=LockOwner::new(raw.as_slice().try_into().map_err(|_|Failure("STORAGE_ERROR".into()))?);
+                    for step in plan.steps {for input in step.inputs {
+                        if let Some(zcash_client_backend::proto::proposal::proposed_input::Value::ReceivedOutput(output))=input.value {
+                            let txid=output.parse_txid().map_err(|_|Failure("STORAGE_ERROR".into()))?;
+                            let pool=output.pool_type::<()>().map_err(|_|Failure("STORAGE_ERROR".into()))?;
+                            db.unlock_output(&zcash_client_backend::wallet::OutputRef::new(txid,pool,output.index),lock_owner)?;
+                        }
+                    }}
+                    ext.execute("INSERT INTO ext_wallet_abandoned VALUES(?1)",[&raw])?;super::revision::advance(ext)?;
+                    return state(db,ext,&p,operation);
+                }
+                if command!="payment_reconcile"{require_active(ext,&raw)?;}
                 if command=="payment_attempt_begin"{return begin(db,ext,&p,&input,operation);}
                 let now=wall_time(&input)?;
                 if review(ext,&p,operation)?.is_none(){return Err("OPERATION_NOT_FOUND".into());}
