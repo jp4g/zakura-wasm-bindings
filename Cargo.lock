@@ -2272,6 +2272,7 @@ dependencies = [
  "postcard",
  "prost",
  "rand_core 0.10.1",
+ "rayon",
  "rusqlite",
  "secp256k1",
  "secrecy",

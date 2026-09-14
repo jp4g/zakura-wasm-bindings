@@ -3,12 +3,13 @@
 export const RC = { OK: 0, BUSY: 5, READONLY: 8, IOERR: 10, FULL: 13, CANTOPEN: 14,
   READ: 266, SHORT: 522, WRITE: 778, FSYNC: 1034, TRUNCATE: 1546,
   FSTAT: 1802, UNLOCK: 2058, DELETE: 2570, ACCESS: 3338, LOCK: 3850, CLOSE: 4106 };
-let memory, backend;
+let memory, backend, ownerRealm = true;
 const files = new Map();
 let next = 1;
 export let state = { last: '', lastCode: 0, closeError: false };
 const backends = new WeakMap();
 export function withBackend(owner, fn) {
+  if (!memory || !ownerRealm) throw Error('host owner contract');
   if (owner !== undefined && !backends.has(owner)) throw Error('host backend contract');
   const previous = backend, previousState = state;
   backend = owner; state = owner === undefined ? { last: '', lastCode: 0, closeError: false } : backends.get(owner);
@@ -18,12 +19,13 @@ export function attach(mem, host) {
   attachMemory(mem);
   attachBackend(host);
 }
-export function attachMemory(mem) {
-  if (memory || !(mem.buffer instanceof ArrayBuffer)) throw Error('host attach/nonshared contract');
-  memory = mem;
+export function attachMemory(mem, shared = false, isOwner = true) {
+  if (memory || !(mem instanceof WebAssembly.Memory) || typeof shared !== 'boolean' || typeof isOwner !== 'boolean'
+    || !(shared ? typeof SharedArrayBuffer === 'function' && mem.buffer instanceof SharedArrayBuffer : mem.buffer instanceof ArrayBuffer)) throw Error('host memory contract');
+  memory = mem; ownerRealm = isOwner;
 }
 export function attachBackend(host) {
-  if (!memory || !host) throw Error('host backend contract');
+  if (!ownerRealm || !memory || !host) throw Error('host backend contract');
   if (backends.has(host)) throw Error('DOMAIN_USED');
   backends.set(host, { last: '', lastCode: 0, closeError: false });
   backend = host; state = backends.get(host);
@@ -37,7 +39,8 @@ function string(ptr) {
   const b = bytes(ptr, Math.min(512, memory.buffer.byteLength - (ptr >>> 0)));
   const end = b.indexOf(0);
   if (end < 0) throw Error('unterminated path');
-  return new TextDecoder('utf-8', { fatal: true }).decode(b.subarray(0, end));
+  const path = b.subarray(0, end);
+  return new TextDecoder('utf-8', { fatal: true }).decode(path.buffer instanceof ArrayBuffer ? path : Uint8Array.from(path));
 }
 function name(ptr) {
   const value = string(ptr);
@@ -159,7 +162,11 @@ export function host_error(size, ptr) {
 }
 export function entropy(ptr, n) {
   if (n < 0 || n > 65536) throw Error('entropy bounds');
-  try { crypto.getRandomValues(bytes(ptr, n)); return n; } catch { return 0; }
+  try {
+    const target = bytes(ptr, n), ordinary = target.buffer instanceof ArrayBuffer ? target : new Uint8Array(n);
+    try { crypto.getRandomValues(ordinary); if (ordinary !== target) target.set(ordinary); return n; }
+    finally { if (ordinary !== target) ordinary.fill(0); }
+  } catch { return 0; }
 }
 export function utc_ms() { return Date.now(); }
 export function sleep(us) {

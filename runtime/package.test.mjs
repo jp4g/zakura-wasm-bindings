@@ -16,9 +16,12 @@ for (const file of result.manifest.files) {
   assert.equal(bytes.length, file.byteLength);
   assert.equal(digest(bytes), file.sha256);
 }
-assert.deepEqual(result.manifest.files.map(file => file.kind), ['module', 'worker', 'wasm', 'glue', 'glue']);
+const threaded = result.manifest.mode === 'threaded';
+assert.deepEqual(result.manifest.files.map(file => file.kind), ['module', 'worker', 'wasm', 'glue', 'glue', ...(threaded ? ['thread-bootstrap'] : [])]);
+if(threaded) assert.deepEqual(readFileSync(join(options.output,'thread-bootstrap.mjs')),readFileSync(join(options.output,'worker.mjs')));
 const api = await import(pathToFileURL(join(options.output, 'wallet.mjs')));
-assert.deepEqual(Object.keys(api).sort(), ['consensusContext', 'decodeTransaction', 'initializeWalletRuntime', 'runtimeIdentity', 'viewsForStorage']);
+assert.deepEqual(Object.keys(api).sort(), ['consensusContext', 'decodeTransaction', 'initializeWalletRuntime', 'runtimeIdentity', 'viewsForStorage', ...(threaded ? ['prepareThreaded','enterThreaded','finishThreaded'] : [])].sort());
+assert.equal(api.runtimeIdentity.mode,result.manifest.mode);
 assert.equal(api.runtimeIdentity.buildSha256, digest(readFileSync(join(options.output, 'build.json'))));
 assert.equal(api.runtimeIdentity.dependencyGraphSha256, digest(readFileSync(join(options.output, 'dependency-graph.json'))));
 assert.equal(api.runtimeIdentity.contractRevision, profile.contractRevision);
@@ -34,7 +37,7 @@ assert.equal(api.runtimeIdentity.schemas.operations.walletSync, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletEnhancement, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletQueries, '2');
 assert.equal(api.runtimeIdentity.schemas.database, 'wallet-storage/6');
-assert.deepEqual(api.runtimeIdentity.memory, { initialPages: 321, maximumPages: 4096, shared: false });
+assert.deepEqual(api.runtimeIdentity.memory, { initialPages: threaded ? 323 : 321, maximumPages: 4096, shared: threaded });
 assert.equal(result.manifestSha256, digest(readFileSync(join(options.output, 'manifest.json'))));
 await assert.rejects(buildWalletPackage(options), { code: 'EEXIST' });
 const bad = join(scratch, 'bad-native'); mkdirSync(bad);

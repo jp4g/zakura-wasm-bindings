@@ -13,6 +13,7 @@ default = ["viewing", "birthday", "standalone-pczt"]
 standalone-pczt = ["dep:pczt", "dep:postcard", "pczt/transparent", "pczt/sapling", "dep:zcash_script", "dep:zcash_transparent", "dep:serde_json"]
 birthday = ["dep:getrandom", "dep:zcash_client_backend", "zcash_client_backend/orchard", "dep:prost", "dep:serde_json", "dep:hex"]
 viewing = ["dep:zcash_keys", "zcash_keys/sapling", "zcash_keys/orchard", "zcash_keys/transparent-inputs", "dep:zcash_address", "dep:zcash_transparent", "dep:zip32", "dep:serde_json", "dep:hex"]
+wallet-threaded = ["wallet-storage", "dep:rayon"]
 wallet-storage = ["dep:incrementalmerkletree", "dep:time", "dep:secp256k1", "zcash_script/signature-validation","zcash_client_sqlite/serde","zcash_client_backend/pczt", "dep:zcash_note_encryption","dep:sha2","standalone-pczt", "dep:bip39", "dep:secrecy", "dep:rusqlite", "dep:zcash_client_sqlite", "dep:rand_core", "dep:getrandom", "dep:uuid", "dep:pczt", "pczt/io-finalizer", "pczt/signer", "dep:sapling", "dep:orchard", "dep:zcash_client_backend", "dep:zcash_keys", "dep:prost", "dep:zip32", "dep:serde_json", "dep:hex", "dep:zcash_address", "dep:zcash_transparent"]
 
 [[test]]
@@ -20,6 +21,7 @@ name = "wallet_native"
 required-features = ["wallet-storage"]
 
 [dependencies]
+rayon = { version = "=1.12.0", optional = true }
 incrementalmerkletree = { version = "=0.8.2", default-features = false, optional = true }
 zcash_note_encryption = { version = "=0.4.2", optional = true }
 sha2 = { version = "=0.10.9", default-features = false, optional = true }

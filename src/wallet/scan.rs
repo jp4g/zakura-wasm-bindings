@@ -1,4 +1,4 @@
-//! Bounded persistent scanning using the qualified serial upstream scanner seam.
+//! Bounded persistent scanning using upstream inline or parallel cached scanning.
 //! Adapted from SDK qualification/scanner/src/lib.rs at a61dccd; upstream owns
 //! trial decryption, nullifiers, scan ranges, tree writes and account policy.
 //! scan_plan admits a caller-observed target, mutates the native tip and returns
@@ -10,8 +10,9 @@ use super::accounts::{birthday, fields, height, string, Failure, Result};
 use prost::Message;
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
-use zcash_client_backend::{data_api::{WalletRead, WalletWrite}, proto::compact_formats::CompactBlock,
-    scanning::{scan_block, Nullifiers, ScanningKeys}};
+use zcash_client_backend::{data_api::{WalletRead, WalletWrite}, proto::compact_formats::CompactBlock};
+#[cfg(not(feature = "wallet-threaded"))]
+use zcash_client_backend::scanning::{scan_block, Nullifiers, ScanningKeys};
 
 // Hex JSON is private transport, not an additional compact-block encoding.
 const MAX_BLOCK_BYTES: usize = 2 * 1024 * 1024;
@@ -85,8 +86,15 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
             if blocks[0].prev_hash!=state.block_hash().0
                 || db.get_block_hash(state.block_height())?.is_some_and(|h|h!=state.block_hash())
                 || db.get_block_hash(target_height.into())?.is_some_and(|h|target_hash!=h.0) {return Err("CHAIN_MISMATCH".into());}
-            let keys=ScanningKeys::from_account_ufvks(db.get_unified_full_viewing_keys()?);
             super::creation::invalidate(ext)?;
+            #[cfg(feature = "wallet-threaded")]
+            {
+                crate::wallet_threads::assert_ready();
+                zcash_client_backend::data_api::chain::scan_cached_blocks(&p,&ThreadedBlocks(&blocks),db,first.into(),state,blocks.len()).map_err(|_|Failure::from("SCAN_FAILED"))?;
+            }
+            #[cfg(not(feature = "wallet-threaded"))]
+            {
+            let keys=ScanningKeys::from_account_ufvks(db.get_unified_full_viewing_keys()?);
             let mut metadata=db.block_metadata(state.block_height())?;
             let mut nullifiers=Nullifiers::unspent(db)?;
             let mut scanned=Vec::with_capacity(blocks.len());
@@ -97,6 +105,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                 scanned.push(next);
             }
             db.put_blocks(state,scanned)?;
+            }
             super::revision::advance(ext)?;
             Ok(json!({"revision":super::revision::read(ext)?,"start":first,"endExclusive":last.height+1,"blocks":blocks.len()}))
         })?;
@@ -110,4 +119,17 @@ pub fn scan_call(generation:u32, operation:&str, input:&str)->std::result::Resul
     if input.len()>MAX_INPUT_BYTES {return Err("RESOURCE_LIMIT".into());}
     let value=serde_json::from_str(input).map_err(|_|"INVALID_ARGUMENT".to_string())?;
     execute(generation,operation,&value).map(|v|v.to_string()).map_err(|e|e.0)
+}
+
+#[cfg(feature = "wallet-threaded")]
+struct ThreadedBlocks<'a>(&'a [CompactBlock]);
+#[cfg(feature = "wallet-threaded")]
+impl zcash_client_backend::data_api::chain::BlockSource for ThreadedBlocks<'_> {
+    type Error = std::convert::Infallible;
+    fn with_blocks<F,E>(&self, from:Option<zcash_protocol::consensus::BlockHeight>, limit:Option<usize>, mut visit:F)
+        -> std::result::Result<(),zcash_client_backend::data_api::chain::error::Error<E,Self::Error>>
+        where F:FnMut(CompactBlock)->std::result::Result<(),zcash_client_backend::data_api::chain::error::Error<E,Self::Error>> {
+        for block in self.0.iter().filter(|b|from.is_none_or(|h|b.height>=u64::from(u32::from(h)))).take(limit.unwrap_or(self.0.len())) { visit(block.clone())?; }
+        Ok(())
+    }
 }
