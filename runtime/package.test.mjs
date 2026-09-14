@@ -39,7 +39,7 @@ assert.equal(api.runtimeIdentity.schemas.operations.walletSync, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletEnhancement, '2');
 assert.equal(api.runtimeIdentity.schemas.operations.walletQueries, '2');
 assert.equal(api.runtimeIdentity.schemas.database, 'wallet-storage/7');
-assert.deepEqual(api.runtimeIdentity.memory, { initialPages: threaded ? 323 : 321, maximumPages: 4096, shared: threaded });
+assert.deepEqual(api.runtimeIdentity.memory, { initialPages: threaded ? 322 : 321, maximumPages: 4096, shared: threaded });
 assert.equal(result.manifestSha256, digest(readFileSync(join(options.output, 'manifest.json'))));
 await assert.rejects(buildWalletPackage(options), { code: 'EEXIST' });
 const bad = join(scratch, 'bad-native'); mkdirSync(bad);
