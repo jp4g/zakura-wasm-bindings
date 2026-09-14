@@ -1,5 +1,5 @@
 // Offline JS packaging only. The native producer and accepted WASM stay unchanged.
-import { readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdirSync, writeFileSync, cpSync } from 'node:fs';
 import { dirname, resolve, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -110,6 +110,8 @@ export async function buildWalletPackage({ nativeBuild, output, workerPath }) {
   for (const [name, bytes] of Object.entries({ ...assets, 'build.json': metadata, 'dependency-graph.json': graphBytes, 'manifest.json': manifestBytes })) {
     writeFileSync(resolve(output, name), bytes, { flag: 'wx' });
   }
+  cpSync(resolve(root, 'LICENSE'), resolve(output, 'LICENSE'));
+  cpSync(resolve(root, 'licenses'), resolve(output, 'licenses'), { recursive: true });
   return { output, manifestSha256: sha(manifestBytes), manifest };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

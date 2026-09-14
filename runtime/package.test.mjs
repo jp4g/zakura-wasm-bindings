@@ -10,6 +10,8 @@ import { buildWalletPackage, profile } from './package.mjs';
 const scratch = mkdtempSync(join(tmpdir(), 'wallet-package-test-'));
 const options = { nativeBuild: process.argv[2], workerPath: process.argv[3], output: join(scratch, 'package') };
 const result = await buildWalletPackage(options);
+assert.equal(readFileSync(join(options.output, 'LICENSE'), 'utf8'), readFileSync(new URL('../LICENSE', import.meta.url), 'utf8'));
+assert.equal(readFileSync(join(options.output, 'licenses/NATIVE.txt'), 'utf8'), readFileSync(new URL('../licenses/NATIVE.txt', import.meta.url), 'utf8'));
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 for (const file of result.manifest.files) {
   const bytes = readFileSync(join(options.output, file.url));
