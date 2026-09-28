@@ -370,6 +370,25 @@ pub(super) fn mnemonic_account(generation: u32, operation: &str, input: &str, mn
 fn execute_seed(generation: u32, operation: &str, input: &str, seed: &SecretVec<u8>) -> Result<(Value, UnifiedSpendingKey)> {
     if input.len()>160000 || !matches!(seed.expose_secret().len(),32|64) {return Err("INVALID_ARGUMENT".into());}
     let v:Value=serde_json::from_str(input).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+    if operation=="account_restore_signer" {
+        fields(&v,&["accountId"])?;
+        let account_id=id(&v)?;
+        return super::DOMAIN.with(|domain| {
+            let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
+            if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
+            let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
+            let p=active.wallet.params().clone();
+            active.wallet.transactionally_with_extension(|db,ext| -> Result<(Value, UnifiedSpendingKey)> {
+                let account=db.get_account(account_id)?.ok_or(Failure::from("ACCOUNT_NOT_FOUND"))?;
+                let index=account.source().key_derivation().ok_or(Failure::from("SIGNER_CAPABILITY_MISMATCH"))?.account_index();
+                let key=UnifiedSpendingKey::from_seed(&p,seed.expose_secret(),index).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+                if !account.ufvk().is_some_and(|ufvk|key.to_unified_full_viewing_key().subsumes_ufvk(ufvk)) {
+                    return Err("SIGNER_MISMATCH".into());
+                }
+                Ok((stored_record(ext,&account)?,key))
+            })
+        });
+    }
     let account_index=match operation {
         "account_import_hd"=>{fields(&v,&["accountIndex","birthday","name","enabledPools"])?;
             Some(zip32::AccountId::try_from(height(&v,"accountIndex")?).map_err(|_|Failure::from("INVALID_ARGUMENT"))?)},
