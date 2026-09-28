@@ -4,7 +4,7 @@ import { initializeStorage } from './wallet.mjs';
 import * as binding from './bindings.js';
 import { copyBytes } from './bytes.mjs';
 const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get;
-const operations = new Set(['account_balance','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','account_list','account_get','address_current','address_next','address_list','address_at']);
+const operations = new Set(['account_balance','account_import','account_import_hd','account_create_hd','account_import_mnemonic','account_import_mnemonic_signer','account_restore_mnemonic_signer','account_create_mnemonic_signer','account_list','account_get','address_current','address_next','address_list','address_at']);
 const queries = new Set(['wallet_history','wallet_transaction','wallet_notes','wallet_utxos']);
 const syncs = new Set(['scan_state','scan_block_hash','scan_rewind','scan_complete']);
 const enhancements = new Set(['enhancement_requests','enhancement_apply']);
@@ -306,13 +306,13 @@ export function viewsForStorage(storage) {
       let result;
       let ownedSeed,ownedMnemonic,ownedPassphrase;
       try {
-        if(['account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer'].includes(operation)) {
+        if(['account_import_mnemonic','account_import_mnemonic_signer','account_create_mnemonic_signer','account_restore_mnemonic_signer'].includes(operation)) {
           if(seed!==undefined)throw 'INVALID_ARGUMENT';
           try {
             ownedMnemonic=copyBytes(mnemonic,4096,'INVALID_ARGUMENT');
             ownedPassphrase=passphrase===undefined?new Uint8Array():copyBytes(passphrase,65536,'INVALID_ARGUMENT',0);
           }catch {throw 'INVALID_ARGUMENT';}
-          result=storage.run(()=>operation==='account_import_mnemonic' ? binding.views_mnemonic_call(token,input,ownedMnemonic,ownedPassphrase) : binding.signer_create_account(token,operation==='account_create_mnemonic_signer'?'account_create_hd':'account_import_hd',input,ownedMnemonic,ownedPassphrase));
+          result=storage.run(()=>operation==='account_import_mnemonic' ? binding.views_mnemonic_call(token,input,ownedMnemonic,ownedPassphrase) : binding.signer_create_account(token,operation==='account_restore_mnemonic_signer'?'account_restore_signer':operation==='account_create_mnemonic_signer'?'account_create_hd':'account_import_hd',input,ownedMnemonic,ownedPassphrase));
         } else if(mnemonic!==undefined||passphrase!==undefined) {
           throw 'INVALID_ARGUMENT';
         } else if(operation==='account_import_hd'||operation==='account_create_hd') {
@@ -332,10 +332,10 @@ export function viewsForStorage(storage) {
       }
       finally {ownedSeed?.fill(0);ownedMnemonic?.fill(0);ownedPassphrase?.fill(0);}
       const value=lift(JSON.parse(result));
-      if (operation==='account_import_mnemonic_signer'||operation==='account_create_mnemonic_signer') {
+      if (operation==='account_import_mnemonic_signer'||operation==='account_create_mnemonic_signer'||operation==='account_restore_mnemonic_signer') {
         if(signal!==undefined&&aborted.call(signal)) {
           storage.run(()=>binding.signer_release(value.signerToken));
-          throw Object.assign(Error('ABORTED'),{commit:'committed',account:value.account});
+          throw Object.assign(Error('ABORTED'),{commit:operation==='account_restore_mnemonic_signer'?'none':'committed',account:value.account});
         }
       }
       abort(signal,writes.has(operation)?'committed':'none');

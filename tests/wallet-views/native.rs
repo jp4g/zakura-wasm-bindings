@@ -1340,3 +1340,27 @@ fn native_signer_two_open_wallets_remain_independent() {
     assert!(signer_describe(token).is_ok());
     crate::wallet::storage_close(g2).unwrap(); signer_release(token).unwrap();
 }
+
+#[test]
+fn native_restore_signer_preserves_existing_account_and_scan_revision() {
+    use crate::wallet::signer::*;
+    let (path,g)=open();
+    let account=mnemonic(g,hd_input(7),MNEMONIC.as_bytes(),b"restore-passphrase").unwrap();
+    let id=account["id"].as_str().unwrap();
+    crate::wallet::storage_close(g).unwrap();
+    let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
+    let before=call(g,"account_list",json!({})).unwrap();
+    let scan=crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap();
+    let input=json!({"accountId":id}).to_string();
+    assert_eq!(signer_create_account(g,"account_restore_signer",&input,MNEMONIC.as_bytes().to_vec(),vec![]).unwrap_err(),"SIGNER_MISMATCH");
+    let restored:Value=serde_json::from_str(&signer_create_account(g,"account_restore_signer",&input,MNEMONIC.as_bytes().to_vec(),b"restore-passphrase".to_vec()).unwrap()).unwrap();
+    let token=restored["signerToken"].as_u64().unwrap() as u32;
+    assert_eq!(restored["account"],before[0]);
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),before);
+    assert_eq!(crate::wallet::sync::sync_call(g,"scan_state","{}").unwrap(),scan);
+    assert_eq!(signer_bind(token,g,id).unwrap(),"ready");
+    signer_release(token).unwrap();
+    assert_eq!(call(g,"account_list",json!({})).unwrap(),before);
+    assert_eq!(signer_create_account(g,"account_restore_signer",&json!({"accountId":uuid::Uuid::new_v4().to_string()}).to_string(),MNEMONIC.as_bytes().to_vec(),vec![]).unwrap_err(),"ACCOUNT_NOT_FOUND");
+    crate::wallet::storage_close(g).unwrap();
+}
