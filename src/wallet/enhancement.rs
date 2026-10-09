@@ -44,11 +44,35 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
         if domain.failed.is_some() { return Err("DOMAIN_INVALID".into()); }
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();
-        active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
+        let mut completed=None;
+        let result=active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
             let revision=super::revision::read(ext)?;
             if operation!="enhancement_requests"&&string(input,"revision")?!=revision{return Err("STALE_REVISION".into());}
-            let requests=db.transaction_data_requests()?;
-            if requests.len()>1024{return Err("RESOURCE_LIMIT".into());}
+            let mut requests=db.transaction_data_requests()?;
+            let mut ordinary=std::collections::BTreeMap::new();
+            // Upstream requests discover ephemeral returns and spends of known outputs,
+            // not initial deposits to ordinary receivers. Poll the wallet-owned receiver
+            // window once per native scan plan. Completion is owner-local: reopening,
+            // replanning or rewinding must query again, including at the same height.
+            if db.chain_height()?.is_some() {
+                for account in db.get_account_ids()? {
+                    let mut receivers=db.get_transparent_receivers(account,true,false)?
+                        .into_keys().collect::<Vec<_>>();
+                    receivers.sort_by_key(|address|address.encode(&p));
+                    for address in receivers {
+                        let encoded=address.encode(&p);
+                        let key=format!("{}:{encoded}",account.expose_uuid());
+                        if active.transparent_checks.contains(&key){continue;}
+                        ordinary.insert(encoded,key);
+                        requests.push(TransactionDataRequest::transactions_involving_address(
+                            address,0.into(),None,None,
+                            TransactionStatusFilter::All,OutputStatusFilter::Unspent,
+                        ));
+                        if requests.len()+active.transparent_checks.len()>1024{return Err("RESOURCE_LIMIT".into());}
+                    }
+                }
+            }
+            if requests.len()+active.transparent_checks.len()>1024{return Err("RESOURCE_LIMIT".into());}
             if operation=="enhancement_requests" {
                 return Ok(json!({"revision":revision,"requests":requests.iter().map(|r|project(r,&p)).collect::<Result<Vec<_>>>()?}));
             }
@@ -121,7 +145,11 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
                                 for output in positive{db.put_received_transparent_utxo(&output)?;}
                             }
                             // This is scheduling, not a claim that omitted outputs were spent or unspent.
-                            db.schedule_next_check(&r.address(),24*60*60)?;
+                            if let Some(key)=ordinary.get(&r.address().encode(&p)) {
+                                completed=Some(key.clone());
+                            } else {
+                                db.schedule_next_check(&r.address(),24*60*60)?;
+                            }
                         } else {
                         // Other supported spend-search requests are mined/all with a finite range.
                         if !matches!(r.tx_status_filter(),TransactionStatusFilter::Mined)||!matches!(r.output_status_filter(),OutputStatusFilter::All){return Err("METHOD_NOT_SUPPORTED".into());}
@@ -143,7 +171,10 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
             }
             super::revision::advance(ext)?;
             Ok(json!({"revision":super::revision::read(ext)?}))
-        })
+        })?;
+        // Cache only committed replies; failed validation or commits remain pending.
+        if let Some(key)=completed {active.transparent_checks.insert(key);}
+        Ok(result)
     })
 }
 #[wasm_bindgen]
