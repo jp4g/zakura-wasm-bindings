@@ -1,9 +1,26 @@
 # Build the native SDK components
 
-The supported build host is **Linux x86_64**. Install Python **3.12+**, Node
-**22+**, Git, curl, a host C compiler and binutils, and [rustup](https://rustup.rs/).
-On Debian/Ubuntu the system packages are `build-essential`, `git`, `curl`,
-`python3` and `ca-certificates`; check your distribution's Python/Node versions.
+Build host selection covers **macOS (Apple Silicon and Intel)** and **Linux
+x86_64**. On Windows, use **WSL2 with an x86_64 Linux distribution**, and run all
+commands with the Linux tools inside WSL (prefer a checkout in its Linux filesystem).
+Native Windows and Linux ARM builds are not configured.
+
+Install Python **3.12+**, Node **22+**, Git, curl, a host C compiler and binutils,
+and [rustup](https://rustup.rs/). The build selects matching WASI SDK and
+wasm-bindgen archives automatically; no manual platform flags are needed.
+
+- **macOS:** install Xcode Command Line Tools with `xcode-select --install`.
+  With Homebrew, `brew install python node` supplies current Python and Node;
+  use `python3 --version` to check that your shell selects Python 3.12 or newer.
+  Use native ARM tools on Apple Silicon rather than mixing Rosetta installations.
+- **Debian/Ubuntu/WSL:** install `build-essential`, `git`, `curl`, `python3` and
+  `ca-certificates`; check the distribution's Python and Node versions and install
+  newer versions if needed.
+
+Validation currently includes full Linux x86_64 builds. The macOS archive hashes,
+archive layout and host selection have been checked, but a full build on each Mac
+architecture still needs execution on those hosts. Native build-host support does
+not expand the JavaScript SDK's separate persistent-storage platform support.
 
 From a clean, committed checkout:
 

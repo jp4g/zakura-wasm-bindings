@@ -14,14 +14,32 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parent
+# Archive names and SHA-256 values from the upstream release assets.
 TOOLS = {
-    'wasi-sdk-27.0-x86_64-linux': (
-        'https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/wasi-sdk-27.0-x86_64-linux.tar.gz',
-        'b7d4d944c88503e4f21d84af07ac293e3440b1b6210bfd7fe78e0afd92c23bc2'),
-    'wasm-bindgen-0.2.128-x86_64-unknown-linux-musl': (
-        'https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.128/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl.tar.gz',
-        'b51f0208fdff83515a787bd8ab9ac5865ed84dabb66d0c709957bb59793c645f'),
+    ('Linux', 'x86_64'): (
+        ('wasi-sdk-27.0-x86_64-linux', 'b7d4d944c88503e4f21d84af07ac293e3440b1b6210bfd7fe78e0afd92c23bc2'),
+        ('wasm-bindgen-0.2.128-x86_64-unknown-linux-musl', 'b51f0208fdff83515a787bd8ab9ac5865ed84dabb66d0c709957bb59793c645f')),
+    ('Darwin', 'arm64'): (
+        ('wasi-sdk-27.0-arm64-macos', '055c3dc2766772c38e71a05d353e35c322c7b2c6458a36a26a836f9808a550f8'),
+        ('wasm-bindgen-0.2.128-aarch64-apple-darwin', '67ba17f260977725c0b541b516dbb5153538140f079a900329fb6077661b47ab')),
+    ('Darwin', 'x86_64'): (
+        ('wasi-sdk-27.0-x86_64-macos', '163dfd47f989b1a682744c1ae1f0e09a83ff5c4bbac9dcd8546909ab54cda5a1'),
+        ('wasm-bindgen-0.2.128-x86_64-apple-darwin', '59d9af11d0a61b8019898d555de31153c3a50e7f1797e9849fb38589d16add43')),
 }
+
+
+def tools_for_host(system, machine):
+    try:
+        wasi, bindgen = TOOLS[system, machine]
+    except KeyError:
+        raise RuntimeError(f'Unsupported build host: {system} {machine}. '
+                           'Use macOS (Apple Silicon or Intel) or Linux x86_64. '
+                           'On Windows use an x86_64 WSL2 Linux environment.') from None
+    return {
+        wasi[0]: (f'https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-27/{wasi[0]}.tar.gz', wasi[1]),
+        bindgen[0]: (f'https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.128/{bindgen[0]}.tar.gz', bindgen[1]),
+    }
+
 
 
 def sha(path):
@@ -39,8 +57,7 @@ def main():
     args = parser.parse_args()
     if sys.version_info < (3, 12):
         raise RuntimeError('Python 3.12 or newer is required')
-    if (platform.system(), platform.machine()) != ('Linux', 'x86_64'):
-        raise RuntimeError('This native build supports Linux x86_64; use a Linux x86_64 host or VM')
+    selected_tools = tools_for_host(platform.system(), platform.machine())
     for tool in ['git', 'rustup', 'cargo', 'rustc', 'node', 'curl', 'cc', 'ar']:
         if not shutil.which(tool):
             raise RuntimeError(f'Missing prerequisite: {tool}; see BUILDING.md')
@@ -71,7 +88,7 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
     tools = cache / 'tools'
     tools.mkdir(exist_ok=True)
-    for name, (url, digest) in TOOLS.items():
+    for name, (url, digest) in selected_tools.items():
         archive = tools / (name + '.tar.gz')
         if not archive.exists():
             partial = archive.with_suffix('.part')
@@ -86,7 +103,7 @@ def main():
         shutil.rmtree(tools / name, ignore_errors=True)
         with tarfile.open(archive) as tar:
             tar.extractall(tools, filter='data')
-    sdk, bindgen_dir = (tools / name for name in TOOLS)
+    sdk, bindgen_dir = (tools / name for name in selected_tools)
     bindgen = bindgen_dir / 'wasm-bindgen'
     if run(bindgen, '--version', capture=True).strip() != 'wasm-bindgen 0.2.128':
         raise RuntimeError('Unexpected wasm-bindgen version')
@@ -138,6 +155,7 @@ def main():
     if git('diff', 'HEAD', '--') or git('rev-parse', 'HEAD') != revision:
         raise RuntimeError('Tracked sources changed during the build')
     receipt = dict(format='zcash-js-native-build/1', complete=True, revision=revision,
+                   host=dict(system=platform.system(), machine=platform.machine()),
                    tree=git('rev-parse', 'HEAD^{tree}'), lockSha256=sha(ROOT / 'Cargo.lock'),
                    nativePolicy=json.loads((ROOT / 'native-policy/vendor/receipt.json').read_text()),
                    packages=packages, rustc=run('rustc', '-Vv', capture=True), producerSha256=sha(Path(__file__)),
