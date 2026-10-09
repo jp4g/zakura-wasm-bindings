@@ -56,23 +56,23 @@ Byte order is deliberately preserved rather than guessed. Reference lightwalletd
 
 The exact wallet source commit is `a9142ee100b3a563b7d9ba7a8e94201d00ad8154`. The vendored v0.5.0 `.proto` files and hashes are retained in [vendor/SHA256.json](vendor/SHA256.json); service.proto differs from upstream protocol commit `ac7cee052a1bf5d430985a478d39e8b513fc4bd4` by one comment. The schema hashes identify this codec; the composing transport must match its pinned schema revision before use. Server-advertised protocol version is a separate value.
 
-`generate.py` extracts only reachable published message/enum definitions, preserving prost attributes and adding serde DTO annotations; it also emits the matching preflight descriptors and exact method dispatch. It does not run protoc or generate a network client. Generated Rust source is committed. `python3 lightwire/generate.py --check` unconditionally checks source hashes and exact generated output. Upstream copyright/license notices in the retained source are preserved; this work makes no new repository license choice.
+`cargo xtask generate` extracts only reachable published message/enum definitions, preserving prost attributes and adding serde DTO annotations; it also emits the matching preflight descriptors and exact method dispatch. It does not run protoc or generate a network client. Generated Rust source is committed. `cargo xtask generate --check` unconditionally checks source hashes and exact generated output. Upstream copyright/license notices in the retained source are preserved; this work makes no new repository license choice.
 
-## Offline build and tests
+## Build and tests
 
-Use the existing compiler/wasm32 target and approved wasm-bindgen 0.2.128 executable. No installation or downloads are performed. Create a fresh cache using only the locked required packages:
+From the repository root, follow [BUILDING.md](../BUILDING.md):
 
 ```sh
-python3 lightwire/prepare-cache.py --source /home/jack/zakura-wallet-storage-scratch/cargo --output /home/jack/zakura-lightwire-scratch/fresh-cargo
-python3 lightwire/build.py --output /home/jack/zakura-lightwire-scratch/fresh-build --cargo-home /home/jack/zakura-lightwire-scratch/fresh-cargo --bindgen /home/jack/zcash-node-runtime-scratch/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl/wasm-bindgen
-python3 lightwire/tests/golden.py
-python3 lightwire/tests/build.test.py
-LIGHTWIRE_BUILD=/home/jack/zakura-lightwire-scratch/fresh-build node lightwire/tests/facade.test.mjs
-LIGHTWIRE_BUILD=/home/jack/zakura-lightwire-scratch/fresh-build node lightwire/tests/firefox.mjs
+cargo xtask build
+LIGHTWIRE_BUILD="$PWD/build/sdk/lightwire" node lightwire/tests/facade.test.mjs
+LIGHTWIRE_BUILD="$PWD/build/sdk/lightwire" node lightwire/tests/firefox.mjs
 ```
 
-The build runs locked/offline native tests and a real release WASM link, then the exact installed generator. It verifies registry archive checksums and exact extracted source inventories/bytes, records the same-run Cargo graph, source inventory and artifact hashes, and refuses source mutation or reuse of an output directory. Failure leaves an incomplete receipt; `built` means build only, never browser acceptance. Missing prerequisites are failures, with no executable fallback.
+The task verifies locked crate archives and extracted sources, checks generation,
+runs native tests offline and builds WASM. It records the Cargo graph, source
+inventory and artifact hashes. A failed build has no successful root receipt;
+`built` in a codec receipt means build completion, not browser acceptance.
 
-The independent oracle uses already-installed Python `google.protobuf` 6.33.5 with descriptors parsed directly from the pinned `.proto` files, independently of the production Rust/generator. It cross-checks 22 committed full-field wire vectors, and 1,638 malformed cuts. Native and actual Node/WASM tests exercise these plus hostile/resource-boundary controls. Build failure controls test mutation, output preservation and inventory safety under optimized Python.
+The independent oracle uses already-installed Python `google.protobuf` 6.33.5 with descriptors parsed directly from the pinned `.proto` files, independently of the production Rust/generator. It cross-checks 22 committed full-field wire vectors, and 1,638 malformed cuts. Native and actual Node/WASM tests exercise these plus hostile/resource-boundary controls. Rust task tests cover source mutation, output preservation and inventory safety. Run the optional oracle with `python3 lightwire/tests/golden.py`.
 
 Firefox uses an ordinary page-owned `type=module` entry, not automation-realm imports. The runner serves only preloaded owned local assets, validates selected artifact hashes, checks missing paths, uses unchanged installed `/snap/bin/geckodriver`/Firefox and `acceptInsecureCerts:false`, and retains process/profile identities and bounded cleanup receipts. Its cross-origin isolation headers enable the required SharedArrayBuffer negative controls without disabling browser security. If worker loopback sockets are denied, the parent must run this exact runner on the permitted host. Browser runtime and interruption cleanup remain unqualified until actual receipts pass. No live endpoint, funds or deployment is involved.

@@ -10,13 +10,14 @@ Result: `{ canonical: string, kind: 'p2pkh' | 'p2sh', payload: Uint8Array }`, wi
 
 Private ABI v1 `transparent_address_decode(token, family)` returns kind byte 0/1, 20 receiver bytes, then native canonical ASCII bytes, or a JavaScript Error. No retained native object or authority handle exists.
 
-Build only from an owned copy of accepted lock-checksummed cached inputs. No dependency download/install is permitted. The nested lock selects a subset of the accepted root lock; build checks archive hashes and extracted source bytes. `build.py` records source, selected graph, tool versions, bindgen and generated hashes. Output must be fresh and outside this source directory.
+Build from the repository root following [BUILDING.md](../BUILDING.md). The task
+verifies locked crate archives and extracted sources and records source, graph,
+tool and artifact hashes. Output directories must be new.
 
-```
-CARGO_HOME="$SCRATCH/cargo" CARGO_TARGET_DIR="$SCRATCH/target" cargo test --manifest-path transparent-address/Cargo.toml --locked --offline
-python3 transparent-address/build.py --output "$SCRATCH/packet" --cargo-home "$SCRATCH/cargo" --bindgen /home/jack/zcash-node-runtime-scratch/wasm-bindgen-0.2.128-x86_64-unknown-linux-musl/wasm-bindgen
-/home/jack/.hermes/node/bin/node transparent-address/tests/node.mjs "$SCRATCH/packet"
-/home/jack/.hermes/node/bin/node transparent-address/tests/firefox.mjs "$SCRATCH/packet" "$LOGS/browser" "$SCRATCH/browser"
+```sh
+cargo xtask build
+node transparent-address/tests/node.mjs "$PWD/build/sdk/transparent-address"
+node transparent-address/tests/firefox.mjs "$PWD/build/sdk/transparent-address" "$LOGS/browser" "$SCRATCH/browser"
 ```
 
 Native tests and shared Node/page/worker tests use source vectors from commit `882ecd278050bb92365c9d1250c55f0dadc0f648`, `components/zcash_address/src/encoding.rs:278–376`. Four receiver expectations are explicitly twenty zero bytes. Nonzero expectations are `8286bf790866805397e3a947640b77a43f0b43a5` (independently unpacked from the paired TEX data symbols) and twenty `01` bytes. These are structural fixtures, never live chain probes.

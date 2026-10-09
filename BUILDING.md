@@ -5,27 +5,27 @@ x86_64**. On Windows, use **WSL2 with an x86_64 Linux distribution**, and run al
 commands with the Linux tools inside WSL (prefer a checkout in its Linux filesystem).
 Native Windows and Linux ARM builds are not configured.
 
-Install Python **3.12+**, Node **22+**, Git, curl, a host C compiler and binutils,
+Install Node **22+**, Git, curl, a host C compiler and binutils,
 and [rustup](https://rustup.rs/). The build selects matching WASI SDK and
 wasm-bindgen archives automatically; no manual platform flags are needed.
 
 - **macOS:** install Xcode Command Line Tools with `xcode-select --install`.
-  With Homebrew, `brew install python node` supplies current Python and Node;
-  use `python3 --version` to check that your shell selects Python 3.12 or newer.
+  With Homebrew, `brew install node` supplies Node.
   Use native ARM tools on Apple Silicon rather than mixing Rosetta installations.
-- **Debian/Ubuntu/WSL:** install `build-essential`, `git`, `curl`, `python3` and
-  `ca-certificates`; check the distribution's Python and Node versions and install
-  newer versions if needed.
+- **Debian/Ubuntu/WSL:** install `build-essential`, `git`, `curl` and
+  `ca-certificates`; install Node 22 or newer.
 
 
 From a clean, committed checkout:
 
 ```sh
-python3 build-sdk.py
+cargo xtask build
 ```
 
-The script reads the Rust version from `rust-toolchain.toml`, installs that
-minimal toolchain and its WASM target using rustup, and downloads the pinned
+`cargo xtask` is a repository-local Cargo alias, not an installed command. Cargo
+builds the small `xtask/` binary using its own committed lockfile. Rustup selects
+the minimal toolchain from `rust-toolchain.toml`; the task ensures the WASM target
+is installed and downloads the pinned
 WASI SDK and wasm-bindgen release archives. Archive SHA-256 values are checked
 before extraction. Cargo downloads are locked; the owned policy patches and
 cached crate sources are checked before compilation. No crates.io publication
@@ -53,7 +53,7 @@ normal toolchain directory. Cargo tracks changes to compilation inputs. To build
 again, choose a new output directory while retaining the cache:
 
 ```sh
-python3 build-sdk.py --output build/sdk-next
+cargo xtask build --output build/sdk-next
 ```
 
 Use `--cache /absolute/path` to select another dedicated cache, including an empty
@@ -67,10 +67,13 @@ The build verifies native unit tests, primitive JS tests, codec source/graph che
 and the wallet WASM interface. SDK wallet lifecycle and browser integration tests
 remain in the SDK repository. The optional threaded wallet is not part of this
 baseline build. Historical qualification scripts remain for their recorded runs;
-`build-sdk.py` is the portable entry point for the current SDK components.
+`cargo xtask build` is the portable entry point for the current SDK components.
+Python is not required by this build. The independent protobuf test oracle and
+historical qualification scripts still use Python.
 
-Fast offline checks for build failure handling:
+Checks for build failure handling and committed codec generation:
 
 ```sh
-python3 tests/test_sdk_build.py
+cargo test --locked --manifest-path xtask/Cargo.toml
+cargo xtask generate --check
 ```
