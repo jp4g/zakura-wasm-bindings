@@ -84,7 +84,7 @@ pub fn absolute(path: &Path) -> Result<PathBuf> {
 }
 
 pub struct Runner {
-    pub env: BTreeMap<OsString, OsString>,
+    env: BTreeMap<OsString, OsString>,
 }
 impl Runner {
     pub fn new() -> Self {

@@ -15,7 +15,6 @@ wasm-bindgen archives automatically; no manual platform flags are needed.
 - **Debian/Ubuntu/WSL:** install `build-essential`, `git`, `curl` and
   `ca-certificates`; install Node 22 or newer.
 
-
 From a clean, committed checkout:
 
 ```sh
@@ -25,8 +24,7 @@ cargo xtask build
 `cargo xtask` is a repository-local Cargo alias, not an installed command. Cargo
 builds the small `xtask/` binary using its own committed lockfile. Rustup selects
 the minimal toolchain from `rust-toolchain.toml`; the task ensures the WASM target
-is installed and downloads the pinned
-WASI SDK and wasm-bindgen release archives. Archive SHA-256 values are checked
+is installed and downloads the pinned WASI SDK and wasm-bindgen release archives. Archive SHA-256 values are checked
 before extraction. Cargo downloads are locked; the owned policy patches and
 cached crate sources are checked before compilation. No crates.io publication
 of this repository is required.
@@ -49,7 +47,8 @@ packaging and proving-parameter acquisition. This repository does not publish np
 packages or ship a JavaScript SDK distribution.
 
 Downloads and Cargo build outputs are cached under `.cache/sdk/`; rustup uses its
-normal toolchain directory. Cargo tracks changes to compilation inputs. To build
+normal toolchain directory. The task itself uses Cargo’s normal download cache
+and `xtask/target/`. Cargo tracks changes to compilation inputs. To build
 again, choose a new output directory while retaining the cache:
 
 ```sh

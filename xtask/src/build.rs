@@ -88,7 +88,8 @@ pub fn build(root: &Path, output: &Path, cache: &Path) -> Result<()> {
     }
     inputs::prepare(&run, root, &cargo)?;
     run.run(root, "cargo", &["fetch", "--locked"])?;
-    fs::create_dir_all(&output)?;
+    fs::create_dir_all(output.parent().ok_or("output has no parent")?)?;
+    fs::create_dir(&output)?;
     let metadata: Value = serde_json::from_str(&run.capture(
         root,
         "cargo",
