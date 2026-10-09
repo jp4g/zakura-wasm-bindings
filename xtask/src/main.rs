@@ -1,4 +1,5 @@
 mod build;
+mod codec;
 mod generate;
 mod inputs;
 mod support;

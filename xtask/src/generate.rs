@@ -157,7 +157,10 @@ pub fn generate(root: &Path, check: bool) -> Result<()> {
         "fn dispatch(method: &str, input: Input) -> Result<Output, String> { match method {".into(),
     ];
     for (method, request, response, stream) in METHODS {
-        dispatch.push(format!("\"{method}\" => route::<messages::{request}, messages::{response}>(input, \"{request}\", \"{response}\", {stream}),"));
+        dispatch.push(format!(
+            "\"{method}\" => route::<messages::{request}, messages::{response}>\
+             (input, \"{request}\", \"{response}\", {stream}),"
+        ));
     }
     dispatch.push("_ => Err(\"unknown method\".into()), }}".into());
     for (path, content) in [

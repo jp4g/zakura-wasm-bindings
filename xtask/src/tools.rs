@@ -39,8 +39,9 @@ pub fn archives(os: &str, arch: &str) -> Result<[(&'static str, &'static str); 2
         ],
         _ => {
             return Err(format!(
-            "unsupported build host: {os} {arch}; use macOS or Linux x86_64 (Windows: x86_64 WSL2)"
-        )
+                "unsupported build host: {os} {arch}; \
+             use macOS or Linux x86_64 (Windows: x86_64 WSL2)"
+            )
             .into())
         }
     })

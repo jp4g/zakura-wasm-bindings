@@ -82,6 +82,21 @@ fn archive_for(cargo: &Path, source: &Path) -> Result<PathBuf> {
 
 pub fn prepare(run: &Runner, root: &Path, cargo: &Path) -> Result<()> {
     let policy = json(&root.join("native-policy/upstream.json"))?;
+    // Fetch outside the root manifest: its patched path dependencies do not exist yet.
+    let scratch = tempfile::tempdir()?;
+    for (name, package) in policy.as_object().ok_or("invalid native policy")? {
+        run.run(
+            scratch.path(),
+            "cargo",
+            &[
+                "info",
+                &format!(
+                    "{name}@{}",
+                    package["version"].as_str().ok_or("missing version")?
+                ),
+            ],
+        )?;
+    }
     let vendor = root.join("native-policy/vendor");
     let receipt_path = vendor.join("receipt.json");
     let prepared = if receipt_path.exists() {
@@ -123,7 +138,11 @@ pub fn prepare(run: &Runner, root: &Path, cargo: &Path) -> Result<()> {
         let patch = root.join(format!("native-policy/{name}.patch"));
         run.run(&destination, "git", &["apply", "--check", text(&patch)])?;
         run.run(&destination, "git", &["apply", text(&patch)])?;
-        receipt[name] = json!({"upstream": package["checksum"], "patch": sha(&patch)?, "files": inventory(&destination)?});
+        receipt[name] = json!({
+            "upstream": package["checksum"],
+            "patch": sha(&patch)?,
+            "files": inventory(&destination)?
+        });
     }
     write_json(&receipt_path, &receipt)
 }
@@ -203,7 +222,10 @@ pub fn verify(run: &Runner, root: &Path, cargo: &Path, metadata: &Value) -> Resu
                 verify_archive(source, &archive_for(cargo, source)?, checksum)?,
             )
         };
-        packages[format!("{name}@{version}")] = json!({"checksum": checksum, "sourceInventorySha256": digest(&serde_json::to_vec(&actual)?)});
+        packages[format!("{name}@{version}")] = json!({
+            "checksum": checksum,
+            "sourceInventorySha256": digest(&serde_json::to_vec(&actual)?)
+        });
     }
     Ok(packages)
 }
