@@ -93,11 +93,19 @@ def main():
 
     # The two owned policy patches need their upstream archives before Cargo can
     # resolve the root manifest's path dependencies. Fetch outside that manifest.
+    policy = json.loads((ROOT / 'native-policy/upstream.json').read_text())
     with tempfile.TemporaryDirectory(prefix='zakura-fetch-') as scratch:
-        for name, package in json.loads((ROOT / 'native-policy/upstream.json').read_text()).items():
+        for name, package in policy.items():
             run('cargo', 'info', f"{name}@{package['version']}", cwd=scratch)
-    shutil.rmtree(ROOT / 'native-policy/vendor', ignore_errors=True)
-    run(sys.executable, ROOT / 'native-policy/prepare.py')
+    vendor = ROOT / 'native-policy/vendor'
+    receipt_path = vendor / 'receipt.json'
+    prepared = json.loads(receipt_path.read_text()) if receipt_path.exists() else {}
+    if set(prepared) != set(policy) or any(
+            prepared[name]['upstream'] != package['checksum']
+            or prepared[name]['patch'] != sha(ROOT / 'native-policy' / (name + '.patch'))
+            for name, package in policy.items()):
+        shutil.rmtree(vendor, ignore_errors=True)
+        run(sys.executable, ROOT / 'native-policy/prepare.py')
     run('cargo', 'fetch', '--locked')
     output.mkdir(parents=True)
     metadata = json.loads(run('cargo', 'metadata', '--locked', '--offline', '--features', 'wallet-storage',

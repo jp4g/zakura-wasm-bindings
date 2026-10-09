@@ -55,3 +55,9 @@ and the wallet WASM interface. SDK wallet lifecycle and browser integration test
 remain in the SDK repository. The optional threaded wallet is not part of this
 baseline build. Historical qualification scripts remain for their recorded runs;
 `build-sdk.py` is the portable entry point for the current SDK components.
+
+Fast offline checks for build failure handling:
+
+```sh
+python3 tests/test_sdk_build.py
+```
