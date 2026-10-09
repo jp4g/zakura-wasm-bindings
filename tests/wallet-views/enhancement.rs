@@ -71,21 +71,49 @@ fn enhancement_full_transaction_is_atomic_and_persists_after_reopen() {
 
 #[test]
 fn enhancement_unspent_positive_only_and_atomic() {
+    unspent_checks(false);
+    unspent_checks(true);
+}
+
+fn unspent_checks(ordinary: bool) {
     use zcash_keys::encoding::AddressCodec;
     let data=super::pczt_build::public_wallet_funds(&serde_json::from_str(include_str!("../public-wallet-funding.json")).unwrap());
     let(path,g)=open();crate::wallet::storage_close(g).unwrap();std::fs::write(&path,hex::decode(data["database"].as_str().unwrap()).unwrap()).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();
-    let p=crate::Document::parse(PARAMS).unwrap();let pending=enhance(g,"enhancement_requests",json!({})).unwrap();let request=pending["requests"].as_array().unwrap().iter().find(|r|r["outputStatus"]=="unspent").unwrap().clone();
+    let p=crate::Document::parse(PARAMS).unwrap();
+    let receivers=crate::wallet::DOMAIN.with(|domain| {
+        let domain=domain.borrow();let db=&domain.active.first().unwrap().wallet;
+        db.get_account_ids().unwrap().into_iter().flat_map(|account|
+            db.get_transparent_receivers(account,true,false).unwrap().into_keys()
+        ).map(|address|address.encode(&p)).collect::<std::collections::HashSet<_>>()
+    });
+    let pending=enhance(g,"enhancement_requests",json!({})).unwrap();
+    let request=pending["requests"].as_array().unwrap().iter().find(|r|
+        r["outputStatus"]=="unspent" && r["address"].as_str().is_some_and(|address|
+            receivers.contains(address)==ordinary)
+    ).expect("both ordinary and ephemeral receivers must request funding").clone();
     let address=zcash_transparent::address::TransparentAddress::decode(&p,request["address"].as_str().unwrap()).unwrap();let coinbase=zcash_transparent::bundle::TxIn::coinbase(40001.into(),None).unwrap();
     let tx=zcash_primitives::transaction::TransactionData::<zcash_primitives::transaction::Authorized>::from_parts(zcash_primitives::transaction::TxVersion::V5,zcash_protocol::consensus::BranchId::for_height(&p,40001.into()),0,0.into(),Some(zcash_transparent::bundle::Bundle{vin:vec![zcash_transparent::bundle::TxIn::from_parts(coinbase.prevout().clone(),coinbase.script_sig().into(),coinbase.sequence())],vout:vec![zcash_transparent::bundle::TxOut::new(zcash_protocol::value::Zatoshis::const_from_u64(1000),address.script().into());2],authorization:zcash_transparent::bundle::Authorized}),None,None,None).freeze().unwrap();
     let mut raw=vec![];tx.write(&mut raw).unwrap();let script=hex::encode(&tx.transparent_bundle().unwrap().vout[0].script_pubkey().0.0);
     let mut result=json!({"transactions":[{"txid":tx.txid().to_string(),"bytes":hex::encode(raw),"minedHeight":40001,"unspentOutputs":[{"outputIndex":0,"script":script,"value":"1000"},{"outputIndex":1,"script":script,"value":"1000"}]}],"asOfHeight":40001,"asOfHash":"08".repeat(32),"complete":true});
-    let apply=|result:Value|{let current=enhance(g,"enhancement_requests",json!({})).unwrap();enhance(g,"enhancement_apply",json!({"revision":current["revision"],"request":current["requests"].as_array().unwrap().iter().find(|r|r["address"]==request["address"]).unwrap(),"result":result}))};
+    let renew=|g| {
+        let target=crate::wallet::DOMAIN.with(|domain| {
+            let domain=domain.borrow();let db=&domain.active.first().unwrap().wallet;
+            let height=db.chain_height().unwrap().unwrap();
+            json!({"height":u32::from(height),"hash":hex::encode(db.get_block_hash(height).unwrap().unwrap().0)})
+        });
+        crate::wallet::scan::scan_call(g,"scan_plan",&json!({"target":target}).to_string()).unwrap();
+    };
+    let apply=|result:Value|{
+        let pending=enhance(g,"enhancement_requests",json!({})).unwrap();
+        if ordinary&&!pending["requests"].as_array().unwrap().iter().any(|r|r["address"]==request["address"]&&r["outputStatus"]=="unspent") {renew(g);}
+        let current=enhance(g,"enhancement_requests",json!({})).unwrap();enhance(g,"enhancement_apply",json!({"revision":current["revision"],"request":current["requests"].as_array().unwrap().iter().find(|r|r["address"]==request["address"]&&r["outputStatus"]=="unspent").unwrap(),"result":result}))};
     let mut partial=result.clone();partial["complete"]=json!(false);assert_eq!(apply(partial).unwrap_err(),"INVALID_ARGUMENT");assert_eq!(enhance(g,"enhancement_requests",json!({})).unwrap(),pending);
     let mut overflow=result.clone();overflow["transactions"]=json!(vec![result["transactions"][0].clone();1001]);assert_eq!(apply(overflow).unwrap_err(),"RESOURCE_LIMIT");assert_eq!(enhance(g,"enhancement_requests",json!({})).unwrap(),pending);
     apply(result.clone()).unwrap();
     let db=rusqlite::Connection::open(&path).unwrap();
     db.execute("UPDATE transparent_received_outputs SET max_observed_unspent_height=39999 WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?1)",[tx.txid().as_ref()]).unwrap();
     let hash:Vec<u8>=(0u8..32).collect();db.execute("UPDATE blocks SET hash=?1 WHERE height=40001",[&hash]).unwrap();result["asOfHash"]=json!(hex::encode(&hash));
+    if ordinary {renew(g);}
     let tables=["transactions","transparent_received_outputs","addresses","ext_wallet_revision"];let before=policy_rows(&db,&tables);
     for field in ["txid","script","value","outputIndex","asOfHeight","asOfHash"] {
         let mut bad=result.clone();match field{"txid"=>bad["transactions"][0][field]=json!("00".repeat(32)),"script"=>bad["transactions"][0]["unspentOutputs"][0][field]=json!("00"),"value"=>bad["transactions"][0]["unspentOutputs"][0][field]=json!("1001"),"outputIndex"=>bad["transactions"][0]["unspentOutputs"][0][field]=json!(99),"asOfHeight"=>bad[field]=json!(40000),_=>bad[field]=json!("09".repeat(32))};
@@ -94,6 +122,9 @@ fn enhancement_unspent_positive_only_and_atomic() {
     let mut one=result.clone();one["transactions"][0]["unspentOutputs"].as_array_mut().unwrap().pop();apply(one).unwrap();
     let heights:Vec<Option<u32>>=db.prepare("SELECT max_observed_unspent_height FROM transparent_received_outputs WHERE transaction_id=(SELECT id_tx FROM transactions WHERE txid=?1) ORDER BY output_index").unwrap().query_map([tx.txid().as_ref()],|r|r.get(0)).unwrap().collect::<std::result::Result<_,_>>().unwrap();assert_eq!(heights,vec![Some(40001),Some(39999)],"omitted known output is not renewed by raw decryption");
     let before=policy_rows(&db,&["transparent_received_outputs"]);apply(json!({"transactions":[],"asOfHeight":40001,"asOfHash":hex::encode(&hash),"complete":true})).unwrap();assert_eq!(policy_rows(&db,&["transparent_received_outputs"]),before,"empty response is not spent/unspent evidence");
-    assert!(enhance(g,"enhancement_requests",json!({})).unwrap()["requests"].as_array().unwrap().iter().find(|r|r["address"]==request["address"]).unwrap()["requestAt"].is_u64());
-    drop(db);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();assert!(enhance(g,"enhancement_requests",json!({})).unwrap()["requests"].as_array().unwrap().iter().find(|r|r["address"]==request["address"]).unwrap()["requestAt"].is_u64());crate::wallet::storage_close(g).unwrap();
+    let pending=enhance(g,"enhancement_requests",json!({})).unwrap();
+    let remaining=pending["requests"].as_array().unwrap().iter().find(|r|r["address"]==request["address"]&&r["outputStatus"]=="unspent");
+    if ordinary {assert!(remaining.is_none(),"committed discovery must not block proposal freshness");}
+    else {assert!(remaining.unwrap()["requestAt"].is_u64());}
+    drop(db);crate::wallet::storage_close(g).unwrap();let g=crate::wallet::initialize_path(&path,"zcash-js-network/1",PARAMS,&[3;32]).unwrap();assert!(enhance(g,"enhancement_requests",json!({})).unwrap()["requests"].as_array().unwrap().iter().find(|r|r["address"]==request["address"]&&r["outputStatus"]=="unspent").unwrap()["requestAt"].is_null()==ordinary);crate::wallet::storage_close(g).unwrap();
 }

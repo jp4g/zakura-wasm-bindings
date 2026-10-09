@@ -104,6 +104,7 @@ fn execute(generation: u32, operation: &str, input: &Value) -> Result<Value> {
                     Ok(json!({"revision":super::revision::read(ext)?,"point":{"height":u32::from(actual),"hash":hex::encode(hash.0)}}))
                 })?;
                 active.scan_plan=None;
+                active.transparent_checks.clear();
                 Ok(result)
             }
             _=>Err("INVALID_ARGUMENT".into()),

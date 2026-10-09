@@ -43,7 +43,7 @@ impl Drop for OwnedConnection {
     }
 }
 type Wallet = WalletDb<OwnedConnection, super::Document, HostClock, rand_core::UnwrapErr<getrandom::SysRng>>;
-struct Active { scan_plan: Option<(String,serde_json::Value)>, wallet: Wallet, bytes: Vec<u8>, generation: u32, receipt: Rc<RefCell<CloseReceipt>> }
+struct Active { transparent_checks: std::collections::BTreeSet<String>, scan_plan: Option<(String,serde_json::Value)>, wallet: Wallet, bytes: Vec<u8>, generation: u32, receipt: Rc<RefCell<CloseReceipt>> }
 #[derive(Default)]
 struct Domain { active: Vec<Active>, generation: u32, failed: Option<Rc<RefCell<CloseReceipt>>> }
 // One serialized native owner; bounded databases share its existing memory ceiling.
@@ -128,7 +128,7 @@ fn initialize(path: &str, format: &str, bytes: &[u8], genesis: &[u8]) -> Result<
         }
         let wallet = WalletDb::from_connection(owned, document, HostClock, rand_core::UnwrapErr(getrandom::SysRng));
         domain.generation = generation;
-        domain.active.push(Active { scan_plan:None, wallet, bytes: bytes.to_vec(), generation, receipt });
+        domain.active.push(Active { transparent_checks:Default::default(), scan_plan:None, wallet, bytes: bytes.to_vec(), generation, receipt });
         Ok(generation)
     })
 }

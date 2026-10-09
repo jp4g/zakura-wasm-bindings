@@ -244,3 +244,12 @@ Native qualification includes transfer, shielding and the upstream TEX two-step 
 ## License
 
 Project-owned code is [MIT licensed](LICENSE). Bundled dependencies retain their own licenses; keep the accompanying [third-party notices](licenses/README.md) when redistributing JavaScript/WASM artifacts.
+
+## Transparent funding discovery
+
+Wallet sync requests include ordinary transparent receivers (including the backend’s
+recovery window and change addresses), checked once per SDK sync pass. Responses
+use the existing bounded, chain-pinned UTXO validation; ephemeral checks retain
+their separate polling schedule. Successful ordinary checks complete for the current
+native scan plan; a new plan, rewind or reopen requests them again. This requires
+no wallet schema migration.

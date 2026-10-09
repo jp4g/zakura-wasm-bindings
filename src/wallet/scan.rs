@@ -50,6 +50,7 @@ fn execute(generation: u32, operation: &str, v: &Value) -> Result<Value> {
                 Ok(json!({"revision":super::revision::read(ext)?,"target":target,"ranges":ranges}))
             })?;
             active.scan_plan=Some((result["revision"].as_str().unwrap().to_owned(),target.clone()));
+            active.transparent_checks.clear();
             return Ok(result);
         }
         let expected=string(v,"revision")?;
