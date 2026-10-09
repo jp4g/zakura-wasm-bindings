@@ -4,7 +4,7 @@ For the supported SDK build, see **[Build the native SDK components](BUILDING.md
 One command builds the baseline wallet and codecs using the pinned Rust toolchain:
 
 ```sh
-python3 build-sdk.py
+cargo xtask build
 ```
 
 The older qualification commands below describe historical builds, not the current
