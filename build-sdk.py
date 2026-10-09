@@ -65,7 +65,7 @@ def main():
                               text=True, input=data, stdout=subprocess.PIPE if capture else None).stdout
 
     # rustup owns the Rust version/target; the repository file is the sole version pin.
-    run('rustup', 'toolchain', 'install', channel, '--profile', 'minimal', '--target', 'wasm32-unknown-unknown')
+    run('rustup', 'toolchain', 'install', channel, '--profile', 'minimal', '--target', 'wasm32-unknown-unknown', '--no-self-update')
     if int(run('node', '-p', 'process.versions.node.split(".")[0]', capture=True).strip()) < 22:
         raise RuntimeError('Node 22 or newer is required')
     cache.mkdir(parents=True, exist_ok=True)
