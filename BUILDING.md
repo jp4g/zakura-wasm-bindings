@@ -17,10 +17,6 @@ wasm-bindgen archives automatically; no manual platform flags are needed.
   `ca-certificates`; check the distribution's Python and Node versions and install
   newer versions if needed.
 
-Validation currently includes full Linux x86_64 builds. The macOS archive hashes,
-archive layout and host selection have been checked, but a full build on each Mac
-architecture still needs execution on those hosts. Native build-host support does
-not expand the JavaScript SDK's separate persistent-storage platform support.
 
 From a clean, committed checkout:
 
