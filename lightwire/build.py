@@ -39,14 +39,14 @@ def check_graph(metadata, cargo_home):
     return records
 
 def main():
-    a=argparse.ArgumentParser();a.add_argument('--output',type=pathlib.Path,required=True);a.add_argument('--cargo-home',type=pathlib.Path,required=True);a.add_argument('--bindgen',type=pathlib.Path,required=True);args=a.parse_args()
-    out=args.output.resolve(); cargo_home=args.cargo_home.resolve()
+    a=argparse.ArgumentParser();a.add_argument('--output',type=pathlib.Path,required=True);a.add_argument('--cargo-home',type=pathlib.Path,required=True);a.add_argument('--bindgen',type=pathlib.Path,required=True);a.add_argument('--target-dir',type=pathlib.Path);args=a.parse_args()
+    out=args.output.resolve(); cargo_home=args.cargo_home.resolve(); target=(args.target_dir or out/'target').resolve()
     if out.is_relative_to(ROOT) or out.exists() or out.is_symlink(): raise RuntimeError('output must be a fresh external directory')
     out.mkdir(parents=True)
     receipt={'status':'incomplete','source':snapshot(ROOT)}
     receipt_path=out/'receipt.json'
     receipt_path.write_text(json.dumps(receipt,indent=2)+'\n')
-    env=dict(os.environ,CARGO_HOME=str(cargo_home),CARGO_TARGET_DIR=str(out/'target'),CARGO_NET_OFFLINE='true')
+    env=dict(os.environ,CARGO_HOME=str(cargo_home),CARGO_TARGET_DIR=str(target),CARGO_NET_OFFLINE='true')
     def run(name,cmd):
         with (out/(name+'.log')).open('wb') as log:
             subprocess.run(cmd,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
@@ -61,7 +61,7 @@ def main():
     receipt['graph_sha256']=sha(json.dumps(metadata['resolve'],sort_keys=True,separators=(',',':')).encode())
     run('native',['cargo','test','--locked','--offline'])
     run('wasm',['cargo','build','--locked','--offline','--release','--target','wasm32-unknown-unknown'])
-    wasm=out/'target/wasm32-unknown-unknown/release/zakura_lightwire.wasm'
+    wasm=target/'wasm32-unknown-unknown/release/zakura_lightwire.wasm'
     if not wasm.is_file(): raise RuntimeError('producing build did not create WASM')
     run('bindgen',[str(args.bindgen),'--target','web','--out-dir',str(out/'wasm'),str(wasm)])
     shutil.copy2(ROOT/'codec.mjs',out/'codec.mjs')

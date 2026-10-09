@@ -1,4 +1,14 @@
-# Zakura private bindings
+# Zakura native bindings
+
+For the supported SDK build, see **[Build the native SDK components](BUILDING.md)**.
+One command builds the baseline wallet and codecs using the pinned Rust toolchain:
+
+```sh
+python3 build-sdk.py
+```
+
+The older qualification commands below describe historical builds, not the current
+fresh-checkout workflow.
 
 A `publish = false` production Rust binding crate for bounded network documents
 and exact transaction bytes/identity, related to zcash.js #3/#4/#6. The crate name
