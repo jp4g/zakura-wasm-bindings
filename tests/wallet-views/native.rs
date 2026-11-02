@@ -10,7 +10,8 @@ mod account_lifecycle;
 mod proposal;
 #[path = "pczt_build.rs"]
 mod pczt_build;
-mod nu7;
+#[path = "../migrations/nu6-to-nu7.rs"]
+mod nu6_to_nu7;
 use serde_json::{json, Value};
 use zcash_client_backend::proto::service::TreeState;
 use prost::Message;
