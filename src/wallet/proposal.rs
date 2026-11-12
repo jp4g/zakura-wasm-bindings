@@ -134,12 +134,22 @@ fn payment_request(uri:&str,p:&crate::Document)->Result<zcash_client_backend::zi
 #[allow(deprecated)] // Reuse the pinned backend's ZIP321 types; no second request codec.
 fn payments(input:&Value,p:&crate::Document)->Result<zcash_client_backend::zip321::TransactionRequest> {
     use zcash_client_backend::zip321::{Payment,TransactionRequest};
-    // ZIP-321 payment request URI; every payment needs an amount.
+    // ZIP-321 payment request URI; `amounts` fills in, by payment index, exactly the payments without one.
     if let Some(Value::String(uri))=input.get("payments") {
         let request=payment_request(uri,p)?;
-        if request.payments().values().any(|p|p.amount().is_none()){return Err("INVALID_ARGUMENT".into());}
-        return Ok(request);
+        let empty=serde_json::Map::new();
+        let amounts=match input.get("amounts") {None=>&empty,Some(Value::Object(m))=>m,_=>return Err("INVALID_ARGUMENT".into())};
+        if amounts.len()!=request.payments().values().filter(|p|p.amount().is_none()).count(){return Err("INVALID_ARGUMENT".into());}
+        let mut filled=std::collections::BTreeMap::new();
+        for (&index,payment) in request.payments() {
+            let amount=match payment.amount() {Some(amount)=>amount,None=>money(&input["amounts"],&index.to_string())?};
+            if amount==Zatoshis::ZERO{return Err("INVALID_ARGUMENT".into());}
+            filled.insert(index,Payment::new(payment.recipient_address().clone(),Some(amount),payment.memo().cloned(),payment.label().cloned(),
+                payment.message().cloned(),payment.other_params().to_vec()).map_err(|_|Failure::from("INVALID_ARGUMENT"))?);
+        }
+        return TransactionRequest::from_indexed(filled).map_err(|_|"INVALID_ARGUMENT".into());
     }
+    if input.get("amounts").is_some(){return Err("INVALID_ARGUMENT".into());}
     let list=input.get("payments").and_then(Value::as_array).ok_or(Failure::from("INVALID_ARGUMENT"))?;
     if list.is_empty()||list.len()>16{return Err("RESOURCE_LIMIT".into());}
     let mut payments=Vec::new();
@@ -163,12 +173,18 @@ fn payments(input:&Value,p:&crate::Document)->Result<zcash_client_backend::zip32
 }
 
 fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
-    fields(input,match operation {"proposal_create"|"proposal_lookup_intent"=>&["revision","accountId","payments","policy","maxFee","kind","threshold","fromAddresses","idempotencyKey"][..],"proposal_get"=>&["operationId"],"proposal_list"=>&["afterSequence","highWater","limit"],_=>return Err("INVALID_ARGUMENT".into())})?;
+    fields(input,match operation {"proposal_create"|"proposal_lookup_intent"=>&["revision","accountId","payments","amounts","policy","maxFee","kind","threshold","fromAddresses","idempotencyKey"][..],"proposal_get"=>&["operationId"],"proposal_list"=>&["afterSequence","highWater","limit"],"payment_request_parse"=>&["uri"],_=>return Err("INVALID_ARGUMENT".into())})?;
     super::DOMAIN.with(|domain|{
         let mut domain=domain.try_borrow_mut().map_err(|_|Failure::from("STORAGE_BUSY"))?;
         if domain.failed.is_some(){return Err("STORAGE_ERROR".into());}
         let active=domain.active.iter_mut().find(|a|a.generation==generation).ok_or(Failure::from("STALE_HANDLE"))?;
         let p=active.wallet.params().clone();
+        if operation=="payment_request_parse" {
+            let request=payment_request(string(input,"uri")?,&p)?;
+            return Ok(json!({"payments":request.payments().iter().map(|(index,payment)|json!({"index":index.to_string(),"address":payment.recipient_address().encode(),
+                "amount":payment.amount().map(|a|u64::from(a).to_string()),"memo":payment.memo().map(|m|hex::encode(m.as_array())),
+                "label":payment.label(),"message":payment.message()})).collect::<Vec<_>>()}));
+        }
         let parameters=active.bytes.clone();
         active.wallet.transactionally_with_extension(|db,ext|->Result<Value>{
             if operation=="proposal_list" {
@@ -218,7 +234,7 @@ fn execute(generation:u32,operation:&str,input:&Value)->Result<Value> {
             let confirmations=ConfirmationsPolicy::new(height(c,"trusted")?.try_into().map_err(|_|Failure::from("INVALID_ARGUMENT"))?,height(c,"untrusted")?.try_into().map_err(|_|Failure::from("INVALID_ARGUMENT"))?,c.get("allowZeroConfirmationShielding").and_then(Value::as_bool).ok_or(Failure::from("INVALID_ARGUMENT"))?).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
             let shielding=match input.get("kind") {None=>false,Some(Value::String(s)) if s=="shield"=>true,_=>return Err("INVALID_ARGUMENT".into())};
             if shielding&&(!transparent||string(policy,"transparent")?!="allow-owned"){return Err("UNSUPPORTED_POOL".into());}
-            let request=if shielding {if input.get("payments").is_some(){return Err("INVALID_ARGUMENT".into());}None}else{
+            let request=if shielding {if input.get("payments").is_some()||input.get("amounts").is_some(){return Err("INVALID_ARGUMENT".into());}None}else{
                 if input.get("threshold").is_some()||input.get("fromAddresses").is_some(){return Err("INVALID_ARGUMENT".into());}Some(payments(input,&p)?)};
             let threshold=if shielding {money(input,"threshold")?}else{Zatoshis::ZERO};
             let mut sources=std::collections::BTreeMap::new();

@@ -38,6 +38,14 @@ fn proposal_retains_native_selection_locks_and_reopens() {
         let mut request=retry.clone();request["payments"]=json!(uri);
         assert_eq!(propose(g,"proposal_lookup_intent",request),expected,"{uri}");
     }
+    // `amounts` fills in exactly the payments without an amount.
+    for (uri,amounts,expected) in [(format!("zcash:{to}"),json!({"0":"10000"}),Ok(plan.clone())),
+        (format!("zcash:{to}?amount=0.0001"),json!({"0":"10000"}),Err("INVALID_ARGUMENT".into())),(format!("zcash:{to}"),json!({"1":"10000"}),Err("INVALID_ARGUMENT".into()))] {
+        let mut request=retry.clone();request["payments"]=json!(uri);request["amounts"]=amounts;
+        assert_eq!(propose(g,"proposal_lookup_intent",request),expected,"{uri}");
+    }
+    assert_eq!(propose(g,"payment_request_parse",json!({"uri":format!("zcash:{to}?label=Coffee")})).unwrap(),
+        json!({"payments":[{"index":"0","address":to,"amount":null,"memo":null,"label":"Coffee","message":null}]}));
     assert_eq!(propose(g,"proposal_create",retry.clone()).unwrap(),plan,"retry ignores stale pre-commit revision and locked inputs");
     let mut conflict=retry.clone();conflict["payments"][0]["amount"]=json!("10001");
     let mut memo=retry.clone();memo["payments"][0]["memo"]=json!("00");
