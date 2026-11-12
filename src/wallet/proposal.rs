@@ -108,9 +108,38 @@ fn project(plan:&wire::Proposal,account:&str,expiry:u32)->Result<Vec<Value>> {
     }
     Ok(result)
 }
+// ZIP-321 is ABNF, whose literals are case-insensitive (`ZCASH:`, `AMOUNT=`, `REQ-x=`);
+// the pinned parser matches only lower case. Other parameter names, addresses and values keep their case.
+fn lowercase_literals(uri:&str)->String {
+    let Some((scheme,rest))=uri.get(..6).zip(uri.get(6..)) else {return uri.into()};
+    let (address,query)=rest.split_once('?').map_or((rest,None),|(a,q)|(a,Some(q)));
+    let name=|n:&str|{let lower=n.to_ascii_lowercase();
+        if lower.starts_with("req-")||["address","amount","memo","label","message"].contains(&lower.split('.').next().unwrap_or_default()){lower}else{n.into()}};
+    let query=query.map_or(String::new(),|q|format!("?{}",q.split('&').map(|p|p.split_once('=')
+        .map_or(name(p),|(n,v)|format!("{}={v}",name(n)))).collect::<Vec<_>>().join("&")));
+    format!("{}{address}{query}",scheme.to_ascii_lowercase())
+}
+/// A ZIP-321 request whose payments are all for this network; amounts may be absent.
+#[allow(deprecated)]
+fn payment_request(uri:&str,p:&crate::Document)->Result<zcash_client_backend::zip321::TransactionRequest> {
+    if uri.len()>8192{return Err("RESOURCE_LIMIT".into());}
+    let request=zcash_client_backend::zip321::TransactionRequest::from_uri(&lowercase_literals(uri)).map_err(|_|Failure::from("INVALID_ARGUMENT"))?;
+    if request.payments().is_empty()||request.payments().len()>16{return Err("RESOURCE_LIMIT".into());}
+    for payment in request.payments().values() {
+        zcash_keys::address::Address::try_from_zcash_address(p,payment.recipient_address().clone()).map_err(|_|Failure::from("NETWORK_MISMATCH"))?;
+        if payment.amount()==Some(Zatoshis::ZERO){return Err("INVALID_ARGUMENT".into());}
+    }
+    Ok(request)
+}
 #[allow(deprecated)] // Reuse the pinned backend's ZIP321 types; no second request codec.
 fn payments(input:&Value,p:&crate::Document)->Result<zcash_client_backend::zip321::TransactionRequest> {
     use zcash_client_backend::zip321::{Payment,TransactionRequest};
+    // ZIP-321 payment request URI; every payment needs an amount.
+    if let Some(Value::String(uri))=input.get("payments") {
+        let request=payment_request(uri,p)?;
+        if request.payments().values().any(|p|p.amount().is_none()){return Err("INVALID_ARGUMENT".into());}
+        return Ok(request);
+    }
     let list=input.get("payments").and_then(Value::as_array).ok_or(Failure::from("INVALID_ARGUMENT"))?;
     if list.is_empty()||list.len()>16{return Err("RESOURCE_LIMIT".into());}
     let mut payments=Vec::new();
