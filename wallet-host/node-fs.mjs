@@ -3,7 +3,22 @@ import { spawnSync } from 'node:child_process';
 import { isMainThread } from 'node:worker_threads';
 // Capture identity primitives before consumer fault injection can replace fs methods.
 const { openSync, fstatSync, closeSync } = fs;
+const windows = process.platform === 'win32';
 function checkedOpen(path, flags, directory = false) {
+  if (windows) {
+    // No O_NOFOLLOW/O_DIRECTORY, uid or mode bits: refuse symlinks and junctions
+    // (reported as symbolic links), and rely on the per-user profile ACL for privacy.
+    let link;
+    try { link = fs.lstatSync(path); } catch (e) { if (e.code !== 'ENOENT' || !(flags & fs.constants.O_CREAT)) throw e; }
+    if (link && (link.isSymbolicLink() || (directory ? !link.isDirectory() : !link.isFile()))) throw Error('unsafe wallet path');
+    if (directory) return undefined; // Windows cannot open a directory as a file.
+    const fd = openSync(path, flags, 0o600);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.nlink !== 1) throw Error('unsafe wallet path');
+      return fd;
+    } catch (e) { closeSync(fd); throw e; }
+  }
   const fd = openSync(path, flags | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
   try {
     const stat = fstatSync(fd);
@@ -12,14 +27,22 @@ function checkedOpen(path, flags, directory = false) {
     return fd;
   } catch (e) { closeSync(fd); throw e; }
 }
-// Owner lease: an exclusive flock(2) on owner.lock, held by the retained open
-// file description. Same semantics on Linux and macOS:
+// Directory entries are made durable by fsync(2) on the directory. NTFS journals
+// metadata and Windows cannot open a directory as a file, so this is a no-op there.
+function syncDirectory(dir) {
+  if (dir !== undefined) fs.fsyncSync(dir);
+}
+// Owner lease: an exclusive lock on owner.lock, held by the retained open file
+// description and released by the OS if the process dies:
 // - Linux: /usr/bin/flock locks the inherited descriptor (works under Node and Bun).
 // - macOS: no flock(1); Bun calls flock(2) through bun:ffi, Node falls back to the
 //   system perl, which locks the inherited descriptor the same way.
+// - Windows: owner.lock is opened with UV_FS_O_EXLOCK (share mode 0), so the open
+//   handle itself is the lease; a second open fails with a sharing violation (EBUSY).
 // Worker trackUnmanagedFds must remain enabled for crash/destruction cleanup.
 const LOCK_EX = 2, LOCK_NB = 4;
 function lockExclusive(fd) {
+  if (windows) return; // Acquired by the exclusive open in acquire().
   if (process.platform === 'linux') {
     const result = spawnSync('/usr/bin/flock', ['-n', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd], timeout: 5000 });
     if (result.error || result.status !== 0) throw Object.assign(Error('exclusive owner unavailable'), { code: result.status === 1 ? 'EBUSY' : 'EIO' });
@@ -54,13 +77,18 @@ function durableSync(fd) {
   }
   fs.fsyncSync(fd);
 }
+function exclusiveLock() {
+  const flag = fs.constants.UV_FS_O_EXLOCK;
+  if (typeof flag !== 'number' || !flag) throw Error('exclusive file locking unavailable');
+  return flag;
+}
 export function acquire(root, { create = false } = {}) {
-  if (isMainThread || !['linux', 'darwin'].includes(process.platform)) throw Error('dedicated Linux or macOS worker required');
+  if (isMainThread || !['linux', 'darwin', 'win32'].includes(process.platform)) throw Error('dedicated Linux, macOS or Windows worker required');
   let base, lock, dir;
   try {
     base = fs.realpathSync(root);
     dir = checkedOpen(base, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY, true);
-    lock = checkedOpen(`${base}/owner.lock`, fs.constants.O_CREAT | fs.constants.O_RDWR);
+    lock = checkedOpen(`${base}/owner.lock`, fs.constants.O_CREAT | fs.constants.O_RDWR | (windows ? exclusiveLock() : 0));
     lockExclusive(lock);
     // Validate BOTH preexisting files before SQLite can mutate either one.
     for (const name of ['wallet.db', 'wallet.db-journal']) {
@@ -70,8 +98,9 @@ export function acquire(root, { create = false } = {}) {
   } catch (e) {
     if (dir !== undefined) closeSync(dir);
     if (lock !== undefined) closeSync(lock);
-    throw Object.assign(Error(e.code === 'EBUSY' ? 'exclusive owner unavailable' : 'STORAGE_OPEN_FAILED'),
-      { code: e.code === 'EBUSY' ? 'EBUSY' : 'EIO' });
+    const busy = e.code === 'EBUSY';
+    throw Object.assign(Error(busy ? 'exclusive owner unavailable' : 'STORAGE_OPEN_FAILED'),
+      { code: busy ? 'EBUSY' : 'EIO' });
   }
   const descriptors = new Set();
   const host = {
@@ -79,7 +108,7 @@ export function acquire(root, { create = false } = {}) {
     open(path, make, readOnly) {
       const fd = checkedOpen(`${base}/${path}`, (readOnly ? fs.constants.O_RDONLY : fs.constants.O_RDWR) | (make ? fs.constants.O_CREAT : 0));
       // Persist namespace entries before journal/database writes can depend on them.
-      try { fs.fsyncSync(dir); } catch (e) { closeSync(fd); throw e; }
+      try { syncDirectory(dir); } catch (e) { closeSync(fd); throw e; }
       descriptors.add(fd); return fd;
     },
     close(fd) { durableSync(fd); fs.closeSync(fd); descriptors.delete(fd); },
@@ -90,7 +119,7 @@ export function acquire(root, { create = false } = {}) {
     size: fd => fs.fstatSync(fd).size,
     delete(path, sync) {
       try { fs.unlinkSync(`${base}/${path}`); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-      if (sync) { fs.fsyncSync(dir); }
+      if (sync) syncDirectory(dir);
     },
     access(path, flags) {
       try { fs.accessSync(`${base}/${path}`, flags === 1 ? fs.constants.R_OK | fs.constants.W_OK : flags === 2 ? fs.constants.R_OK : fs.constants.F_OK); return true; }
@@ -100,7 +129,7 @@ export function acquire(root, { create = false } = {}) {
       if (!host.owned) return;
       // Hold the lease until every data descriptor is closed.
       for (const fd of descriptors) { fs.closeSync(fd); descriptors.delete(fd); }
-      descriptors.clear(); fs.closeSync(dir); fs.closeSync(lock); host.owned = false;
+      descriptors.clear(); if (dir !== undefined) fs.closeSync(dir); fs.closeSync(lock); host.owned = false;
     },
   };
   return host;

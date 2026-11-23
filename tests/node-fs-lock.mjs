@@ -1,5 +1,5 @@
 // Owner-lease check for wallet-host/node-fs.mjs under the current runtime (Node or Bun)
-// and platform (Linux or macOS): a second owner is refused until the first releases.
+// and platform (Linux, macOS or Windows): a second owner is refused until the first releases.
 // Usage: node tests/node-fs-lock.mjs   |   bun tests/node-fs-lock.mjs
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { mkdtempSync } from 'node:fs';
