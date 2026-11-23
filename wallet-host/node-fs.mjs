@@ -135,15 +135,21 @@ export function acquire(root, { create = false } = {}) {
       { code: held ? 'EBUSY' : 'EIO' });
   }
   const descriptors = new Set();
+  // Windows FlushFileBuffers needs write access: a read-only handle has nothing to
+  // flush and fails with EPERM, so read-only descriptors are not synced on close.
+  const readOnlyDescriptors = new Set();
   const host = {
     owned: true,
     open(path, make, readOnly) {
       const fd = checkedOpen(`${base}/${path}`, (readOnly ? fs.constants.O_RDONLY : fs.constants.O_RDWR) | (make ? fs.constants.O_CREAT : 0));
       // Persist namespace entries before journal/database writes can depend on them.
       try { syncDirectory(dir); } catch (e) { closeSync(fd); throw e; }
-      descriptors.add(fd); return fd;
+      descriptors.add(fd); if (readOnly) readOnlyDescriptors.add(fd); return fd;
     },
-    close(fd) { durableSync(fd); fs.closeSync(fd); descriptors.delete(fd); },
+    close(fd) {
+      if (!(windows && readOnlyDescriptors.has(fd))) durableSync(fd);
+      fs.closeSync(fd); descriptors.delete(fd); readOnlyDescriptors.delete(fd);
+    },
     read: (fd, b, at) => fs.readSync(fd, b, 0, b.length, at),
     write: (fd, b, at) => fs.writeSync(fd, b, 0, b.length, at),
     truncate: (fd, size) => fs.ftruncateSync(fd, size),
@@ -161,7 +167,7 @@ export function acquire(root, { create = false } = {}) {
       if (!host.owned) return;
       // Hold the lease until every data descriptor is closed.
       for (const fd of descriptors) { fs.closeSync(fd); descriptors.delete(fd); }
-      descriptors.clear(); if (dir !== undefined) fs.closeSync(dir); lock(); host.owned = false;
+      descriptors.clear(); readOnlyDescriptors.clear(); if (dir !== undefined) fs.closeSync(dir); lock(); host.owned = false;
     },
   };
   return host;
