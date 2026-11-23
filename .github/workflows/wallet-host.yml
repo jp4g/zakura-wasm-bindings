@@ -20,26 +20,8 @@ jobs:
           node-version: 22
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.0
+          bun-version: 1.4.5
       - name: Owner lease (Node)
         run: node tests/node-fs-lock.mjs
       - name: Owner lease (Bun)
         run: bun tests/node-fs-lock.mjs
-      - name: Diagnose (temporary)
-        if: always() && runner.os == 'Windows'
-        shell: bash
-        run: |
-          cat > probe.cjs <<'JS'
-          const fs=require('fs'),os=require('os'),p=require('path');
-          const X=0x10000000;
-          const d=fs.realpathSync(fs.mkdtempSync(p.join(os.tmpdir(),'x-')));
-          const f=d+'/owner.lock';
-          const who=process.versions.bun?'bun':'node';
-          try{const fd=fs.openSync(f,fs.constants.O_CREAT|fs.constants.O_RDWR|X,0o600);console.log(who,'first open ok');
-          try{fs.openSync(f,fs.constants.O_RDWR|X);console.log(who,'second exlock open SUCCEEDED (no lock)')}catch(e){console.log(who,'second exlock open',e.code)}
-          try{fs.openSync(f,fs.constants.O_RDWR);console.log(who,'second plain open SUCCEEDED')}catch(e){console.log(who,'second plain open',e.code)}
-          fs.closeSync(fd);try{const g=fs.openSync(f,fs.constants.O_RDWR|X);console.log(who,'reopen after close ok');fs.closeSync(g)}catch(e){console.log(who,'reopen after close',e.code)}
-          }catch(e){console.log(who,'first open failed',e.code,e.message)}
-          JS
-          node probe.cjs
-          bun probe.cjs

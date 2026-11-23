@@ -4,13 +4,16 @@ import { isMainThread } from 'node:worker_threads';
 // Capture identity primitives before consumer fault injection can replace fs methods.
 const { openSync, fstatSync, closeSync } = fs;
 const windows = process.platform === 'win32';
+// Windows has no O_NOFOLLOW/O_DIRECTORY, uid or mode bits: refuse symlinks and
+// junctions (reported as symbolic links) and rely on the per-user profile ACL.
+function windowsPathCheck(path, create, directory) {
+  let link;
+  try { link = fs.lstatSync(path); } catch (e) { if (e.code !== 'ENOENT' || !create) throw e; }
+  if (link && (link.isSymbolicLink() || (directory ? !link.isDirectory() : !link.isFile()))) throw Error('unsafe wallet path');
+}
 function checkedOpen(path, flags, directory = false) {
   if (windows) {
-    // No O_NOFOLLOW/O_DIRECTORY, uid or mode bits: refuse symlinks and junctions
-    // (reported as symbolic links), and rely on the per-user profile ACL for privacy.
-    let link;
-    try { link = fs.lstatSync(path); } catch (e) { if (e.code !== 'ENOENT' || !(flags & fs.constants.O_CREAT)) throw e; }
-    if (link && (link.isSymbolicLink() || (directory ? !link.isDirectory() : !link.isFile()))) throw Error('unsafe wallet path');
+    windowsPathCheck(path, Boolean(flags & fs.constants.O_CREAT), directory);
     if (directory) return undefined; // Windows cannot open a directory as a file.
     const fd = openSync(path, flags, 0o600);
     try {
@@ -37,12 +40,13 @@ function syncDirectory(dir) {
 // - Linux: /usr/bin/flock locks the inherited descriptor (works under Node and Bun).
 // - macOS: no flock(1); Bun calls flock(2) through bun:ffi, Node falls back to the
 //   system perl, which locks the inherited descriptor the same way.
-// - Windows: owner.lock is opened with UV_FS_O_EXLOCK (share mode 0), so the open
-//   handle itself is the lease; a second open fails with a sharing violation (EBUSY).
+// - Windows: owner.lock is held open with share mode 0, so the open handle itself
+//   is the lease and a second owner fails with a sharing violation (EBUSY). Node
+//   passes libuv's UV_FS_O_EXLOCK (not exported in fs.constants); Bun cannot, so it
+//   opens the handle with kernel32 CreateFileW through bun:ffi.
 // Worker trackUnmanagedFds must remain enabled for crash/destruction cleanup.
 const LOCK_EX = 2, LOCK_NB = 4;
 function lockExclusive(fd) {
-  if (windows) return; // Acquired by the exclusive open in acquire().
   if (process.platform === 'linux') {
     const result = spawnSync('/usr/bin/flock', ['-n', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd], timeout: 5000 });
     if (result.error || result.status !== 0) throw Object.assign(Error('exclusive owner unavailable'), { code: result.status === 1 ? 'EBUSY' : 'EIO' });
@@ -77,10 +81,34 @@ function durableSync(fd) {
   }
   fs.fsyncSync(fd);
 }
-function exclusiveLock() {
-  const flag = fs.constants.UV_FS_O_EXLOCK;
-  if (typeof flag !== 'number' || !flag) throw Error('exclusive file locking unavailable');
-  return flag;
+const UV_FS_O_EXLOCK = 0x10000000; // libuv include/uv/win.h
+const busy = () => Object.assign(Error('exclusive owner unavailable'), { code: 'EBUSY' });
+/** Windows owner lease on `path`; returns its release function. */
+function windowsLease(path) {
+  windowsPathCheck(path, true, false);
+  if (typeof process.versions.bun === 'string' && typeof import.meta.require === 'function') {
+    const { dlopen, FFIType, ptr } = import.meta.require('bun:ffi');
+    const k32 = dlopen('kernel32.dll', {
+      CreateFileW: { args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr], returns: FFIType.i64 },
+      GetLastError: { args: [], returns: FFIType.u32 },
+      CloseHandle: { args: [FFIType.i64], returns: FFIType.i32 },
+    });
+    const wide = Buffer.from(`${path.replace(/\//g, '\\')}\0`, 'utf16le');
+    // GENERIC_READ | GENERIC_WRITE, share mode 0, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL.
+    const handle = k32.symbols.CreateFileW(ptr(wide), 0xC0000000, 0, null, 4, 0x80, null);
+    if (handle === -1n || handle === 0n) {
+      const error = k32.symbols.GetLastError();
+      k32.close();
+      // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
+      if (error === 32 || error === 33) throw busy();
+      throw Object.assign(Error('owner lease unavailable'), { code: 'EIO' });
+    }
+    return () => { k32.symbols.CloseHandle(handle); k32.close(); };
+  }
+  let fd;
+  try { fd = openSync(path, fs.constants.O_CREAT | fs.constants.O_RDWR | UV_FS_O_EXLOCK, 0o600); }
+  catch (e) { if (e.code === 'EBUSY') throw busy(); throw e; }
+  return () => closeSync(fd);
 }
 export function acquire(root, { create = false } = {}) {
   if (isMainThread || !['linux', 'darwin', 'win32'].includes(process.platform)) throw Error('dedicated Linux, macOS or Windows worker required');
@@ -88,8 +116,12 @@ export function acquire(root, { create = false } = {}) {
   try {
     base = fs.realpathSync(root);
     dir = checkedOpen(base, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY, true);
-    lock = checkedOpen(`${base}/owner.lock`, fs.constants.O_CREAT | fs.constants.O_RDWR | (windows ? exclusiveLock() : 0));
-    lockExclusive(lock);
+    if (windows) lock = windowsLease(`${base}/owner.lock`);
+    else {
+      const fd = checkedOpen(`${base}/owner.lock`, fs.constants.O_CREAT | fs.constants.O_RDWR);
+      lock = () => closeSync(fd);
+      lockExclusive(fd);
+    }
     // Validate BOTH preexisting files before SQLite can mutate either one.
     for (const name of ['wallet.db', 'wallet.db-journal']) {
       try { closeSync(checkedOpen(`${base}/${name}`, fs.constants.O_RDONLY)); }
@@ -97,10 +129,10 @@ export function acquire(root, { create = false } = {}) {
     }
   } catch (e) {
     if (dir !== undefined) closeSync(dir);
-    if (lock !== undefined) closeSync(lock);
-    const busy = e.code === 'EBUSY';
-    throw Object.assign(Error(busy ? 'exclusive owner unavailable' : 'STORAGE_OPEN_FAILED'),
-      { code: busy ? 'EBUSY' : 'EIO' });
+    if (lock !== undefined) lock();
+    const held = e.code === 'EBUSY';
+    throw Object.assign(Error(held ? 'exclusive owner unavailable' : 'STORAGE_OPEN_FAILED'),
+      { code: held ? 'EBUSY' : 'EIO' });
   }
   const descriptors = new Set();
   const host = {
@@ -129,7 +161,7 @@ export function acquire(root, { create = false } = {}) {
       if (!host.owned) return;
       // Hold the lease until every data descriptor is closed.
       for (const fd of descriptors) { fs.closeSync(fd); descriptors.delete(fd); }
-      descriptors.clear(); if (dir !== undefined) fs.closeSync(dir); fs.closeSync(lock); host.owned = false;
+      descriptors.clear(); if (dir !== undefined) fs.closeSync(dir); lock(); host.owned = false;
     },
   };
   return host;
