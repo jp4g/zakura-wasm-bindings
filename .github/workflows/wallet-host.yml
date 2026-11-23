@@ -25,3 +25,15 @@ jobs:
         run: node tests/node-fs-lock.mjs
       - name: Owner lease (Bun)
         run: bun tests/node-fs-lock.mjs
+      - name: Diagnose (temporary)
+        if: failure() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          node -e "const c=require('fs').constants; console.log('EXLOCK', c.UV_FS_O_EXLOCK, 'NOFOLLOW', c.O_NOFOLLOW, 'DIRECTORY', c.O_DIRECTORY)"
+          bun -e "const c=require('fs').constants; console.log('bun EXLOCK', c.UV_FS_O_EXLOCK)"
+          node -e "
+          const fs=require('fs'),os=require('os'),p=require('path');
+          const d=fs.realpathSync(fs.mkdtempSync(p.join(os.tmpdir(),'x-')));
+          const f=d+'/owner.lock';
+          try{const fd=fs.openSync(f,fs.constants.O_CREAT|fs.constants.O_RDWR|(fs.constants.UV_FS_O_EXLOCK||0),0o600);const s=fs.fstatSync(fd);console.log('opened nlink',s.nlink,'isFile',s.isFile());
+          try{fs.openSync(f,fs.constants.O_RDWR|(fs.constants.UV_FS_O_EXLOCK||0))}catch(e){console.log('second open',e.code)}}catch(e){console.log('open failed',e.code,e.message)}"
