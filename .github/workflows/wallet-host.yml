@@ -26,14 +26,20 @@ jobs:
       - name: Owner lease (Bun)
         run: bun tests/node-fs-lock.mjs
       - name: Diagnose (temporary)
-        if: failure() && runner.os == 'Windows'
+        if: always() && runner.os == 'Windows'
         shell: bash
         run: |
-          node -e "const c=require('fs').constants; console.log('EXLOCK', c.UV_FS_O_EXLOCK, 'NOFOLLOW', c.O_NOFOLLOW, 'DIRECTORY', c.O_DIRECTORY)"
-          bun -e "const c=require('fs').constants; console.log('bun EXLOCK', c.UV_FS_O_EXLOCK)"
-          node -e "
+          cat > probe.cjs <<'JS'
           const fs=require('fs'),os=require('os'),p=require('path');
+          const X=0x10000000;
           const d=fs.realpathSync(fs.mkdtempSync(p.join(os.tmpdir(),'x-')));
           const f=d+'/owner.lock';
-          try{const fd=fs.openSync(f,fs.constants.O_CREAT|fs.constants.O_RDWR|(fs.constants.UV_FS_O_EXLOCK||0),0o600);const s=fs.fstatSync(fd);console.log('opened nlink',s.nlink,'isFile',s.isFile());
-          try{fs.openSync(f,fs.constants.O_RDWR|(fs.constants.UV_FS_O_EXLOCK||0))}catch(e){console.log('second open',e.code)}}catch(e){console.log('open failed',e.code,e.message)}"
+          const who=process.versions.bun?'bun':'node';
+          try{const fd=fs.openSync(f,fs.constants.O_CREAT|fs.constants.O_RDWR|X,0o600);console.log(who,'first open ok');
+          try{fs.openSync(f,fs.constants.O_RDWR|X);console.log(who,'second exlock open SUCCEEDED (no lock)')}catch(e){console.log(who,'second exlock open',e.code)}
+          try{fs.openSync(f,fs.constants.O_RDWR);console.log(who,'second plain open SUCCEEDED')}catch(e){console.log(who,'second plain open',e.code)}
+          fs.closeSync(fd);try{const g=fs.openSync(f,fs.constants.O_RDWR|X);console.log(who,'reopen after close ok');fs.closeSync(g)}catch(e){console.log(who,'reopen after close',e.code)}
+          }catch(e){console.log(who,'first open failed',e.code,e.message)}
+          JS
+          node probe.cjs
+          bun probe.cjs
